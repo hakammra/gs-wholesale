@@ -5,12 +5,40 @@ import { useNotification } from '../../context/NotificationContext';
 import { getDefaultLogoDataUrl } from '../../lib/defaultLogo';
 
 export default function CompanySettings() {
-  const { companySettings, setCompanySettings, saveCompanySettings, resetAllData, resetTransactionsOnly } = useBusiness();
+  const {
+    companySettings,
+    setCompanySettings,
+    saveCompanySettings,
+    resetAllData,
+    resetTransactionsOnly,
+    exportAllData,
+    importAllData
+  } = useBusiness();
   const { user, trustedDevice, setupDevicePin, removeDevicePin } = useAuth();
   const { notifySuccess, notifyError, notifyWarning } = useNotification();
 
   const [form, setForm] = useState(companySettings);
   const logoInputRef = useRef(null);
+  const restoreFileInputRef = useRef(null);
+
+  const handleRestoreFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const json = JSON.parse(event.target.result);
+        const ok = await importAllData(json);
+        if (ok) {
+          if (json.companySettings) setForm(json.companySettings);
+        }
+      } catch (err) {
+        notifyError('Invalid JSON backup file: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   const handleLogoFileChange = (e) => {
     const file = e.target.files?.[0];
@@ -385,6 +413,45 @@ export default function CompanySettings() {
             Save Settings
           </button>
         </form>
+      </div>
+
+      {/* Data Backup & Cloud Migration Card */}
+      <div className="panel-card" style={{ marginTop: 24, borderLeft: '4px solid #3b82f6' }}>
+        <div style={{ marginBottom: 14 }}>
+          <h3 style={{ margin: 0, fontSize: 16, color: '#93c5fd', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>📦</span> System Data Backup & Local-to-Cloud Migration
+          </h3>
+          <p style={{ margin: '4px 0 0', color: 'var(--muted)', fontSize: 12.5 }}>
+            Because browser storage is isolated to each domain (e.g. localhost vs your Cloudflare URL), use this tool to export all your documents, sales invoices, stock balances, customers, and products into a backup file and import them directly into your deployed cloud site.
+          </p>
+        </div>
+
+        <input
+          type="file"
+          ref={restoreFileInputRef}
+          style={{ display: 'none' }}
+          accept=".json,application/json"
+          onChange={handleRestoreFileChange}
+        />
+
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={exportAllData}
+            className="primary-button"
+            style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
+          >
+            <span>📥</span> Download Full Data Backup (JSON)
+          </button>
+          <button
+            type="button"
+            onClick={() => restoreFileInputRef.current?.click()}
+            className="secondary-button"
+            style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#93c5fd', borderColor: 'rgba(59, 130, 246, 0.4)', fontWeight: 700 }}
+          >
+            <span>📤</span> Restore / Import Data from Backup (JSON)
+          </button>
+        </div>
       </div>
 
       {/* Data Management & System Reset */}

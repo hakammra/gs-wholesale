@@ -2264,6 +2264,101 @@ export function BusinessProvider({ children }) {
     notifySuccess(`Purchase document ${pur.doc_no || ''} deleted and inventory reversed`);
   };
 
+  // Full System Data Backup (JSON Download)
+  const exportAllData = () => {
+    const backupPayload = {
+      version: '1.0',
+      exported_at: new Date().toISOString(),
+      companySettings,
+      currencies,
+      categories,
+      brands,
+      products,
+      stockBalances,
+      customers,
+      suppliers,
+      bankAccounts,
+      supplierOrders,
+      supplierAdvances,
+      transitShipments,
+      purchases,
+      salesDocuments,
+      cheques,
+      payments,
+      stockMovements
+    };
+
+    const jsonString = JSON.stringify(backupPayload, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `gs_wholesale_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    notifySuccess('Complete data backup exported successfully!');
+  };
+
+  // Full System Data Restore (From JSON File)
+  const importAllData = async (backupPayload) => {
+    try {
+      if (!backupPayload || typeof backupPayload !== 'object') {
+        throw new Error('Invalid backup file format');
+      }
+
+      if (backupPayload.companySettings) setCompanySettings(backupPayload.companySettings);
+      if (backupPayload.currencies) setCurrencies(backupPayload.currencies);
+      if (backupPayload.categories) setCategories(backupPayload.categories);
+      if (backupPayload.brands) setBrands(backupPayload.brands);
+      if (backupPayload.products) setProducts(backupPayload.products);
+      if (backupPayload.stockBalances) setStockBalances(backupPayload.stockBalances);
+      if (backupPayload.customers) setCustomers(backupPayload.customers);
+      if (backupPayload.suppliers) setSuppliers(backupPayload.suppliers);
+      if (backupPayload.bankAccounts) setBankAccounts(backupPayload.bankAccounts);
+      if (backupPayload.supplierOrders) setSupplierOrders(backupPayload.supplierOrders);
+      if (backupPayload.supplierAdvances) setSupplierAdvances(backupPayload.supplierAdvances);
+      if (backupPayload.transitShipments) setTransitShipments(backupPayload.transitShipments);
+      if (backupPayload.purchases) setPurchases(backupPayload.purchases);
+      if (backupPayload.salesDocuments) setSalesDocuments(backupPayload.salesDocuments);
+      if (backupPayload.cheques) setCheques(backupPayload.cheques);
+      if (backupPayload.payments) setPayments(backupPayload.payments);
+      if (backupPayload.stockMovements) setStockMovements(backupPayload.stockMovements);
+
+      const storageMappings = {
+        gs_wholesale_settings: backupPayload.companySettings,
+        gs_wholesale_settings_user_customized: 'true',
+        gs_wholesale_currencies: backupPayload.currencies,
+        gs_wholesale_categories: backupPayload.categories,
+        gs_wholesale_brands: backupPayload.brands,
+        gs_wholesale_products: backupPayload.products,
+        gs_wholesale_stock: backupPayload.stockBalances,
+        gs_wholesale_customers: backupPayload.customers,
+        gs_wholesale_suppliers: backupPayload.suppliers,
+        gs_wholesale_bank_accounts: backupPayload.bankAccounts,
+        gs_wholesale_supplier_orders: backupPayload.supplierOrders,
+        gs_wholesale_advances: backupPayload.supplierAdvances,
+        gs_wholesale_transit: backupPayload.transitShipments,
+        gs_wholesale_purchases: backupPayload.purchases,
+        gs_wholesale_sales_docs: backupPayload.salesDocuments,
+        gs_wholesale_cheques: backupPayload.cheques,
+        gs_wholesale_payments: backupPayload.payments,
+        gs_wholesale_stock_movements: backupPayload.stockMovements
+      };
+
+      Object.entries(storageMappings).forEach(([k, v]) => {
+        if (v !== undefined) {
+          localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+        }
+      });
+
+      notifySuccess('All documents, products, inventory, and records restored successfully!');
+      return true;
+    } catch (err) {
+      notifyError('Failed to restore backup: ' + err.message);
+      return false;
+    }
+  };
+
   // Clean Reset: Wipe All Added Data
   const resetAllData = async () => {
     setProducts([]);
@@ -2912,7 +3007,7 @@ export function BusinessProvider({ children }) {
       salesDocuments, setSalesDocuments, postSalesDocument, convertDocument, cancelReservation, deleteSalesDocument,
       cheques, setCheques, updateChequeStatus,
       payments, setPayments, recordDirectExpense, recordDirectIncome, deletePayment,
-      resetAllData, resetTransactionsOnly,
+      resetAllData, resetTransactionsOnly, exportAllData, importAllData,
       dataLoading, refreshData: fetchSupabaseData
     }}>
       {children}
