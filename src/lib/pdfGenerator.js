@@ -13,7 +13,42 @@ const formatBillDate = (dStr) => {
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
 };
 
-export function generateInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4') {
+/**
+ * Triggers the browser native print catalog dialog without downloading the file
+ */
+function triggerBrowserPrint(pdf) {
+  try {
+    pdf.autoPrint();
+    const blob = pdf.output('blob');
+    const blobUrl = URL.createObjectURL(blob);
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.src = blobUrl;
+    document.body.appendChild(iframe);
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+      } catch (e) {
+        window.open(blobUrl, '_blank');
+      }
+      setTimeout(() => {
+        try { document.body.removeChild(iframe); } catch (_) {}
+        URL.revokeObjectURL(blobUrl);
+      }, 60000);
+    };
+  } catch (e) {
+    console.error('Print trigger error:', e);
+    pdf.save('document.pdf');
+  }
+}
+
+export function buildInvoicePDFDoc(doc, companySettings = {}, customer = null, paperSize = 'A4') {
   const docConfig = paperSize === 'A5' ? { orientation: 'landscape', format: 'a5' } : { orientation: 'portrait', format: 'a4' };
   const pdf = new jsPDF(docConfig);
 
@@ -124,18 +159,19 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
         : 'Unpaid';
   pdf.text(statusStr, metaColValX, metaY + 15);
 
-  // 4. Line Items Table (Clean bordered grid matching screenshot)
+  // 4. Line Items Table
   const tableStartY = metaY + 22;
+  const rawItems = doc.items || doc.lines || doc.line_items || [];
 
-  const tableData = (doc.items || []).map(it => {
+  const tableData = rawItems.map(it => {
     const isW = !!it.is_warranty_replacement;
-    const prodName = it.product?.name || it.product_name || it.item_code || 'Product Item';
+    const prodName = it.product?.name || it.product_name || it.name || it.item_name || it.item_code || it.sku || 'Product Item';
     const subNote = it.warranty_note || (isW ? 'Warranty Replacement' : '') || it.notes || '';
     const desc = subNote ? `${prodName}\n${subNote}` : prodName;
 
-    const qty = it.qty || 1;
-    const unitPrice = isW ? 0 : Number(it.unit_price || 0);
-    const discountAmt = Number(it.discount_amount || 0);
+    const qty = Number(it.qty || it.received_sellable_qty || it.shipped_qty || 1);
+    const unitPrice = isW ? 0 : Number(it.unit_price || it.unit_cost_snapshot || it.price || 0);
+    const discountAmt = Number(it.discount_amount || it.discount_total || 0);
     const lineTotal = isW ? 0 : Number(it.line_total || ((qty * unitPrice) - discountAmt));
 
     const discountStr = it.discount_pct
@@ -274,12 +310,210 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.text(footerText, margin, footY);
   pdf.text(`Page 1`, pageWidth - margin, footY, { align: 'right' });
 
+  return pdf;
+}
+
+export function generateInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4') {
+  const pdf = buildInvoicePDFDoc(doc, companySettings, customer, paperSize);
   pdf.save(`${doc.doc_no || 'Invoice'}.pdf`);
+  return pdf;
+}
+
+export const downloadInvoicePDF = generateInvoicePDF;
+
+export function printInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4') {
+  const pdf = buildInvoicePDFDoc(doc, companySettings, customer, paperSize);
+  triggerBrowserPrint(pdf);
+}
+
+export function buildPurchaseInvoicePDFDoc(purchaseDoc, companySettings = {}, paperSize = 'A4') {
+  const docConfig = paperSize === 'A5' ? { orientation: 'landscape', format: 'a5' } : { orientation: 'portrait', format: 'a4' };
+  const pdf = new jsPDF(docConfig);
+
+  const businessName = companySettings.business_name || 'Gatronix Store - Wholesale';
+  const addressLine1 = companySettings.address_line1 || '43/H1, Kandy Road';
+  const addressLine2 = companySettings.address_line2 || '20260 Madawala Bazaar';
+  const phone = companySettings.phone || '0766600466';
+  const email = companySettings.email || 'gatronix11@gmail.com';
+  const footerText = companySettings.footer_text || 'Created with Gatronix POS - www.gatronix.com';
+
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 14;
+
+  // 1. Header Left: Document Title & Company Contact Info
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(15);
+  pdf.setTextColor(20, 20, 20);
+  pdf.text('WHOLESALE PURCHASE RECEIPT (GRN)', margin, 18);
+
+  pdf.setFontSize(10.5);
+  pdf.setFont('helvetica', 'bold');
+  pdf.text(businessName, margin, 25);
+
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(9);
+  pdf.setTextColor(50, 50, 50);
+
+  let curY = 30;
+  if (addressLine1) {
+    pdf.text(addressLine1, margin, curY);
+    curY += 4.5;
+  }
+  if (addressLine2) {
+    pdf.text(addressLine2, margin, curY);
+    curY += 4.5;
+  }
+  pdf.text(`Phone:             ${phone}`, margin, curY);
+  curY += 4.5;
+  pdf.text(`Email:             ${email}`, margin, curY);
+
+  // 2. Header Right: Company Logo Image
+  const logoData = companySettings.logo_url || getDefaultLogoDataUrl();
+  if (logoData) {
+    try {
+      const logoSize = 38;
+      const logoX = pageWidth - margin - logoSize;
+      pdf.addImage(logoData, 'PNG', logoX, 12, logoSize, logoSize);
+    } catch (e) {
+      console.warn('Could not add logo image to PDF:', e);
+    }
+  }
+
+  // 3. Supplier / Vendor & Document Metadata Row
+  const metaY = Math.max(curY + 8, 54);
+
+  // Left: Supplier
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(9.5);
+  pdf.setTextColor(20, 20, 20);
+  pdf.text('Supplier / Vendor', margin, metaY);
+
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(9.5);
+  const suppName = purchaseDoc.supplier_name || purchaseDoc.supplier?.name || 'Direct Supplier';
+  pdf.text(suppName, margin, metaY + 5.5);
+
+  // Right: Metadata table
+  const metaColLabelX = pageWidth - margin - 75;
+  const metaColValX = pageWidth - margin - 35;
+
+  pdf.setFontSize(9);
+  pdf.setTextColor(40, 40, 40);
+
+  pdf.text('GRN / Doc No.:', metaColLabelX, metaY);
+  pdf.setFont('helvetica', 'normal');
+  pdf.text(purchaseDoc.doc_no || purchaseDoc.grn_no || '-', metaColValX, metaY);
+
+  pdf.text('Receipt Date:', metaColLabelX, metaY + 5);
+  pdf.text(formatBillDate(purchaseDoc.receipt_date || purchaseDoc.created_at), metaColValX, metaY + 5);
+
+  if (purchaseDoc.shipment_no) {
+    pdf.text('Transit Ref:', metaColLabelX, metaY + 10);
+    pdf.text(purchaseDoc.shipment_no, metaColValX, metaY + 10);
+  }
+
+  pdf.text('Status:', metaColLabelX, metaY + 15);
+  pdf.text(purchaseDoc.status === 'draft' ? 'Draft' : 'Received / In Stock', metaColValX, metaY + 15);
+
+  // 4. Line Items Table
+  const tableStartY = metaY + 22;
+  const rawItems = purchaseDoc.items || purchaseDoc.lines || purchaseDoc.line_items || [];
+
+  const tableData = rawItems.map((item, idx) => {
+    const prodName = item.product?.name || item.product_name || item.name || item.item_name || item.item_code || item.sku || 'Product Item';
+    const skuCode = item.item_code || item.sku || item.product?.item_code || '';
+    const desc = skuCode ? `${prodName}\nCode: ${skuCode}` : prodName;
+
+    const qty = Number(item.received_sellable_qty || item.shipped_qty || item.qty || 1);
+    const unitCost = Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr || item.foreign_unit_cost || item.unit_cost || item.cost || 0);
+    const lineTotal = Number(item.line_total || (qty * unitCost));
+
+    return [
+      (idx + 1).toString(),
+      desc,
+      `${qty} Units`,
+      fmtNum(unitCost),
+      fmtNum(lineTotal)
+    ];
+  });
+
+  const grandTotal = Number(purchaseDoc.total_amount_lkr || purchaseDoc.total_landed_lkr || 0);
+
+  autoTable(pdf, {
+    startY: tableStartY,
+    head: [['#', 'Item Description', 'Qty Received', 'Unit Cost (LKR)', 'Total (LKR)']],
+    body: tableData,
+    foot: [
+      [
+        { content: 'Grand Total Landed Cost', colSpan: 4, styles: { halign: 'left', fontStyle: 'bold', fillColor: [248, 248, 248] } },
+        { content: fmtRs(grandTotal), styles: { halign: 'right', fontStyle: 'bold', fillColor: [248, 248, 248] } }
+      ]
+    ],
+    theme: 'grid',
+    headStyles: {
+      fillColor: [255, 255, 255],
+      textColor: [0, 0, 0],
+      fontStyle: 'bold',
+      fontSize: 9,
+      lineWidth: 0.15,
+      lineColor: [210, 210, 210],
+      cellPadding: 3.5
+    },
+    bodyStyles: {
+      fontSize: 8.5,
+      textColor: [30, 30, 30],
+      lineWidth: 0.1,
+      lineColor: [230, 230, 230],
+      cellPadding: 3.5
+    },
+    columnStyles: {
+      0: { cellWidth: 12, halign: 'center' },
+      1: { cellWidth: 'auto' },
+      2: { cellWidth: 28, halign: 'center' },
+      3: { cellWidth: 35, halign: 'right' },
+      4: { cellWidth: 38, halign: 'right' }
+    }
+  });
+
+  // 5. Signatures
+  const sigY = pageHeight - 32;
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(8.5);
+  pdf.setTextColor(80, 80, 80);
+
+  pdf.text('.......................................................................', margin + 10, sigY);
+  pdf.text('Received & Verified By', margin + 25, sigY + 5);
+
+  pdf.text('.......................................................................', pageWidth - margin - 75, sigY);
+  pdf.text('Store Manager Signature', pageWidth - margin - 60, sigY + 5);
+
+  // 6. Page Footer
+  const footY = pageHeight - 12;
+  pdf.setFontSize(8);
+  pdf.setTextColor(140, 140, 140);
+  pdf.text(footerText, margin, footY);
+  pdf.text(`Page 1`, pageWidth - margin, footY, { align: 'right' });
+
+  return pdf;
+}
+
+export function generatePurchaseInvoicePDF(purchaseDoc, companySettings = {}, paperSize = 'A4') {
+  const pdf = buildPurchaseInvoicePDFDoc(purchaseDoc, companySettings, paperSize);
+  pdf.save(`${purchaseDoc.doc_no || purchaseDoc.grn_no || 'Purchase_Doc'}.pdf`);
+  return pdf;
+}
+
+export const downloadPurchaseInvoicePDF = generatePurchaseInvoicePDF;
+
+export function printPurchaseInvoicePDF(purchaseDoc, companySettings = {}, paperSize = 'A4') {
+  const pdf = buildPurchaseInvoicePDFDoc(purchaseDoc, companySettings, paperSize);
+  triggerBrowserPrint(pdf);
 }
 
 export function generateStatementPDF(customer, invoices, payments, companySettings = {}) {
   const pdf = new jsPDF({ orientation: 'portrait', format: 'a4' });
-  const businessName = companySettings.business_name || 'GS WHOLESALE COMPUTER PRODUCTS';
+  const businessName = companySettings.business_name || 'Gatronix Store - Wholesale';
 
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(16);
@@ -313,95 +547,5 @@ export function generateStatementPDF(customer, invoices, payments, companySettin
   });
 
   pdf.save(`Statement_${customer.customer_code}.pdf`);
-}
-
-export function generatePurchaseInvoicePDF(purchaseDoc, companySettings = {}) {
-  const pdf = new jsPDF({ orientation: 'portrait', format: 'a4' });
-  const businessName = companySettings.business_name || 'GS WHOLESALE COMPUTER PRODUCTS';
-  const tagline = companySettings.tagline || 'Direct Importers & Wholesale Distribution';
-  const phone = companySettings.phone || '+94 77 123 4567';
-  const address = companySettings.address || 'Colombo, Sri Lanka';
-
-  // Header
-  pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(16);
-  pdf.text(businessName, 14, 18);
-
-  pdf.setFont('helvetica', 'normal');
-  pdf.setFontSize(9);
-  pdf.text(tagline, 14, 23);
-  pdf.text(`${address} | Tel: ${phone}`, 14, 28);
-
-  // Document Badge
-  pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(14);
-  pdf.text('PURCHASE DOCUMENT', pdf.internal.pageSize.getWidth() - 14, 18, { align: 'right' });
-
-  pdf.setFontSize(10);
-  pdf.setFont('helvetica', 'normal');
-  pdf.text(`Doc No: ${purchaseDoc.doc_no || purchaseDoc.grn_no || '-'}`, pdf.internal.pageSize.getWidth() - 14, 24, { align: 'right' });
-  pdf.text(`Date: ${formatDate(purchaseDoc.receipt_date)}`, pdf.internal.pageSize.getWidth() - 14, 29, { align: 'right' });
-  if (purchaseDoc.shipment_no) {
-    pdf.text(`Transit Ref: ${purchaseDoc.shipment_no}`, pdf.internal.pageSize.getWidth() - 14, 34, { align: 'right' });
-  }
-
-  // Divider
-  pdf.setLineWidth(0.5);
-  pdf.setDrawColor(200, 200, 200);
-  pdf.line(14, 38, pdf.internal.pageSize.getWidth() - 14, 38);
-
-  // Supplier Block
-  pdf.setFont('helvetica', 'bold');
-  pdf.text('SUPPLIER / VENDOR:', 14, 45);
-  pdf.setFont('helvetica', 'normal');
-  pdf.text(`${purchaseDoc.supplier_name || 'Supplier'}`, 14, 50);
-  if (purchaseDoc.payment_type) {
-    pdf.text(`Payment Terms: ${purchaseDoc.payment_type.toUpperCase()}`, 14, 55);
-  }
-
-  // Table
-  const tableData = (purchaseDoc.items || []).map((item, idx) => {
-    const cost = item.final_landed_unit_cost_lkr || item.unit_cost_lkr || item.foreign_unit_cost || 0;
-    const qty = item.received_sellable_qty || item.shipped_qty || item.qty || 0;
-    return [
-      idx + 1,
-      item.product_name || item.product?.name || item.product_id || 'Product',
-      `${qty} Units`,
-      formatCurrency(cost),
-      formatCurrency(qty * cost)
-    ];
-  });
-
-  autoTable(pdf, {
-    startY: 62,
-    head: [['#', 'Item Description', 'Received Qty', 'Unit Cost (LKR)', 'Line Total (LKR)']],
-    body: tableData,
-    theme: 'grid',
-    headStyles: { fillColor: [40, 169, 230], textColor: [255, 255, 255], fontStyle: 'bold' },
-    styles: { fontSize: 9, cellPadding: 3 },
-    columnStyles: {
-      0: { cellWidth: 10, halign: 'center' },
-      1: { cellWidth: 'auto' },
-      2: { cellWidth: 30, halign: 'center' },
-      3: { cellWidth: 36, halign: 'right' },
-      4: { cellWidth: 38, halign: 'right' }
-    }
-  });
-
-  const finalY = pdf.lastAutoTable.finalY + 8;
-  const rightX = pdf.internal.pageSize.getWidth() - 14;
-
-  pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(11);
-  pdf.text(`Total Purchase Amount (LKR):`, rightX - 65, finalY + 2);
-  pdf.text(formatCurrency(purchaseDoc.total_amount_lkr || purchaseDoc.total_landed_lkr || 0), rightX, finalY + 2, { align: 'right' });
-
-  // Footer notes & signature
-  pdf.setFont('helvetica', 'italic');
-  pdf.setFontSize(8);
-  pdf.text('Stock verified and entered into inventory warehouse balances.', 14, finalY + 20);
-  pdf.text('Store Manager Signature: _______________________', rightX - 75, finalY + 20);
-
-  pdf.save(`${purchaseDoc.doc_no || purchaseDoc.grn_no || 'Purchase_Doc'}.pdf`);
 }
 

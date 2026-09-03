@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
-import { generatePurchaseInvoicePDF } from '../../lib/pdfGenerator';
+import { generatePurchaseInvoicePDF, printPurchaseInvoicePDF } from '../../lib/pdfGenerator';
 import DocumentProductTree from '../../components/common/DocumentProductTree';
 
 export default function PurchaseDocumentsList({ onNavigateTab }) {
@@ -383,6 +383,10 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
 
   const handleDownloadPDF = (doc) => {
     generatePurchaseInvoicePDF(doc, companySettings);
+  };
+
+  const handlePrintPDF = (doc) => {
+    printPurchaseInvoicePDF(doc, companySettings);
   };
 
   // RENDER FULL IN-PAGE WORKSPACE WHEN CREATING NEW DIRECT PURCHASE
@@ -1111,8 +1115,18 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                             onClick={(e) => { e.stopPropagation(); handleDownloadPDF(doc); }}
                             className="secondary-button small-button"
                             style={{ padding: '4px 8px', color: 'var(--primary)' }}
+                            title="Download PDF"
                           >
-                            PDF
+                            📥 PDF
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handlePrintPDF(doc); }}
+                            className="secondary-button small-button"
+                            style={{ padding: '4px 8px' }}
+                            title="Print Document"
+                          >
+                            🖨 Print
                           </button>
                         </>
                       )}
@@ -1163,14 +1177,22 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                 Supplier: <strong>{selectedDoc.supplier_name}</strong> &bull; Received Date: {formatDate(selectedDoc.receipt_date)} {selectedDoc.shipment_no && `• Transit Ref: ${selectedDoc.shipment_no}`}
               </small>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
                 type="button"
                 onClick={() => handleDownloadPDF(selectedDoc)}
+                className="secondary-button small-button"
+                style={{ fontWeight: 700, color: 'var(--primary)' }}
+              >
+                📥 Download PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => handlePrintPDF(selectedDoc)}
                 className="primary-button small-button"
                 style={{ fontWeight: 700 }}
               >
-                Print / Download PDF
+                🖨 Print Document
               </button>
               <button
                 type="button"

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
-import { generateInvoicePDF } from '../../lib/pdfGenerator';
+import { generateInvoicePDF, printInvoicePDF } from '../../lib/pdfGenerator';
 import { exportToExcel, generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
 
 export default function SalesDocumentsList() {
@@ -75,6 +75,17 @@ export default function SalesDocumentsList() {
                   generateInvoicePDF(selectedDoc, companySettings, cust);
                 }}
                 className="toolbar-button bright"
+              >
+                <span className="icon">📥</span>
+                <span>Download PDF</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const cust = customers.find(c => c.id === selectedDoc.customer_id) || selectedDoc.customer;
+                  printInvoicePDF(selectedDoc, companySettings, cust);
+                }}
+                className="toolbar-button"
               >
                 <span className="icon">🖨</span>
                 <span>Print Document</span>
