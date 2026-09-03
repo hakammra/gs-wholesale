@@ -69,7 +69,7 @@ const safeGet = (key, fallback) => {
 };
 
 export function BusinessProvider({ children }) {
-  const { notifySuccess, notifyError } = useNotification();
+  const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useNotification();
   const [dataLoading, setDataLoading] = useState(false);
 
   // States initialized safely from local storage cache
