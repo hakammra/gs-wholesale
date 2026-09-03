@@ -56,7 +56,15 @@ export default function CashflowOverview() {
     // 1. Explicit Payments (Recorded via Settlement, Expenses, Advances, Sales Receipts)
     payments.forEach(p => {
       // If this payment belongs to a sales document, ensure the sales document is still active and not deleted
-      if (p.payment_type === 'sales_receipt' || p.payment_type === 'customer_advance') {
+      const isSalesDocPayment = p.payment_type === 'sales_receipt' ||
+                                p.payment_type === 'customer_advance' ||
+                                (p.payment_type === 'customer_payment' && (
+                                  (p.reference && (p.reference.startsWith('INV-') || p.reference.startsWith('RES-') || p.reference.startsWith('QT-'))) ||
+                                  (p.payment_no && (p.payment_no.includes('INV-') || p.payment_no.includes('RES-'))) ||
+                                  (p.notes && (p.notes.includes('INV-') || p.notes.includes('RES-')))
+                                ));
+
+      if (isSalesDocPayment) {
         const isDocStillActive = salesDocuments.some(d =>
           d.status !== 'cancelled' &&
           (

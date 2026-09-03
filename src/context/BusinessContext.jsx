@@ -472,12 +472,48 @@ export function BusinessProvider({ children }) {
       if (!docErr && docData && docData.length > 0) setSalesDocuments(docData);
 
       // 9. Transit Shipments
-      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*)').order('created_at', { ascending: false });
-      if (!trnErr && trnData && trnData.length > 0) setTransitShipments(trnData);
+      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
+      if (!trnErr && trnData && trnData.length > 0) {
+        const enrichedTransit = trnData.map(t => ({
+          ...t,
+          status: t.status === 'preparing' ? 'draft' : (t.status === 'received' ? 'arrived' : t.status),
+          supplier_name: t.supplier?.name || 'Supplier',
+          items: (t.items || []).map(it => ({
+            ...it,
+            qty: Number(it.shipped_qty) || 0,
+            shipped_qty: Number(it.shipped_qty) || 0,
+            foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
+            unit_cost: Number(it.foreign_unit_cost) || 0,
+            final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
+          }))
+        }));
+        setTransitShipments(enrichedTransit);
+      }
 
       // 10. Purchase Receipts
-      const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts').select('*, items:purchase_receipt_items(*)').order('created_at', { ascending: false });
-      if (!grnErr && grnData && grnData.length > 0) setPurchases(grnData);
+      const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts').select('*, items:purchase_receipt_items(*), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)').order('created_at', { ascending: false });
+      if (!grnErr && grnData && grnData.length > 0) {
+        const enrichedPurchases = grnData.map(g => ({
+          ...g,
+          doc_no: g.grn_no || g.doc_no,
+          grn_no: g.grn_no || g.doc_no,
+          total_amount_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
+          total_landed_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
+          supplier_name: g.supplier?.name || 'Supplier',
+          shipment_no: g.transit_shipment?.shipment_no || '',
+          status: g.is_fully_received ? 'received' : 'draft',
+          items: (g.items || []).map(it => ({
+            ...it,
+            qty: Number(it.received_sellable_qty) || 0,
+            shipped_qty: Number(it.received_sellable_qty) || 0,
+            received_sellable_qty: Number(it.received_sellable_qty) || 0,
+            damaged_qty: Number(it.damaged_qty) || 0,
+            unit_cost_lkr: Number(it.unit_cost_lkr) || 0,
+            final_landed_unit_cost_lkr: Number(it.unit_cost_lkr) || 0
+          }))
+        }));
+        setPurchases(enrichedPurchases);
+      }
 
       // 11. Cheques
       const { data: chqData, error: chqErr } = await supabase.from('cheque_register').select('*').order('created_at', { ascending: false });
@@ -1782,6 +1818,21 @@ export function BusinessProvider({ children }) {
       }
     }
 
+    try {
+      if (supabase && isValidUUID(shipmentId)) {
+        const dbStatus = newStatus === 'draft' ? 'preparing' : (newStatus === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(newStatus) ? newStatus : 'in_transit'));
+        supabase.from('transit_shipments').update({
+          status: dbStatus,
+          shipping_date: updatedData.document_date || updatedData.shipping_date || existingShp.shipping_date,
+          currency: updatedData.currency || existingShp.currency,
+          exchange_rate_snapshot: rate,
+          foreign_items_subtotal: foreignSubtotal,
+          total_estimated_cost_lkr: totalCostLkr,
+          notes: updatedData.notes || existingShp.notes
+        }).eq('id', shipmentId).then(() => {}).catch(() => {});
+      }
+    } catch (e) {}
+
     return updatedShipment;
   };
 
@@ -2345,6 +2396,17 @@ export function BusinessProvider({ children }) {
       }, ...prev]);
     }
 
+    try {
+      if (supabase && isValidUUID(purchaseId)) {
+        supabase.from('purchase_receipts').update({
+          is_fully_received: updatedPurchaseDoc.status !== 'draft',
+          total_landed_lkr: totalLandedLkr,
+          receipt_date: updatedPurchaseDoc.receipt_date,
+          notes: updatedPurchaseDoc.notes
+        }).eq('id', purchaseId).then(() => {}).catch(() => {});
+      }
+    } catch (e) {}
+
     return updatedPurchaseDoc;
   };
 
@@ -2418,8 +2480,12 @@ export function BusinessProvider({ children }) {
 
     try {
       if (supabase) {
-        await supabase.from('purchase_receipt_items').delete().eq('receipt_id', purchaseId);
+        await supabase.from('purchase_receipt_items').delete().eq('purchase_receipt_id', purchaseId);
         await supabase.from('purchase_receipts').delete().eq('id', purchaseId);
+        const refNo = pur.doc_no || pur.grn_no;
+        if (refNo) {
+          await supabase.from('payments').delete().or(`reference.eq.${refNo},payment_no.eq.PAY-${refNo},payment_no.eq.PAY-PUR-${refNo}`);
+        }
       }
     } catch (e) {}
 
@@ -2604,6 +2670,8 @@ export function BusinessProvider({ children }) {
       for (const shp of transitShipments) {
         const sId = isValidUUID(shp.id) ? shp.id : generateUUID();
         const suppId = isValidUUID(shp.supplier_id) ? shp.supplier_id : (suppliers[0]?.id || null);
+        const dbStatus = shp.status === 'draft' ? 'preparing' : (shp.status === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(shp.status) ? shp.status : 'in_transit'));
+
         await supabase.from('transit_shipments').upsert({
           id: sId,
           shipment_no: shp.shipment_no,
@@ -2614,24 +2682,89 @@ export function BusinessProvider({ children }) {
           foreign_items_subtotal: Number(shp.foreign_items_subtotal) || 0,
           total_landed_expenses_lkr: Number(shp.total_landed_expenses_lkr) || 0,
           total_estimated_cost_lkr: Number(shp.total_estimated_cost_lkr) || 0,
-          status: shp.status || 'in_transit'
+          status: dbStatus,
+          notes: shp.notes || null
         });
 
         if (shp.items && shp.items.length > 0) {
-          const itemsToUpsert = shp.items.map(it => ({
-            id: isValidUUID(it.id) ? it.id : generateUUID(),
-            transit_shipment_id: sId,
-            product_id: it.product_id || it.id,
-            shipped_qty: Number(it.shipped_qty || it.qty) || 1,
-            foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
-          })).filter(r => isValidUUID(r.product_id));
+          const itemsToUpsert = shp.items.map(it => {
+            const prodId = it.product_id || it.id;
+            if (!isValidUUID(prodId)) return null;
+            return {
+              id: isValidUUID(it.id) ? it.id : generateUUID(),
+              transit_shipment_id: sId,
+              product_id: prodId,
+              shipped_qty: Number(it.shipped_qty || it.qty) || 1,
+              foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
+            };
+          }).filter(Boolean);
           if (itemsToUpsert.length > 0) {
             await supabase.from('transit_shipment_items').upsert(itemsToUpsert);
           }
         }
       }
 
-      // 6. Sync Sales Documents
+      // 6. Sync Purchases (Goods Receipts)
+      for (const pur of purchases) {
+        const purId = isValidUUID(pur.id) ? pur.id : generateUUID();
+        const suppId = isValidUUID(pur.supplier_id) ? pur.supplier_id : (suppliers[0]?.id || null);
+        let linkTransitId = isValidUUID(pur.transit_shipment_id) ? pur.transit_shipment_id : null;
+
+        if (!linkTransitId) {
+          linkTransitId = generateUUID();
+          await supabase.from('transit_shipments').upsert({
+            id: linkTransitId,
+            shipment_no: `DIR-TRN-${pur.doc_no || pur.grn_no || purId.slice(0, 6)}`,
+            supplier_id: suppId,
+            shipping_date: pur.receipt_date || new Date().toISOString().slice(0, 10),
+            currency: 'LKR',
+            exchange_rate_snapshot: 1,
+            foreign_items_subtotal: Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0,
+            total_landed_expenses_lkr: 0,
+            total_estimated_cost_lkr: Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0,
+            status: 'received',
+            notes: 'Direct purchase companion shipment'
+          });
+        }
+
+        const totalLanded = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
+        await supabase.from('purchase_receipts').upsert({
+          id: purId,
+          grn_no: pur.doc_no || pur.grn_no || `PUR-${Date.now()}`,
+          transit_shipment_id: linkTransitId,
+          supplier_id: suppId,
+          receipt_date: pur.receipt_date || new Date().toISOString().slice(0, 10),
+          currency: 'LKR',
+          exchange_rate_snapshot: 1,
+          foreign_subtotal: totalLanded,
+          items_lkr_total: totalLanded,
+          landed_expenses_lkr_total: 0,
+          total_landed_lkr: totalLanded,
+          supplier_goods_payable_lkr: totalLanded,
+          is_fully_received: pur.status !== 'draft',
+          notes: pur.notes || null
+        });
+
+        if (pur.items && pur.items.length > 0) {
+          const grnItems = pur.items.map(it => {
+            const prodId = it.product_id || it.id;
+            if (!isValidUUID(prodId)) return null;
+            return {
+              id: isValidUUID(it.id) ? it.id : generateUUID(),
+              purchase_receipt_id: purId,
+              product_id: prodId,
+              received_sellable_qty: Number(it.received_sellable_qty || it.qty || it.shipped_qty) || 0,
+              damaged_qty: Number(it.damaged_qty) || 0
+            };
+          }).filter(Boolean);
+
+          if (grnItems.length > 0) {
+            await supabase.from('purchase_receipt_items').upsert(grnItems);
+          }
+        }
+      }
+
+      // 7. Sync Sales Documents
       for (const doc of salesDocuments) {
         const dId = isValidUUID(doc.id) ? doc.id : generateUUID();
         const custId = isValidUUID(doc.customer_id) ? doc.customer_id : null;
@@ -3305,11 +3438,10 @@ export function BusinessProvider({ children }) {
         await supabase.from('sales_document_items').delete().eq('sales_document_id', docId);
         await supabase.from('sales_documents').delete().eq('id', docId);
         if (docNo) {
-          await supabase.from('payments').delete().or(`sales_doc_id.eq.${docId},reference.eq.${docNo}`);
-          await supabase.from('cheque_register').delete().or(`sales_doc_id.eq.${docId},sales_doc_no.eq.${docNo}`);
+          await supabase.from('payments').delete().or(`reference.eq.${docNo},payment_no.eq.PAY-${docNo},payment_no.eq.PAY-INV-${docNo},notes.ilike.%${docNo}%`);
+          await supabase.from('cheque_register').delete().or(`sales_document_id.eq.${docId},notes.ilike.%${docNo}%`);
         } else {
-          await supabase.from('payments').delete().eq('sales_doc_id', docId);
-          await supabase.from('cheque_register').delete().eq('sales_doc_id', docId);
+          await supabase.from('cheque_register').delete().eq('sales_document_id', docId);
         }
       }
     } catch (e) {
