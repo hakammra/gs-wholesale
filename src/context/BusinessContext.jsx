@@ -1106,10 +1106,11 @@ export function BusinessProvider({ children }) {
     const cust = customers.find(isCustomerMatch);
     const payDate = payment_date || new Date().toISOString().slice(0, 10);
     const payNo = `SETTLE-${Date.now().toString().slice(-4)}`;
+    const paymentId = generateUUID();
 
     // 1. Create Payment Record (Recorded as Inflow in Cash Flow & Ledger)
     const newPayment = {
-      id: 'pay-' + Date.now(),
+      id: paymentId,
       payment_no: payNo,
       payment_date: payDate,
       payment_type: 'customer_settlement',
@@ -1126,6 +1127,31 @@ export function BusinessProvider({ children }) {
     };
 
     setPayments(prev => [newPayment, ...prev]);
+
+    try {
+      if (supabase) {
+        const cId = isValidUUID(cust?.id) ? cust.id : (isValidUUID(customer_id) ? customer_id : null);
+        supabase.from('payments').insert({
+          id: paymentId,
+          payment_no: payNo,
+          payment_type: 'customer_payment',
+          party_type: 'customer',
+          party_id: cId,
+          payment_date: payDate,
+          amount: amt,
+          payment_method: payment_method || 'cash',
+          reference: reference || (cheque_no ? `Cheque #${cheque_no}` : 'Customer Credit Settlement'),
+          notes: notes || ''
+        }).then(() => {}).catch(e => console.warn('Supabase payment insert notice:', e));
+
+        if (cId) {
+          const cur = Number(cust?.current_receivable) || 0;
+          supabase.from('customers').update({
+            current_receivable: Math.max(0, cur - amt)
+          }).eq('id', cId).then(() => {}).catch(() => {});
+        }
+      }
+    } catch (e) {}
 
     // 2. If cheque, record in cheque register
     if (payment_method === 'cheque' && cheque_no) {
@@ -1488,10 +1514,11 @@ export function BusinessProvider({ children }) {
     const rate = Number(shipmentData.exchange_rate_snapshot) || 305.5;
     const lkrFob = foreignSubtotal * rate;
     const isDraft = shipmentData.status === 'draft';
+    const trnId = shipmentData.id || generateUUID();
 
     const newShp = {
       ...shipmentData,
-      id: 'trn-' + Date.now(),
+      id: trnId,
       shipment_no: shpNo,
       status: isDraft ? 'draft' : (shipmentData.status || 'in_transit'),
       foreign_items_subtotal: foreignSubtotal,
@@ -1564,6 +1591,62 @@ export function BusinessProvider({ children }) {
         } : s));
       }
     }
+
+    try {
+      if (supabase) {
+        const suppId = isValidUUID(shipmentData.supplier_id) ? shipmentData.supplier_id : (suppliers[0]?.id || null);
+        supabase.from('transit_shipments').upsert({
+          id: trnId,
+          shipment_no: shpNo,
+          supplier_id: suppId,
+          supplier_invoice_ref: shipmentData.supplier_invoice_ref || shipmentData.external_reference || null,
+          shipment_ref: shipmentData.shipment_ref || null,
+          tracking_or_bl_no: shipmentData.tracking_or_bl_no || null,
+          courier_freight_company: shipmentData.courier_freight_company || null,
+          origin_country: shipmentData.origin_country || 'China',
+          shipping_date: shipmentData.document_date || shipmentData.shipping_date || new Date().toISOString().slice(0, 10),
+          currency: shipmentData.currency || 'USD',
+          exchange_rate_snapshot: rate,
+          foreign_items_subtotal: foreignSubtotal,
+          total_landed_expenses_lkr: 0,
+          total_estimated_cost_lkr: lkrFob,
+          status: isDraft ? 'preparing' : 'in_transit',
+          notes: shipmentData.notes || null
+        }).then(() => {
+          if (newShp.items && newShp.items.length > 0) {
+            const trnItems = newShp.items.map(it => {
+              const pId = it.product_id || it.id;
+              if (!isValidUUID(pId)) return null;
+              return {
+                id: generateUUID(),
+                transit_shipment_id: trnId,
+                product_id: pId,
+                shipped_qty: Number(it.shipped_qty || it.qty) || 1,
+                foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
+              };
+            }).filter(Boolean);
+
+            if (trnItems.length > 0) {
+              supabase.from('transit_shipment_items').upsert(trnItems).then(() => {}).catch(() => {});
+            }
+          }
+
+          if (!isDraft) {
+            for (const it of (newShp.items || [])) {
+              const pId = it.product_id || it.id;
+              if (isValidUUID(pId)) {
+                const cur = stockBalances[pId] || { qty_on_hand: 0, qty_in_transit: 0 };
+                const qty = Number(it.shipped_qty || it.qty) || 1;
+                supabase.from('stock_balances').upsert({
+                  product_id: pId,
+                  qty_in_transit: (cur.qty_in_transit || 0) + qty
+                }).then(() => {}).catch(() => {});
+              }
+            }
+          }
+        }).catch(err => console.warn('Supabase transit shipment sync notice:', err));
+      }
+    } catch (e) {}
 
     return newShp;
   };
@@ -1791,7 +1874,7 @@ export function BusinessProvider({ children }) {
 
     try {
       if (supabase) {
-        await supabase.from('transit_shipment_items').delete().eq('shipment_id', shipmentId);
+        await supabase.from('transit_shipment_items').delete().eq('transit_shipment_id', shipmentId);
         await supabase.from('transit_shipments').delete().eq('id', shipmentId);
       }
     } catch (e) {}
@@ -1808,6 +1891,7 @@ export function BusinessProvider({ children }) {
     const receiptDate = receiptData.receipt_date || new Date().toISOString().slice(0, 10);
     const grnNo = `PUR-DOC-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
     const isDraft = receiptData.status === 'draft';
+    const purchaseId = receiptData.id || generateUUID();
 
     const items = receiptData.items || (shp?.items || []).map(it => {
       const unitCost = Number(it.foreign_unit_cost || it.unit_cost || it.final_landed_unit_cost_lkr) || 0;
@@ -1835,7 +1919,7 @@ export function BusinessProvider({ children }) {
     const supplierName = supplier?.name || receiptData.supplier_name || 'Local / Overseas Supplier';
 
     const newPurchaseDoc = {
-      id: 'pur-' + Date.now(),
+      id: purchaseId,
       doc_no: grnNo,
       grn_no: grnNo,
       status: isDraft ? 'draft' : (receiptData.status || 'received'),
@@ -1966,6 +2050,84 @@ export function BusinessProvider({ children }) {
         created_at: new Date().toISOString()
       }, ...prev]);
     }
+
+    try {
+      if (supabase) {
+        const suppId = isValidUUID(newPurchaseDoc.supplier_id) ? newPurchaseDoc.supplier_id : (suppliers[0]?.id || null);
+        let linkTransitId = isValidUUID(newPurchaseDoc.transit_shipment_id) ? newPurchaseDoc.transit_shipment_id : null;
+
+        // If direct purchase without an existing transit shipment, create companion transit shipment
+        const performSupabaseSync = async () => {
+          if (!linkTransitId) {
+            linkTransitId = generateUUID();
+            await supabase.from('transit_shipments').upsert({
+              id: linkTransitId,
+              shipment_no: `DIR-TRN-${newPurchaseDoc.doc_no}`,
+              supplier_id: suppId,
+              shipping_date: receiptDate,
+              currency: 'LKR',
+              exchange_rate_snapshot: 1,
+              foreign_items_subtotal: totalLandedLkr,
+              total_landed_expenses_lkr: 0,
+              total_estimated_cost_lkr: totalLandedLkr,
+              status: 'received',
+              notes: 'Direct purchase companion shipment'
+            });
+          }
+
+          await supabase.from('purchase_receipts').upsert({
+            id: purchaseId,
+            grn_no: grnNo,
+            transit_shipment_id: linkTransitId,
+            supplier_id: suppId,
+            receipt_date: receiptDate,
+            currency: 'LKR',
+            exchange_rate_snapshot: 1,
+            foreign_subtotal: totalLandedLkr,
+            items_lkr_total: totalLandedLkr,
+            landed_expenses_lkr_total: 0,
+            total_landed_lkr: totalLandedLkr,
+            supplier_goods_payable_lkr: totalLandedLkr,
+            is_fully_received: !isDraft,
+            notes: newPurchaseDoc.notes || null
+          });
+
+          if (items && items.length > 0) {
+            const grnItems = items.map(it => {
+              if (!isValidUUID(it.product_id)) return null;
+              return {
+                id: generateUUID(),
+                purchase_receipt_id: purchaseId,
+                product_id: it.product_id,
+                received_sellable_qty: Number(it.received_sellable_qty) || 0,
+                damaged_qty: Number(it.damaged_qty) || 0
+              };
+            }).filter(Boolean);
+
+            if (grnItems.length > 0) {
+              await supabase.from('purchase_receipt_items').upsert(grnItems);
+            }
+          }
+
+          if (!isDraft) {
+            for (const it of items) {
+              if (isValidUUID(it.product_id)) {
+                const cur = stockBalances[it.product_id] || { qty_on_hand: 0, qty_available: 0, qty_in_transit: 0 };
+                const sellable = Number(it.received_sellable_qty) || 0;
+                const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
+                await supabase.from('stock_balances').upsert({
+                  product_id: it.product_id,
+                  qty_on_hand: (cur.qty_on_hand || 0) + sellable,
+                  qty_available: (cur.qty_available || 0) + sellable,
+                  qty_in_transit: Math.max(0, (cur.qty_in_transit || 0) - shipped)
+                });
+              }
+            }
+          }
+        };
+        performSupabaseSync().catch(e => console.warn('Supabase receivePurchaseShipment sync notice:', e));
+      }
+    } catch (e) {}
 
     return newPurchaseDoc;
   };
@@ -2359,6 +2521,179 @@ export function BusinessProvider({ children }) {
     }
   };
 
+  // Push all local data & documents to Supabase Cloud
+  const syncLocalDataToCloud = async () => {
+    if (!supabase) {
+      notifyError('Supabase database client is not connected');
+      return false;
+    }
+
+    try {
+      notifyWarning('Syncing all local data and documents to Supabase Cloud...');
+
+      // 1. Sync Company Settings
+      if (companySettings) {
+        await supabase.from('company_settings').upsert({
+          id: isValidUUID(companySettings.id) ? companySettings.id : '00000000-0000-0000-0000-000000000001',
+          business_name: companySettings.business_name || 'GS Wholesale',
+          tagline: companySettings.tagline || '',
+          tax_number: companySettings.tax_number || '',
+          phone: companySettings.phone || '',
+          whatsapp: companySettings.whatsapp || '',
+          email: companySettings.email || '',
+          address: companySettings.address || '',
+          base_currency: companySettings.base_currency || 'LKR'
+        });
+      }
+
+      // 2. Sync Customers
+      for (const c of customers) {
+        const cId = isValidUUID(c.id) ? c.id : generateUUID();
+        await supabase.from('customers').upsert({
+          id: cId,
+          customer_code: c.customer_code || `CUST-${(c.business_name || 'C').slice(0, 3).toUpperCase()}`,
+          business_name: c.business_name || 'Customer',
+          phone: c.phone || null,
+          billing_address: c.billing_address || null,
+          current_receivable: Number(c.current_receivable) || 0,
+          credit_limit: Number(c.credit_limit) || 0,
+          credit_days: Number(c.credit_days) || 0,
+          is_active: true
+        });
+      }
+
+      // 3. Sync Products & Stock Balances
+      for (const p of products) {
+        const pId = isValidUUID(p.id) ? p.id : generateUUID();
+        await supabase.from('products').upsert({
+          id: pId,
+          item_code: p.item_code || p.sku || `ITEM-${(p.name || 'P').slice(0, 3).toUpperCase()}`,
+          name: p.name,
+          wholesale_price: Number(p.wholesale_price) || 0,
+          retail_price: Number(p.retail_price) || 0,
+          dealer_price: Number(p.dealer_price) || 0,
+          weighted_cost_lkr: Number(p.weighted_cost_lkr || p.cost_price || p.cost) || 0,
+          is_active: true
+        });
+
+        const stock = stockBalances[p.id] || stockBalances[pId] || { qty_on_hand: 0, qty_available: 0, qty_in_transit: 0, qty_reserved: 0 };
+        await supabase.from('stock_balances').upsert({
+          product_id: pId,
+          qty_on_hand: Number(stock.qty_on_hand) || 0,
+          qty_available: Number(stock.qty_available) || 0,
+          qty_reserved: Number(stock.qty_reserved) || 0,
+          qty_in_transit: Number(stock.qty_in_transit) || 0
+        });
+      }
+
+      // 4. Sync Suppliers
+      for (const s of suppliers) {
+        const sId = isValidUUID(s.id) ? s.id : generateUUID();
+        await supabase.from('suppliers').upsert({
+          id: sId,
+          supplier_code: s.supplier_code || 'SUP-001',
+          name: s.name,
+          country: s.country || 'China',
+          phone: s.phone || null,
+          email: s.email || null,
+          is_active: true
+        });
+      }
+
+      // 5. Sync Transit Shipments
+      for (const shp of transitShipments) {
+        const sId = isValidUUID(shp.id) ? shp.id : generateUUID();
+        const suppId = isValidUUID(shp.supplier_id) ? shp.supplier_id : (suppliers[0]?.id || null);
+        await supabase.from('transit_shipments').upsert({
+          id: sId,
+          shipment_no: shp.shipment_no,
+          supplier_id: suppId,
+          shipping_date: shp.shipping_date || new Date().toISOString().slice(0, 10),
+          currency: shp.currency || 'USD',
+          exchange_rate_snapshot: Number(shp.exchange_rate_snapshot) || 300,
+          foreign_items_subtotal: Number(shp.foreign_items_subtotal) || 0,
+          total_landed_expenses_lkr: Number(shp.total_landed_expenses_lkr) || 0,
+          total_estimated_cost_lkr: Number(shp.total_estimated_cost_lkr) || 0,
+          status: shp.status || 'in_transit'
+        });
+
+        if (shp.items && shp.items.length > 0) {
+          const itemsToUpsert = shp.items.map(it => ({
+            id: isValidUUID(it.id) ? it.id : generateUUID(),
+            transit_shipment_id: sId,
+            product_id: it.product_id || it.id,
+            shipped_qty: Number(it.shipped_qty || it.qty) || 1,
+            foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
+          })).filter(r => isValidUUID(r.product_id));
+          if (itemsToUpsert.length > 0) {
+            await supabase.from('transit_shipment_items').upsert(itemsToUpsert);
+          }
+        }
+      }
+
+      // 6. Sync Sales Documents
+      for (const doc of salesDocuments) {
+        const dId = isValidUUID(doc.id) ? doc.id : generateUUID();
+        const custId = isValidUUID(doc.customer_id) ? doc.customer_id : null;
+        await supabase.from('sales_documents').upsert({
+          id: dId,
+          doc_type: doc.doc_type === 'quotation' ? 'quotation' : (doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order') ? 'sales_order' : 'sales_invoice',
+          doc_no: doc.doc_no,
+          customer_id: custId,
+          doc_date: doc.doc_date || new Date().toISOString().slice(0, 10),
+          subtotal: Number(doc.items_subtotal || doc.subtotal) || 0,
+          grand_total: Number(doc.grand_total) || 0,
+          paid_amount: Number(doc.paid_amount) || 0,
+          balance_due: Number(doc.balance_due) || 0,
+          status: doc.status === 'draft' ? 'draft' : 'completed',
+          payment_status: doc.payment_status || 'unpaid',
+          notes: doc.notes || null
+        });
+
+        if (doc.items && doc.items.length > 0) {
+          const docItems = doc.items.map(it => {
+            const pId = it.product?.id || it.product_id;
+            if (!isValidUUID(pId)) return null;
+            return {
+              id: isValidUUID(it.id) ? it.id : generateUUID(),
+              sales_document_id: dId,
+              product_id: pId,
+              qty: Number(it.qty) || 1,
+              unit_price: Number(it.unit_price) || 0,
+              line_total: Number(it.line_total) || (Number(it.qty || 1) * Number(it.unit_price || 0))
+            };
+          }).filter(Boolean);
+          if (docItems.length > 0) {
+            await supabase.from('sales_document_items').upsert(docItems);
+          }
+        }
+      }
+
+      // 7. Sync Payments
+      for (const p of payments) {
+        const pId = isValidUUID(p.id) ? p.id : generateUUID();
+        await supabase.from('payments').upsert({
+          id: pId,
+          payment_no: p.payment_no || `PAY-${pId.slice(-6)}`,
+          payment_type: p.payment_type || 'customer_payment',
+          party_type: p.party_type || 'customer',
+          party_id: isValidUUID(p.party_id) ? p.party_id : null,
+          payment_date: p.payment_date || new Date().toISOString().slice(0, 10),
+          amount: Number(p.amount) || 0,
+          payment_method: p.payment_method || 'cash',
+          reference: p.reference || null,
+          notes: p.notes || null
+        });
+      }
+
+      notifySuccess('All local documents, inventory, and records pushed to Supabase Cloud! Your phone and other devices can now see all data.');
+      return true;
+    } catch (e) {
+      notifyError('Sync error: ' + e.message);
+      return false;
+    }
+  };
+
   // Clean Reset: Wipe All Added Data
   const resetAllData = async () => {
     setProducts([]);
@@ -2494,9 +2829,11 @@ export function BusinessProvider({ children }) {
       ? (paidAmount >= grandTotal ? 'paid_advance' : paidAmount > 0 ? 'partial_advance' : 'reserved')
       : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid');
 
+    const docId = docData.id || generateUUID();
+
     const newDoc = {
       ...docData,
-      id: 'doc-' + Date.now(),
+      id: docId,
       doc_no: docNo,
       doc_date: new Date().toISOString().slice(0, 10),
       items_subtotal: itemsSubtotal,
@@ -2735,6 +3072,99 @@ export function BusinessProvider({ children }) {
         created_at: new Date().toISOString()
       }, ...prev]);
     }
+
+    try {
+      if (supabase) {
+        const custId = isValidUUID(docData.customer_id) ? docData.customer_id : null;
+        const performDocSync = async () => {
+          await supabase.from('sales_documents').upsert({
+            id: docId,
+            doc_type: isQuotation ? 'quotation' : isReservation ? 'sales_order' : 'sales_invoice',
+            doc_no: docNo,
+            customer_id: custId,
+            doc_date: newDoc.doc_date,
+            subtotal: itemsSubtotal,
+            grand_total: grandTotal,
+            paid_amount: paidAmount,
+            balance_due: balanceDue,
+            status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'paid' : 'partially_paid'),
+            payment_status: isReservation ? (paidAmount >= grandTotal ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid') : isQuotation ? 'unpaid' : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid'),
+            notes: docData.notes || (isCod ? 'Cash on Delivery (COD)' : null)
+          });
+
+          if (docData.items && docData.items.length > 0) {
+            const itemsToInsert = docData.items.map(it => {
+              const pId = it.product?.id || it.product_id;
+              if (!isValidUUID(pId)) return null;
+              const unitPrice = it.is_warranty_replacement ? 0 : (Number(it.unit_price) || 0);
+              const qty = Number(it.qty) || 1;
+              return {
+                id: generateUUID(),
+                sales_document_id: docId,
+                product_id: pId,
+                qty: qty,
+                unit_type: it.unit_type || 'unit',
+                conversion_factor: 1,
+                base_qty: qty,
+                unit_price: unitPrice,
+                line_total: Math.max(0, qty * unitPrice - (Number(it.discount_amount) || 0)),
+                notes: it.notes || (it.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
+              };
+            }).filter(Boolean);
+
+            if (itemsToInsert.length > 0) {
+              await supabase.from('sales_document_items').upsert(itemsToInsert);
+            }
+          }
+
+          if (docData.doc_type === 'sales_invoice' || isReservation) {
+            for (const it of (docData.items || [])) {
+              const pId = it.product?.id || it.product_id;
+              if (isValidUUID(pId)) {
+                const cur = stockBalances[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0 };
+                const qty = Number(it.qty) || 1;
+                const newOnHand = isReservation ? (cur.qty_on_hand || 0) : Math.max(0, (cur.qty_on_hand || 0) - qty);
+                const newReserved = isReservation ? (cur.qty_reserved || 0) + qty : (releasedFromReservation ? Math.max(0, (cur.qty_reserved || 0) - qty) : (cur.qty_reserved || 0));
+                const newAvail = isReservation ? Math.max(0, (cur.qty_available || 0) - qty) : (releasedFromReservation ? (cur.qty_available || 0) : Math.max(0, (cur.qty_available || 0) - qty));
+
+                await supabase.from('stock_balances').upsert({
+                  product_id: pId,
+                  qty_on_hand: newOnHand,
+                  qty_reserved: newReserved,
+                  qty_available: newAvail
+                });
+              }
+            }
+          }
+
+          if (custId && balanceDue > 0) {
+            const foundCust = customers.find(c => c.id === custId);
+            if (foundCust) {
+              await supabase.from('customers').update({
+                current_receivable: (Number(foundCust.current_receivable) || 0) + balanceDue
+              }).eq('id', custId);
+            }
+          }
+
+          if (paidAmount > 0 && !isQuotation) {
+            await supabase.from('payments').insert({
+              id: generateUUID(),
+              payment_no: `PAY-${docNo}`,
+              payment_type: 'customer_payment',
+              party_type: 'customer',
+              party_id: custId,
+              payment_date: new Date().toISOString().slice(0, 10),
+              amount: paidAmount,
+              payment_method: isCod ? 'cash' : (docData.payment_lines?.[0]?.method || 'cash'),
+              reference: docNo,
+              notes: `Payment for ${docNo}`
+            });
+          }
+        };
+
+        performDocSync().catch(err => console.warn('Supabase postSalesDocument sync notice:', err));
+      }
+    } catch (e) {}
 
     return newDoc;
   };
@@ -3007,7 +3437,7 @@ export function BusinessProvider({ children }) {
       salesDocuments, setSalesDocuments, postSalesDocument, convertDocument, cancelReservation, deleteSalesDocument,
       cheques, setCheques, updateChequeStatus,
       payments, setPayments, recordDirectExpense, recordDirectIncome, deletePayment,
-      resetAllData, resetTransactionsOnly, exportAllData, importAllData,
+      resetAllData, resetTransactionsOnly, exportAllData, importAllData, syncLocalDataToCloud,
       dataLoading, refreshData: fetchSupabaseData
     }}>
       {children}

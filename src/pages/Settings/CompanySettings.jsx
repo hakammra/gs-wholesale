@@ -12,12 +12,14 @@ export default function CompanySettings() {
     resetAllData,
     resetTransactionsOnly,
     exportAllData,
-    importAllData
+    importAllData,
+    syncLocalDataToCloud
   } = useBusiness();
   const { user, trustedDevice, setupDevicePin, removeDevicePin } = useAuth();
   const { notifySuccess, notifyError, notifyWarning } = useNotification();
 
   const [form, setForm] = useState(companySettings);
+  const [isSyncing, setIsSyncing] = useState(false);
   const logoInputRef = useRef(null);
   const restoreFileInputRef = useRef(null);
 
@@ -31,6 +33,8 @@ export default function CompanySettings() {
         const ok = await importAllData(json);
         if (ok) {
           if (json.companySettings) setForm(json.companySettings);
+          // Auto push to Supabase so mobile devices receive the imported data immediately
+          await syncLocalDataToCloud();
         }
       } catch (err) {
         notifyError('Invalid JSON backup file: ' + err.message);
@@ -434,14 +438,42 @@ export default function CompanySettings() {
           onChange={handleRestoreFileChange}
         />
 
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={async () => {
+              setIsSyncing(true);
+              try {
+                await syncLocalDataToCloud();
+              } finally {
+                setIsSyncing(false);
+              }
+            }}
+            disabled={isSyncing}
+            style={{
+              background: '#2563eb',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              padding: '8px 16px',
+              fontSize: 13,
+              fontWeight: 800,
+              cursor: isSyncing ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              boxShadow: '0 2px 8px rgba(37, 99, 235, 0.4)'
+            }}
+          >
+            <span>☁️</span> {isSyncing ? 'Syncing to Supabase...' : 'Push All Local Data to Supabase Cloud'}
+          </button>
           <button
             type="button"
             onClick={exportAllData}
-            className="primary-button"
+            className="secondary-button"
             style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
           >
-            <span>📥</span> Download Full Data Backup (JSON)
+            <span>📥</span> Download Backup (JSON)
           </button>
           <button
             type="button"
@@ -449,7 +481,7 @@ export default function CompanySettings() {
             className="secondary-button"
             style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#93c5fd', borderColor: 'rgba(59, 130, 246, 0.4)', fontWeight: 700 }}
           >
-            <span>📤</span> Restore / Import Data from Backup (JSON)
+            <span>📤</span> Restore from Backup (JSON)
           </button>
         </div>
       </div>
