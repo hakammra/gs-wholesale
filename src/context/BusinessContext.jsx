@@ -515,6 +515,18 @@ export function BusinessProvider({ children }) {
         setPurchases(enrichedPurchases);
       }
 
+      // Auto-migrate local documents to cloud if cloud has no purchase/transit records yet
+      const localPurchases = safeGet('gs_wholesale_purchases', []);
+      const localTransit = safeGet('gs_wholesale_transit', []);
+      if (((!grnData || grnData.length === 0) && localPurchases.length > 0) ||
+          ((!trnData || trnData.length === 0) && localTransit.length > 0)) {
+        setTimeout(() => {
+          if (typeof syncLocalDataToCloud === 'function') {
+            syncLocalDataToCloud().catch(() => {});
+          }
+        }, 1500);
+      }
+
       // 11. Cheques
       const { data: chqData, error: chqErr } = await supabase.from('cheque_register').select('*').order('created_at', { ascending: false });
       if (!chqErr && chqData && chqData.length > 0) setCheques(chqData);
@@ -2629,8 +2641,14 @@ export function BusinessProvider({ children }) {
       }
 
       // 3. Sync Products & Stock Balances
+      const productIdMap = {};
       for (const p of products) {
         const pId = isValidUUID(p.id) ? p.id : generateUUID();
+        productIdMap[p.id] = pId;
+        if (p.name) productIdMap[p.name.toLowerCase().trim()] = pId;
+        if (p.item_code) productIdMap[p.item_code.toLowerCase().trim()] = pId;
+        if (p.sku) productIdMap[p.sku.toLowerCase().trim()] = pId;
+
         await supabase.from('products').upsert({
           id: pId,
           item_code: p.item_code || p.sku || `ITEM-${(p.name || 'P').slice(0, 3).toUpperCase()}`,
@@ -2652,9 +2670,22 @@ export function BusinessProvider({ children }) {
         });
       }
 
-      // 4. Sync Suppliers
+      // Also index existing Supabase products
+      const { data: dbProducts } = await supabase.from('products').select('id, name, item_code');
+      (dbProducts || []).forEach(p => {
+        productIdMap[p.id] = p.id;
+        if (p.name) productIdMap[p.name.toLowerCase().trim()] = p.id;
+        if (p.item_code) productIdMap[p.item_code.toLowerCase().trim()] = p.id;
+      });
+      const defaultProductId = dbProducts?.[0]?.id || Object.values(productIdMap)[0] || null;
+
+      // 4. Sync Suppliers & resolve defaultSupplierId
+      let defaultSupplierId = 'efe224ca-693a-4eb2-ba78-8e436d6e0beb';
+      const supplierIdMap = {};
       for (const s of suppliers) {
         const sId = isValidUUID(s.id) ? s.id : generateUUID();
+        supplierIdMap[s.id] = sId;
+        if (s.name) supplierIdMap[s.name.toLowerCase().trim()] = sId;
         await supabase.from('suppliers').upsert({
           id: sId,
           supplier_code: s.supplier_code || 'SUP-001',
@@ -2666,10 +2697,19 @@ export function BusinessProvider({ children }) {
         });
       }
 
+      const { data: dbSuppliers } = await supabase.from('suppliers').select('id, name');
+      (dbSuppliers || []).forEach(s => {
+        supplierIdMap[s.id] = s.id;
+        if (s.name) supplierIdMap[s.name.toLowerCase().trim()] = s.id;
+      });
+      if (dbSuppliers && dbSuppliers.length > 0) {
+        defaultSupplierId = dbSuppliers[0].id;
+      }
+
       // 5. Sync Transit Shipments
       for (const shp of transitShipments) {
         const sId = isValidUUID(shp.id) ? shp.id : generateUUID();
-        const suppId = isValidUUID(shp.supplier_id) ? shp.supplier_id : (suppliers[0]?.id || null);
+        const suppId = supplierIdMap[shp.supplier_id] || (isValidUUID(shp.supplier_id) ? shp.supplier_id : defaultSupplierId);
         const dbStatus = shp.status === 'draft' ? 'preparing' : (shp.status === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(shp.status) ? shp.status : 'in_transit'));
 
         await supabase.from('transit_shipments').upsert({
@@ -2688,7 +2728,8 @@ export function BusinessProvider({ children }) {
 
         if (shp.items && shp.items.length > 0) {
           const itemsToUpsert = shp.items.map(it => {
-            const prodId = it.product_id || it.id;
+            const rawPId = it.product_id || it.id;
+            const prodId = productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId);
             if (!isValidUUID(prodId)) return null;
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
@@ -2707,7 +2748,7 @@ export function BusinessProvider({ children }) {
       // 6. Sync Purchases (Goods Receipts)
       for (const pur of purchases) {
         const purId = isValidUUID(pur.id) ? pur.id : generateUUID();
-        const suppId = isValidUUID(pur.supplier_id) ? pur.supplier_id : (suppliers[0]?.id || null);
+        const suppId = supplierIdMap[pur.supplier_id] || (isValidUUID(pur.supplier_id) ? pur.supplier_id : defaultSupplierId);
         let linkTransitId = isValidUUID(pur.transit_shipment_id) ? pur.transit_shipment_id : null;
 
         if (!linkTransitId) {
@@ -2747,7 +2788,8 @@ export function BusinessProvider({ children }) {
 
         if (pur.items && pur.items.length > 0) {
           const grnItems = pur.items.map(it => {
-            const prodId = it.product_id || it.id;
+            const rawPId = it.product_id || it.id;
+            const prodId = productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId);
             if (!isValidUUID(prodId)) return null;
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
