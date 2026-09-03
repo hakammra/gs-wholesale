@@ -539,18 +539,9 @@ export function BusinessProvider({ children }) {
       const { data: currData, error: currErr } = await supabase.from('currencies').select('*');
       if (!currErr && currData && currData.length > 0) setCurrencies(currData);
 
-      const { data: compData, error: compErr } = await supabase.from('company_settings').select('*').limit(1).single();
+      const { data: compData, error: compErr } = await supabase.from('company_settings').select('*').order('updated_at', { ascending: false }).limit(1).maybeSingle();
       if (!compErr && compData) {
-        const localSaved = safeGet('gs_wholesale_settings', null);
-        const isCustomized = localStorage.getItem('gs_wholesale_settings_user_customized') === 'true';
-        if (isCustomized && localSaved && localSaved.business_name) {
-          setCompanySettings(localSaved);
-          if (compData.business_name !== localSaved.business_name || compData.email !== localSaved.email) {
-            supabase.from('company_settings').update(localSaved).eq('id', compData.id).catch(() => {});
-          }
-        } else {
-          setCompanySettings(compData);
-        }
+        setCompanySettings(compData);
       }
 
     } catch (err) {
@@ -743,7 +734,7 @@ export function BusinessProvider({ children }) {
       localStorage.setItem('gs_wholesale_settings', JSON.stringify(settingsData));
       localStorage.setItem('gs_wholesale_settings_user_customized', 'true');
       if (supabase) {
-        const { data: existing } = await supabase.from('company_settings').select('id').limit(1);
+        const { data: existing } = await supabase.from('company_settings').select('id').order('updated_at', { ascending: false }).limit(1);
         if (existing && existing.length > 0) {
           await supabase.from('company_settings').update({
             ...settingsData,
@@ -753,7 +744,8 @@ export function BusinessProvider({ children }) {
           await supabase.from('company_settings').insert([{
             ...settingsData,
             id: generateUUID(),
-            created_at: new Date().toISOString()
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
           }]);
         }
       }

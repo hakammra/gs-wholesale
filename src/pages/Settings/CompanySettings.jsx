@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -22,6 +22,12 @@ export default function CompanySettings() {
   const [isSyncing, setIsSyncing] = useState(false);
   const logoInputRef = useRef(null);
   const restoreFileInputRef = useRef(null);
+
+  useEffect(() => {
+    if (companySettings && Object.keys(companySettings).length > 0) {
+      setForm(companySettings);
+    }
+  }, [companySettings]);
 
   const handleRestoreFileChange = (e) => {
     const file = e.target.files?.[0];
