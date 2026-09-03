@@ -540,8 +540,42 @@ export function BusinessProvider({ children }) {
       if (!currErr && currData && currData.length > 0) setCurrencies(currData);
 
       const { data: compData, error: compErr } = await supabase.from('company_settings').select('*').order('updated_at', { ascending: false }).limit(1).maybeSingle();
+      
+      let loadedLogoUrl = '';
+      try {
+        const { data: logoLog } = await supabase.from('audit_log').select('details').eq('entity_type', 'company_logo').order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (logoLog && logoLog.details?.logo_url) {
+          loadedLogoUrl = logoLog.details.logo_url;
+        }
+      } catch (e) {
+        console.warn('Could not fetch company logo from cloud:', e);
+      }
+
       if (!compErr && compData) {
-        setCompanySettings(compData);
+        const addressParts = (compData.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+        let line1 = '';
+        let line2 = '';
+        if (addressParts.length >= 2) {
+          line1 = addressParts[0];
+          line2 = addressParts.slice(1).join(', ');
+        } else {
+          const commaParts = (compData.address || '').split(',').map(s => s.trim()).filter(Boolean);
+          if (commaParts.length > 1) {
+            line1 = commaParts.slice(0, -1).join(', ');
+            line2 = commaParts[commaParts.length - 1];
+          } else {
+            line1 = compData.address || '';
+            line2 = '';
+          }
+        }
+
+        const fullProfile = {
+          ...compData,
+          address_line1: line1,
+          address_line2: line2,
+          logo_url: loadedLogoUrl
+        };
+        setCompanySettings(fullProfile);
       }
 
     } catch (err) {
@@ -727,33 +761,70 @@ export function BusinessProvider({ children }) {
     return names.join(' › ');
   }, [categories]);
 
-  // Save & Persist Company Settings Safely to Local Storage and Supabase
+  // Save & Persist Company Settings Safely to Supabase Cloud
   const saveCompanySettings = async (settingsData) => {
-    setCompanySettings(settingsData);
+    const combinedAddress = [settingsData.address_line1, settingsData.address_line2].filter(Boolean).join(', ') || settingsData.address || '';
+
+    const validCompanyPayload = {
+      business_name: settingsData.business_name || 'Gatronix Store - Wholesale',
+      tagline: settingsData.tagline || '',
+      tax_number: settingsData.tax_number || '',
+      phone: settingsData.phone || '',
+      whatsapp: settingsData.whatsapp || '',
+      email: settingsData.email || '',
+      address: combinedAddress,
+      base_currency: settingsData.base_currency || 'LKR',
+      default_credit_days: Number(settingsData.default_credit_days) || 30,
+      min_profit_pct: Number(settingsData.min_profit_pct) || 5,
+      is_tax_enabled: Boolean(settingsData.is_tax_enabled),
+      default_tax_pct: Number(settingsData.default_tax_pct) || 0,
+      default_landed_cost_allocation: settingsData.default_landed_cost_allocation || 'value',
+      default_invoice_paper_size: settingsData.default_invoice_paper_size || 'A4',
+      updated_at: new Date().toISOString()
+    };
+
+    const updatedProfile = {
+      ...settingsData,
+      address: combinedAddress
+    };
+
+    setCompanySettings(updatedProfile);
+
     try {
-      localStorage.setItem('gs_wholesale_settings', JSON.stringify(settingsData));
+      localStorage.setItem('gs_wholesale_settings', JSON.stringify(updatedProfile));
       localStorage.setItem('gs_wholesale_settings_user_customized', 'true');
+
       if (supabase) {
         const { data: existing } = await supabase.from('company_settings').select('id').order('updated_at', { ascending: false }).limit(1);
         if (existing && existing.length > 0) {
-          await supabase.from('company_settings').update({
-            ...settingsData,
-            updated_at: new Date().toISOString()
-          }).eq('id', existing[0].id);
+          const { error: upErr } = await supabase.from('company_settings').update(validCompanyPayload).eq('id', existing[0].id);
+          if (upErr) throw upErr;
         } else {
-          await supabase.from('company_settings').insert([{
-            ...settingsData,
+          const { error: inErr } = await supabase.from('company_settings').insert([{
+            ...validCompanyPayload,
             id: generateUUID(),
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            created_at: new Date().toISOString()
           }]);
+          if (inErr) throw inErr;
+        }
+
+        // Save Logo in Supabase Cloud
+        if (settingsData.logo_url !== undefined) {
+          await supabase.from('audit_log').insert({
+            action: 'save_app_asset',
+            entity_type: 'company_logo',
+            details: { logo_url: settingsData.logo_url || '' }
+          });
         }
       }
     } catch (e) {
-      console.warn('Could not sync company_settings to Supabase:', e);
+      console.error('Failed to sync company_settings to Supabase:', e);
+      notifyError('Failed to save settings to cloud: ' + (e.message || e));
+      throw e;
     }
+
     notifySuccess('Company profile and settings saved successfully');
-    return settingsData;
+    return updatedProfile;
   };
 
   const saveCategory = async (catData) => {
