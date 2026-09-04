@@ -27,12 +27,13 @@ export default function PaymentModal({
 
   const [chequeDetails, setChequeDetails] = useState({
     cheque_no: '',
-    bank_name: 'Commercial Bank',
-    branch: 'Colombo',
-    cheque_date: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+    bank_name: '',
+    branch: '',
+    cheque_date: new Date().toISOString().slice(0, 10)
   });
 
   const [notes, setNotes] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const totalPaid = paymentLines.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const remaining = grandTotal - totalPaid;
@@ -42,6 +43,7 @@ export default function PaymentModal({
   const newTotalOutstanding = currentReceivable + creditOrCodAmount;
 
   const handleAddPaymentLine = (method) => {
+    if (method === 'cheque' && paymentLines.some(line => line.method === 'cheque')) return;
     // If only 1 line exists and its amount is full or 0, switch the payment method cleanly
     if (paymentLines.length === 1 && (paymentLines[0].amount === grandTotal || paymentLines[0].amount === 0)) {
       setPaymentLines([{
@@ -72,8 +74,9 @@ export default function PaymentModal({
     setPaymentLines(prev => prev.filter((_, idx) => idx !== index));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     if (docType === 'sales_invoice') {
       if (Math.abs(remaining) > 0.01) {
@@ -83,11 +86,16 @@ export default function PaymentModal({
     }
 
     const activeLines = paymentLines.filter(p => (Number(p.amount) || 0) > 0 || paymentLines.length === 1);
-    onConfirmPayment({
-      payment_lines: activeLines,
-      cheque_details: activeLines.some(p => p.method === 'cheque') ? chequeDetails : null,
-      notes
-    });
+    setIsSubmitting(true);
+    try {
+      await onConfirmPayment({
+        payment_lines: activeLines,
+        cheque_details: activeLines.some(p => p.method === 'cheque') ? chequeDetails : null,
+        notes
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -242,7 +250,17 @@ export default function PaymentModal({
                       </td>
                       <td>
                         {line.method === 'bank' && (
-                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>Bank Transfer / Deposit</span>
+                          <select
+                            value={line.bank_account_id || ''}
+                            onChange={(e) => handleUpdateLine(idx, 'bank_account_id', e.target.value)}
+                            required
+                            aria-label="Deposit bank account"
+                          >
+                            <option value="">Select bank account</option>
+                            {bankAccounts.map(account => (
+                              <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>
+                            ))}
+                          </select>
                         )}
                         {line.method === 'cheque' && (
                           <span style={{ color: 'var(--primary)', fontSize: 12 }}>Details configured below</span>
@@ -341,11 +359,11 @@ export default function PaymentModal({
             </button>
             <button
               type="submit"
-              disabled={docType === 'sales_invoice' && Math.abs(remaining) > 0.01}
+              disabled={isSubmitting || (docType === 'sales_invoice' && Math.abs(remaining) > 0.01)}
               className="primary-button"
               style={{ fontWeight: 800 }}
             >
-              Confirm & Post Document
+              {isSubmitting ? 'Saving securely…' : 'Confirm & Post Document'}
             </button>
           </div>
         </form>

@@ -55,11 +55,11 @@ export default function GoodsReceivingList() {
     setSelectedAdvanceIds(prev => prev.includes(advId) ? prev.filter(x => x !== advId) : [...prev, advId]);
   };
 
-  const handleSubmitGRN = (e) => {
+  const handleSubmitGRN = async (e) => {
     e.preventDefault();
     if (!selectedShipmentId) return;
 
-    receivePurchaseShipment({
+    await receivePurchaseShipment({
       transit_shipment_id: selectedShipmentId,
       receipt_date: receiptDate,
       items: receivingItems,

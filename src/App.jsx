@@ -8,6 +8,7 @@ import SalesDocumentsList from './pages/SalesDocuments/SalesDocumentsList';
 import CustomerList from './pages/Customers/CustomerList';
 import SupplierList from './pages/Suppliers/SupplierList';
 import TransitShipmentList from './pages/StockInTransit/TransitShipmentList';
+import SupplierOrderList from './pages/SupplierOrders/SupplierOrderList';
 import PurchaseDocumentsList from './pages/Purchases/PurchaseDocumentsList';
 import ProductList from './pages/Products/ProductList';
 import InventoryStockList from './pages/Inventory/InventoryStockList';
@@ -40,8 +41,9 @@ export default function App() {
       case 'dashboard':
         return <Dashboard onNavigateTab={setCurrentTab} />;
       case 'stock-in-transit':
-      case 'supplier-orders':
         return <TransitShipmentList onNavigateTab={setCurrentTab} />;
+      case 'supplier-orders':
+        return <SupplierOrderList onNavigateTab={setCurrentTab} />;
       case 'purchase-documents':
       case 'purchases':
         return <PurchaseDocumentsList onNavigateTab={setCurrentTab} />;

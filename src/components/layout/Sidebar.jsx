@@ -12,6 +12,7 @@ const NAV_GROUPS = [
   {
     group: 'Purchases & Stock',
     items: [
+      { key: 'supplier-orders', label: 'Supplier Orders', icon: '⌁' },
       { key: 'stock-in-transit', label: 'Stock in Transit', icon: '🚢', showTransitBadge: true },
       { key: 'purchase-documents', label: 'Purchase Documents', icon: '📄', showPurchaseBadge: true },
       { key: 'suppliers', label: 'Suppliers & Advances', icon: '♟' },

@@ -10,13 +10,17 @@ export default function SupplierList() {
   const [searchTerm, setSearchTerm] = useState('');
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [advanceSupplier, setAdvanceSupplier] = useState(null);
+  const [isSavingAdvance, setIsSavingAdvance] = useState(false);
 
   const [advanceForm, setAdvanceForm] = useState({
-    foreign_amount: 1000,
+    foreign_amount: '',
     currency: 'USD',
     exchange_rate: 305.5,
     payment_method: 'bank',
     bank_account_id: bankAccounts[0]?.id || '',
+    cheque_no: '',
+    cheque_date: new Date().toISOString().slice(0, 10),
+    cheque_bank: '',
     reference: '',
     notes: ''
   });
@@ -30,11 +34,14 @@ export default function SupplierList() {
   const handleOpenAdvance = (sup) => {
     const rate = currencies.find(c => c.code === sup.default_currency)?.exchange_rate_to_lkr || 305.5;
     setAdvanceForm({
-      foreign_amount: 1000,
+      foreign_amount: '',
       currency: sup.default_currency || 'USD',
       exchange_rate: rate,
       payment_method: 'bank',
       bank_account_id: bankAccounts[0]?.id || '',
+      cheque_no: '',
+      cheque_date: new Date().toISOString().slice(0, 10),
+      cheque_bank: '',
       reference: '',
       notes: `Advance for ${sup.name}`
     });
@@ -43,6 +50,9 @@ export default function SupplierList() {
 
   const handleSaveAdvance = async (e) => {
     e.preventDefault();
+    if (isSavingAdvance) return;
+    if ((Number(advanceForm.foreign_amount) || 0) <= 0) return;
+    setIsSavingAdvance(true);
     try {
       await recordSupplierAdvance({
         ...advanceForm,
@@ -52,6 +62,8 @@ export default function SupplierList() {
       setAdvanceSupplier(null);
     } catch {
       // Keep the dialog open; the shared sync layer displays the cloud error.
+    } finally {
+      setIsSavingAdvance(false);
     }
   };
 
@@ -194,16 +206,31 @@ export default function SupplierList() {
                 </div>
 
                 <div>
-                  <label>Paid From Bank Account</label>
-                  <select
-                    value={advanceForm.bank_account_id}
-                    onChange={(e) => setAdvanceForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
-                  >
-                    {bankAccounts.map(b => (
-                      <option key={b.id} value={b.id}>{b.account_name} ({formatCurrency(b.current_balance)})</option>
-                    ))}
+                  <label>Payment Method</label>
+                  <select value={advanceForm.payment_method} onChange={(e) => setAdvanceForm(prev => ({ ...prev, payment_method: e.target.value }))}>
+                    <option value="bank">Bank Transfer</option>
+                    <option value="cash">Cash</option>
+                    <option value="cheque">Cheque</option>
                   </select>
                 </div>
+
+                {advanceForm.payment_method === 'bank' && (
+                  <div>
+                    <label>Paid From Bank Account *</label>
+                    <select value={advanceForm.bank_account_id} onChange={(e) => setAdvanceForm(prev => ({ ...prev, bank_account_id: e.target.value }))} required>
+                      <option value="">Select bank account</option>
+                      {bankAccounts.map(b => <option key={b.id} value={b.id}>{b.account_name} ({formatCurrency(b.current_balance)})</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {advanceForm.payment_method === 'cheque' && (
+                  <div className="payment-detail-grid cheque-detail-grid">
+                    <div><label>Cheque number *</label><input value={advanceForm.cheque_no} onChange={(e) => setAdvanceForm(prev => ({ ...prev, cheque_no: e.target.value }))} required /></div>
+                    <div><label>Cheque date *</label><input type="date" value={advanceForm.cheque_date} onChange={(e) => setAdvanceForm(prev => ({ ...prev, cheque_date: e.target.value }))} required /></div>
+                    <div><label>Cheque bank *</label><input value={advanceForm.cheque_bank} onChange={(e) => setAdvanceForm(prev => ({ ...prev, cheque_bank: e.target.value }))} required /></div>
+                  </div>
+                )}
 
                 <div>
                   <label>TT Reference / Wire Ref</label>
@@ -220,8 +247,8 @@ export default function SupplierList() {
                 <button type="button" onClick={() => setAdvanceSupplier(null)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="success-button">
-                  Record Advance Payment
+                <button type="submit" className="success-button" disabled={isSavingAdvance}>
+                  {isSavingAdvance ? 'Saving…' : 'Record Advance Payment'}
                 </button>
               </div>
             </form>

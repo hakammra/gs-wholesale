@@ -14,7 +14,7 @@ const INITIAL_COMPANY = {
   address: '43/H1, Kandy Road, 20260 Madawala Bazaar',
   address_line1: '43/H1, Kandy Road',
   address_line2: '20260 Madawala Bazaar',
-  tax_number: 'VAT-987654321',
+  tax_number: '',
   base_currency: 'LKR',
   default_credit_days: 30,
   min_profit_pct: 5.0,
@@ -37,11 +37,7 @@ const INITIAL_CATEGORIES = [];
 
 const INITIAL_BRANDS = [];
 
-const INITIAL_BANK_ACCOUNTS = [
-  { id: 'ba-1', account_name: 'Cash on Hand - Main Drawer', account_number: 'CASH-001', bank_name: 'Cash In Hand', current_balance: 0.0 },
-  { id: 'ba-2', account_name: 'Commercial Bank - Wholesale Current', account_number: '1000123456', bank_name: 'Commercial Bank', current_balance: 0.0 },
-  { id: 'ba-3', account_name: 'Sampath Bank - Corporate', account_number: '002910004567', bank_name: 'Sampath Bank', current_balance: 0.0 }
-];
+const INITIAL_BANK_ACCOUNTS = [];
 
 export const generateUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -308,12 +304,14 @@ export function BusinessProvider({ children }) {
 
         if (!chqRes.error) setCheques((chqRes.data || []).map(cheque => {
           const linkedDocument = (docData || []).find(document => document.id === cheque.sales_document_id);
+          const linkedPurchase = (grnData || []).find(receipt => receipt.id === cheque.purchase_receipt_id);
+          const linkedTransit = (trnRes.data || []).find(shipment => shipment.id === cheque.transit_shipment_id);
           const linkedCustomer = (custRes.data || []).find(customer => customer.id === cheque.party_id);
           const linkedSupplier = (suppRes.data || []).find(supplier => supplier.id === cheque.party_id);
           return {
             ...cheque,
             sales_doc_id: cheque.sales_document_id,
-            sales_doc_no: linkedDocument?.doc_no || '',
+            sales_doc_no: linkedDocument?.doc_no || linkedPurchase?.grn_no || linkedTransit?.shipment_no || '',
             party_name: linkedCustomer?.business_name || linkedSupplier?.name || 'Other'
           };
         }));
@@ -402,6 +400,61 @@ export function BusinessProvider({ children }) {
     const failed = results.find(result => result?.error);
     return failed || { data: results.map(result => result?.data) };
   });
+
+  const adjustBankBalance = async (label, bankAccountId, delta) => {
+    if (!isValidUUID(bankAccountId) || !Number.isFinite(Number(delta)) || Number(delta) === 0) return;
+    await runCloudWrite(label, () => supabase.rpc('rpc_adjust_bank_balance', {
+      p_bank_account_id: bankAccountId,
+      p_delta: Number(delta)
+    }));
+    setBankAccounts(prev => prev.map(account => account.id === bankAccountId
+      ? { ...account, current_balance: (Number(account.current_balance) || 0) + Number(delta) }
+      : account));
+  };
+
+  const reversePaymentBalance = async (payment, label = 'Reversing payment balance') => {
+    const amount = Number(payment?.amount) || 0;
+    if (!amount) return;
+    const outflowTypes = new Set(['transit_purchase_payment', 'purchase_payment', 'operational_expense', 'supplier_advance', 'expense', 'customer_refund']);
+    if (isValidUUID(payment.bank_account_id)) {
+      await adjustBankBalance(label, payment.bank_account_id, outflowTypes.has(payment.payment_type) ? amount : -amount);
+      return;
+    }
+    if (payment.payment_method === 'cheque') {
+      const cheque = cheques.find(item => item.id === payment.cheque_id || item.payment_id === payment.id);
+      if (cheque?.status === 'cleared' && isValidUUID(cheque.deposit_bank_account_id)) {
+        await adjustBankBalance(label, cheque.deposit_bank_account_id, cheque.direction === 'issued' ? amount : -amount);
+      }
+    }
+  };
+
+  const adjustCustomerBalance = async (label, customerId, receivableDelta = 0, creditDelta = 0) => {
+    if (!isValidUUID(customerId)) return;
+    await runCloudWrite(label, () => supabase.rpc('rpc_adjust_customer_balance', {
+      p_customer_id: customerId,
+      p_receivable_delta: Number(receivableDelta) || 0,
+      p_credit_delta: Number(creditDelta) || 0
+    }));
+    setCustomers(prev => prev.map(customer => customer.id === customerId ? {
+      ...customer,
+      current_receivable: Math.max(0, (Number(customer.current_receivable) || 0) + (Number(receivableDelta) || 0)),
+      unallocated_credit: Math.max(0, (Number(customer.unallocated_credit) || 0) + (Number(creditDelta) || 0))
+    } : customer));
+  };
+
+  const adjustSupplierBalance = async (label, supplierId, payableDelta = 0, advanceDelta = 0) => {
+    if (!isValidUUID(supplierId)) return;
+    await runCloudWrite(label, () => supabase.rpc('rpc_adjust_supplier_balance', {
+      p_supplier_id: supplierId,
+      p_payable_delta: Number(payableDelta) || 0,
+      p_advance_delta: Number(advanceDelta) || 0
+    }));
+    setSuppliers(prev => prev.map(supplier => supplier.id === supplierId ? {
+      ...supplier,
+      current_payable: Math.max(0, (Number(supplier.current_payable) || 0) + (Number(payableDelta) || 0)),
+      current_advance_balance: Math.max(0, (Number(supplier.current_advance_balance) || 0) + (Number(advanceDelta) || 0))
+    } : supplier));
+  };
 
   // Realtime is the primary cross-device path; focus/visibility and polling are
   // fallbacks for suspended mobile tabs and temporarily disconnected sockets.
@@ -1006,6 +1059,8 @@ export function BusinessProvider({ children }) {
       amount,
       payment_method: settlementData.payment_method || 'cash',
       bank_account_id: effectiveBankId,
+      cheque_id: null,
+      source_key: `customer-settlement:${paymentId}`,
       reference: paymentReference,
       notes: settlementData.notes || null
     }));
@@ -1024,11 +1079,7 @@ export function BusinessProvider({ children }) {
       }));
     }
 
-    const nextReceivable = Math.max(0, (Number(customer?.current_receivable) || 0) - amount);
-    await runCloudWrite('Updating customer balance', () => supabase.from('customers').update({
-      current_receivable: nextReceivable,
-      updated_at: new Date().toISOString()
-    }).eq('id', customerId));
+    await adjustCustomerBalance('Updating customer balance', customerId, -amount, 0);
 
     let newCheque = null;
     if (settlementData.payment_method === 'cheque' && settlementData.cheque_no) {
@@ -1039,6 +1090,7 @@ export function BusinessProvider({ children }) {
         branch: settlementData.branch || null,
         party_type: 'customer',
         party_id: customerId,
+        payment_id: paymentId,
         party_name: customer?.business_name || settlementData.customer_name || 'Customer',
         direction: 'received',
         amount,
@@ -1062,13 +1114,12 @@ export function BusinessProvider({ children }) {
         status: 'received',
         notes: newCheque.notes
       }));
+      await runCloudWrite('Linking settlement cheque', () => supabase.from('payments').update({ cheque_id: newCheque.id }).eq('id', paymentId));
     }
 
     const bankAccount = bankAccounts.find(item => item.id === effectiveBankId);
     if (bankAccount) {
-      const nextBalance = (Number(bankAccount.current_balance) || 0) + amount;
-      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
-      setBankAccounts(prev => prev.map(item => item.id === bankAccount.id ? { ...item, current_balance: nextBalance } : item));
+      await adjustBankBalance('Updating bank balance', bankAccount.id, amount);
     }
 
     const newPayment = {
@@ -1083,13 +1134,14 @@ export function BusinessProvider({ children }) {
       currency: 'LKR',
       payment_method: settlementData.payment_method || 'cash',
       bank_account_id: effectiveBankId,
+      cheque_id: newCheque?.id || null,
+      source_key: `customer-settlement:${paymentId}`,
       reference: paymentReference,
       notes: settlementData.notes || '',
       created_at: new Date().toISOString()
     };
     setPayments(prev => [newPayment, ...prev]);
     if (newCheque) setCheques(prev => [newCheque, ...prev]);
-    setCustomers(prev => prev.map(item => item.id === customerId ? { ...item, current_receivable: nextReceivable } : item));
     setSalesDocuments(prev => prev.map(document => {
       const allocation = allocations.find(item => item.document.id === document.id);
       if (!allocation) return document;
@@ -1114,6 +1166,10 @@ export function BusinessProvider({ children }) {
       payment_date,
       payment_method,
       bank_account_id,
+      cheque_no,
+      cheque_date,
+      cheque_bank,
+      cheque_branch,
       reference,
       notes,
       payee_name
@@ -1121,11 +1177,18 @@ export function BusinessProvider({ children }) {
 
     const amt = Number(amount) || 0;
     if (amt <= 0) throw new Error('Expense amount must be greater than 0');
+    if (payment_method === 'bank' && !isValidUUID(bank_account_id)) {
+      throw new Error('Select the bank account used for this expense.');
+    }
+    if (payment_method === 'cheque' && (!cheque_no || !cheque_date || !cheque_bank)) {
+      throw new Error('Cheque number, cheque date and bank are required.');
+    }
 
-    const effectiveBankId = bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null);
+    const effectiveBankId = payment_method === 'bank' ? bank_account_id : null;
     const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
     const expNo = `EXP-${Date.now().toString().slice(-6)}`;
     const paymentId = generateUUID();
+    const chequeId = payment_method === 'cheque' ? generateUUID() : null;
     const categoryLabel = expense_category || 'General Expense';
     const payeeName = payee_name || categoryLabel;
     // Pack all metadata into reference and notes so they survive Supabase round-trip
@@ -1147,6 +1210,8 @@ export function BusinessProvider({ children }) {
       currency: 'LKR',
       payment_method: payment_method || 'cash',
       bank_account_id: validBankId,
+      cheque_id: null,
+      source_key: `direct-expense:${paymentId}`,
       reference: combinedReference,
       notes: combinedNotes,
       created_at: new Date().toISOString()
@@ -1162,16 +1227,37 @@ export function BusinessProvider({ children }) {
       amount: amt,
       payment_method: payment_method || 'cash',
       bank_account_id: validBankId,
+      source_key: `direct-expense:${paymentId}`,
       reference: combinedReference,
       notes: combinedNotes
     }));
 
+    if (chequeId) {
+      const expenseCheque = {
+        id: chequeId,
+        cheque_no,
+        direction: 'issued',
+        party_type: 'other',
+        party_id: null,
+        payment_id: paymentId,
+        bank_name: cheque_bank,
+        branch: cheque_branch || null,
+        cheque_date,
+        received_or_issued_date: newPayment.payment_date,
+        amount: amt,
+        status: 'held',
+        notes: combinedNotes
+      };
+      await runCloudWrite('Recording expense cheque', () => supabase.from('cheque_register').insert(expenseCheque));
+      await runCloudWrite('Linking expense cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+      newPayment.cheque_id = chequeId;
+      setCheques(prev => [{ ...expenseCheque, party_name: payeeName }, ...prev.filter(cheque => cheque.id !== chequeId)]);
+    }
+
     if (validBankId && amt > 0) {
       const account = bankAccounts.find(item => item.id === validBankId);
       if (account) {
-        const nextBalance = (Number(account.current_balance) || 0) - amt;
-        await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', validBankId));
-        setBankAccounts(prev => prev.map(item => item.id === validBankId ? { ...item, current_balance: nextBalance } : item));
+        await adjustBankBalance('Updating bank balance', validBankId, -amt);
       }
     }
 
@@ -1196,8 +1282,11 @@ export function BusinessProvider({ children }) {
 
     const amt = Number(amount) || 0;
     if (amt <= 0) throw new Error('Inflow amount must be greater than 0');
+    if (payment_method === 'bank' && !isValidUUID(bank_account_id)) {
+      throw new Error('Select the bank account receiving this inflow.');
+    }
 
-    const effectiveBankId = bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null);
+    const effectiveBankId = payment_method === 'bank' ? bank_account_id : null;
     const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
     const incNo = `CAP-${Date.now().toString().slice(-6)}`;
     const paymentId = generateUUID();
@@ -1223,6 +1312,7 @@ export function BusinessProvider({ children }) {
       currency: 'LKR',
       payment_method: payment_method || 'cash',
       bank_account_id: validBankId,
+      source_key: `direct-income:${paymentId}`,
       reference: combinedReference,
       notes: combinedNotes,
       created_at: new Date().toISOString()
@@ -1238,6 +1328,7 @@ export function BusinessProvider({ children }) {
       amount: amt,
       payment_method: payment_method || 'cash',
       bank_account_id: validBankId,
+      source_key: `direct-income:${paymentId}`,
       reference: combinedReference,
       notes: combinedNotes
     }));
@@ -1245,9 +1336,7 @@ export function BusinessProvider({ children }) {
     if (validBankId && amt > 0) {
       const account = bankAccounts.find(item => item.id === validBankId);
       if (account) {
-        const nextBalance = (Number(account.current_balance) || 0) + amt;
-        await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', validBankId));
-        setBankAccounts(prev => prev.map(item => item.id === validBankId ? { ...item, current_balance: nextBalance } : item));
+        await adjustBankBalance('Updating bank balance', validBankId, amt);
       }
     }
 
@@ -1314,10 +1403,13 @@ export function BusinessProvider({ children }) {
 
   // Create Supplier Order
   const createSupplierOrder = async (orderData) => {
+    if (!isValidUUID(orderData.supplier_id)) throw new Error('Select a supplier before saving the order.');
+    const validOrderItems = (orderData.items || []).filter(item => isValidUUID(item.product_id) && (Number(item.ordered_qty) || 0) > 0);
+    if (!validOrderItems.length) throw new Error('Add at least one product with a valid quantity.');
     const orderNo = `SO-IMP-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
     const orderId = generateUUID();
     const exchangeRate = Number(orderData.exchange_rate_snapshot) || 1;
-    const foreignTotal = (orderData.items || []).reduce((sum, item) =>
+    const foreignTotal = validOrderItems.reduce((sum, item) =>
       sum + ((Number(item.ordered_qty) || 0) * (Number(item.foreign_unit_cost) || 0)), 0);
     const newOrder = {
       ...orderData,
@@ -1346,7 +1438,7 @@ export function BusinessProvider({ children }) {
       notes: orderData.notes || null
     }));
 
-    const orderItems = (orderData.items || []).map(item => ({
+    const orderItems = validOrderItems.map(item => ({
       id: generateUUID(),
       supplier_order_id: orderId,
       product_id: item.product_id,
@@ -1381,9 +1473,12 @@ export function BusinessProvider({ children }) {
     };
 
     const paymentId = generateUUID();
+    const chequeId = advanceData.payment_method === 'cheque' ? generateUUID() : null;
     const paymentNo = `PAY-ADV-${Date.now().toString().slice(-6)}`;
     const supplier = suppliers.find(item => item.id === advanceData.supplier_id);
-    const bankAccount = bankAccounts.find(item => item.id === advanceData.bank_account_id);
+    const bankAccount = advanceData.payment_method === 'bank'
+      ? bankAccounts.find(item => item.id === advanceData.bank_account_id)
+      : null;
 
     await runCloudWrite('Recording supplier advance', () => supabase.from('supplier_advances').insert({
       id: newAdv.id,
@@ -1396,7 +1491,7 @@ export function BusinessProvider({ children }) {
       exchange_rate: Number(advanceData.exchange_rate) || 1,
       lkr_amount: lkrAmount,
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: isValidUUID(advanceData.bank_account_id) ? advanceData.bank_account_id : null,
+      bank_account_id: bankAccount && isValidUUID(bankAccount.id) ? bankAccount.id : null,
       bank_ref: advanceData.reference || null,
       allocated_lkr_amount: 0,
       unallocated_lkr_amount: lkrAmount,
@@ -1412,38 +1507,45 @@ export function BusinessProvider({ children }) {
       party_id: advanceData.supplier_id,
       amount: lkrAmount,
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: isValidUUID(advanceData.bank_account_id) ? advanceData.bank_account_id : null,
+      bank_account_id: bankAccount && isValidUUID(bankAccount.id) ? bankAccount.id : null,
+      cheque_id: null,
+      supplier_advance_id: newAdv.id,
+      source_key: `supplier-advance:${newAdv.id}:payment`,
       reference: advanceData.reference || advNo,
       notes: advanceData.notes || null
     }));
 
+    let advanceCheque = null;
+    if (advanceData.payment_method === 'cheque') {
+      if (!advanceData.cheque_no || !advanceData.cheque_date) throw new Error('Cheque number and cheque date are required.');
+      advanceCheque = {
+        id: chequeId,
+        cheque_no: advanceData.cheque_no,
+        direction: 'issued',
+        party_type: 'supplier',
+        party_id: advanceData.supplier_id,
+        payment_id: paymentId,
+        supplier_advance_id: newAdv.id,
+        bank_name: advanceData.cheque_bank || 'Bank',
+        cheque_date: advanceData.cheque_date,
+        received_or_issued_date: newAdv.payment_date,
+        amount: lkrAmount,
+        status: 'held',
+        notes: advanceData.notes || `Supplier advance ${advNo}`
+      };
+      await runCloudWrite('Recording supplier advance cheque', () => supabase.from('cheque_register').upsert(advanceCheque));
+      await runCloudWrite('Linking supplier advance cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+    }
+
     if (supplier) {
-      await runCloudWrite('Updating supplier advance balance', () => supabase.from('suppliers').update({
-        current_advance_balance: (Number(supplier.current_advance_balance) || 0) + lkrAmount,
-        updated_at: new Date().toISOString()
-      }).eq('id', supplier.id));
+      await adjustSupplierBalance('Updating supplier advance balance', supplier.id, 0, lkrAmount);
     }
 
     if (bankAccount) {
-      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({
-        current_balance: (Number(bankAccount.current_balance) || 0) - lkrAmount,
-        updated_at: new Date().toISOString()
-      }).eq('id', bankAccount.id));
+      await adjustBankBalance('Updating bank balance', bankAccount.id, -lkrAmount);
     }
 
     setSupplierAdvances(prev => [newAdv, ...prev]);
-
-    setSuppliers(prev => prev.map(s => s.id === advanceData.supplier_id ? {
-      ...s,
-      current_advance_balance: (s.current_advance_balance || 0) + lkrAmount
-    } : s));
-
-    if (advanceData.bank_account_id) {
-      setBankAccounts(prev => prev.map(b => b.id === advanceData.bank_account_id ? {
-        ...b,
-        current_balance: (b.current_balance || 0) - lkrAmount
-      } : b));
-    }
 
     setPayments(prev => [{
       id: paymentId,
@@ -1455,10 +1557,15 @@ export function BusinessProvider({ children }) {
       amount: lkrAmount,
       currency: 'LKR',
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: advanceData.bank_account_id,
+      bank_account_id: bankAccount?.id || null,
+      cheque_id: advanceCheque?.id || null,
+      supplier_advance_id: newAdv.id,
+      source_key: `supplier-advance:${newAdv.id}:payment`,
       reference: advanceData.reference || advNo,
       created_at: new Date().toISOString()
     }, ...prev]);
+
+    if (advanceCheque) setCheques(prev => [{ ...advanceCheque, party_name: supplier?.name || 'Supplier' }, ...prev]);
 
     return newAdv;
   };
@@ -1533,15 +1640,12 @@ export function BusinessProvider({ children }) {
 
     if (!isDraft) {
       const stockWrites = transitItems.map(item => {
-        const current = stockBalances[item.product_id] || {};
-        return supabase.from('stock_balances').upsert({
-          product_id: item.product_id,
-          qty_on_hand: Number(current.qty_on_hand) || 0,
-          qty_reserved: Number(current.qty_reserved) || 0,
-          qty_available: Number(current.qty_available) || 0,
-          qty_in_transit: (Number(current.qty_in_transit) || 0) + item.shipped_qty,
-          qty_damaged: Number(current.qty_damaged) || 0,
-          updated_at: new Date().toISOString()
+        return supabase.rpc('rpc_adjust_stock_balance', {
+          p_product_id: item.product_id,
+          p_qty_on_hand_delta: 0,
+          p_qty_reserved_delta: 0,
+          p_qty_in_transit_delta: item.shipped_qty,
+          p_qty_damaged_delta: 0
         });
       });
       if (stockWrites.length) await runCloudBatch('Updating in-transit stock', stockWrites);
@@ -1556,9 +1660,11 @@ export function BusinessProvider({ children }) {
       const payType = shipmentData.payment_type || 'credit';
       if (payType !== 'credit') {
         const paymentId = generateUUID();
+        const chequeId = payType === 'cheque' ? generateUUID() : null;
         const paymentNo = `PAY-TRN-${Date.now().toString().slice(-6)}`;
-        const bankAccount = bankAccounts[0];
-        await runCloudWrite('Recording transit payment', () => supabase.from('payments').insert({
+        const requestedBankId = shipmentData.payment_details?.bank_account_id;
+        const bankAccount = payType === 'bank' ? bankAccounts.find(account => account.id === requestedBankId) : null;
+        const payment = {
           id: paymentId,
           payment_no: paymentNo,
           payment_date: shipmentData.document_date || new Date().toISOString().slice(0, 10),
@@ -1567,22 +1673,48 @@ export function BusinessProvider({ children }) {
           party_id: suppId,
           amount: lkrFob,
           payment_method: payType,
-          bank_account_id: isValidUUID(bankAccount?.id) && (payType === 'cash' || payType === 'bank') ? bankAccount.id : null,
+          bank_account_id: isValidUUID(bankAccount?.id) ? bankAccount.id : null,
+          cheque_id: null,
+          transit_shipment_id: trnId,
+          source_key: `transit:${trnId}:payment`,
           reference: shpNo,
           notes: `Payment for transit shipment ${shpNo}`
-        }));
-        setPayments(prev => [{ id: paymentId, payment_no: paymentNo, payment_date: newShp.shipping_date, payment_type: 'transit_purchase_payment', party_type: 'supplier', party_id: suppId, amount: lkrFob, payment_method: payType, bank_account_id: bankAccount?.id || null, reference: shpNo, created_at: new Date().toISOString() }, ...prev]);
-        if (bankAccount && (payType === 'cash' || payType === 'bank')) {
-          const nextBalance = (Number(bankAccount.current_balance) || 0) - lkrFob;
-          await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
-          setBankAccounts(prev => prev.map((account, index) => index === 0 ? { ...account, current_balance: nextBalance } : account));
+        };
+        await runCloudWrite('Recording transit payment', () => supabase.from('payments').upsert(payment, { onConflict: 'source_key' }));
+
+        let cheque = null;
+        if (payType === 'cheque') {
+          const details = shipmentData.payment_details;
+          if (!details?.cheque_no || !details?.cheque_date) throw new Error('Cheque number and cheque date are required.');
+          cheque = {
+            id: chequeId,
+            cheque_no: details.cheque_no,
+            direction: 'issued',
+            party_type: 'supplier',
+            party_id: suppId,
+            payment_id: paymentId,
+            transit_shipment_id: trnId,
+            bank_name: details.bank_name || 'Bank',
+            cheque_date: details.cheque_date,
+            received_or_issued_date: shipmentData.document_date || new Date().toISOString().slice(0, 10),
+            amount: lkrFob,
+            status: 'held',
+            notes: `Payment for transit shipment ${shpNo}`
+          };
+          await runCloudWrite('Recording transit cheque', () => supabase.from('cheque_register').upsert(cheque));
+          await runCloudWrite('Linking transit cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+          payment.cheque_id = chequeId;
+          setCheques(prev => [{ ...cheque, party_name: newShp.supplier_name || 'Supplier' }, ...prev.filter(item => item.id !== chequeId)]);
+        }
+
+        setPayments(prev => [{ ...payment, created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== payment.source_key)]);
+        if (bankAccount) {
+          await adjustBankBalance('Updating bank balance', bankAccount.id, -lkrFob);
         }
       } else {
         const supplier = suppliers.find(item => item.id === suppId);
         if (supplier) {
-          const nextPayable = (Number(supplier.current_payable) || 0) + lkrFob;
-          await runCloudWrite('Updating supplier payable', () => supabase.from('suppliers').update({ current_payable: nextPayable, updated_at: new Date().toISOString() }).eq('id', suppId));
-          setSuppliers(prev => prev.map(item => item.id === suppId ? { ...item, current_payable: nextPayable } : item));
+          await adjustSupplierBalance('Updating supplier payable', suppId, lkrFob, 0);
         }
       }
     }
@@ -1689,13 +1821,6 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      const payType = updatedShipment.payment_type || existingShp.payment_type || 'credit';
-      if (payType === 'credit' && updatedShipment.supplier_id) {
-        setSuppliers(prev => prev.map(s => s.id === updatedShipment.supplier_id ? {
-          ...s,
-          current_payable: (s.current_payable || 0) + totalCostLkr
-        } : s));
-      }
     } else if (!wasDraft && isNowDraft) {
       // Demoting from in_transit to draft
       setStockBalances(prev => {
@@ -1712,28 +1837,6 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      const oldTotal = existingShp.total_estimated_cost_lkr || existingShp.foreign_items_subtotal || 0;
-      if (existingShp.payment_type === 'credit' && existingShp.supplier_id) {
-        setSuppliers(prev => prev.map(s => s.id === existingShp.supplier_id ? {
-          ...s,
-          current_payable: Math.max(0, (s.current_payable || 0) - oldTotal)
-        } : s));
-      }
-    }
-
-    // Financial delta adjustment if both were in_transit
-    if (!wasDraft && !isNowDraft) {
-      const oldTotal = existingShp.total_estimated_cost_lkr || existingShp.foreign_items_subtotal || 0;
-      const newTotal = totalCostLkr;
-      const totalDelta = newTotal - oldTotal;
-
-      const payType = updatedShipment.payment_type || existingShp.payment_type || 'credit';
-      if (payType === 'credit' && updatedShipment.supplier_id) {
-        setSuppliers(prev => prev.map(s => s.id === updatedShipment.supplier_id ? {
-          ...s,
-          current_payable: Math.max(0, (s.current_payable || 0) + totalDelta)
-        } : s));
-      }
     }
 
     if (!isValidUUID(shipmentId)) throw new Error('This shipment has an invalid cloud identifier.');
@@ -1771,27 +1874,29 @@ export function BusinessProvider({ children }) {
     const stockWrites = affectedProductIds.map(productId => {
       const oldQty = oldWasActive ? Number(oldItems.find(item => item.product_id === productId)?.shipped_qty || oldItems.find(item => item.product_id === productId)?.qty) || 0 : 0;
       const nextQty = newIsActive ? Number(formattedItems.find(item => item.product_id === productId)?.shipped_qty || formattedItems.find(item => item.product_id === productId)?.qty) || 0 : 0;
-      const current = stockBalances[productId] || {};
-      return supabase.from('stock_balances').upsert({
-        product_id: productId,
-        qty_on_hand: Number(current.qty_on_hand) || 0,
-        qty_reserved: Number(current.qty_reserved) || 0,
-        qty_available: Number(current.qty_available) || 0,
-        qty_in_transit: Math.max(0, (Number(current.qty_in_transit) || 0) + nextQty - oldQty),
-        qty_damaged: Number(current.qty_damaged) || 0,
-        updated_at: new Date().toISOString()
+      return supabase.rpc('rpc_adjust_stock_balance', {
+        p_product_id: productId,
+        p_qty_on_hand_delta: 0,
+        p_qty_reserved_delta: 0,
+        p_qty_in_transit_delta: nextQty - oldQty,
+        p_qty_damaged_delta: 0
       });
     });
     if (stockWrites.length) await runCloudBatch('Updating transit inventory', stockWrites);
 
-    const supplier = suppliers.find(item => item.id === updatedShipment.supplier_id);
-    if (supplier && (updatedShipment.payment_type || 'credit') === 'credit') {
-      const oldPayable = oldWasActive ? Number(existingShp.total_estimated_cost_lkr) || 0 : 0;
-      const nextPayable = newIsActive ? totalCostLkr : 0;
-      await runCloudWrite('Updating supplier payable', () => supabase.from('suppliers').update({
-        current_payable: Math.max(0, (Number(supplier.current_payable) || 0) + nextPayable - oldPayable),
-        updated_at: new Date().toISOString()
-      }).eq('id', supplier.id));
+    const oldSupplierId = existingShp.supplier_id;
+    const nextSupplierId = updatedShipment.supplier_id;
+    const oldPayable = oldWasActive && (existingShp.payment_type || 'credit') === 'credit'
+      ? Number(existingShp.total_estimated_cost_lkr || existingShp.foreign_items_subtotal) || 0
+      : 0;
+    const nextPayable = newIsActive && (updatedShipment.payment_type || 'credit') === 'credit'
+      ? totalCostLkr
+      : 0;
+    if (oldSupplierId === nextSupplierId) {
+      await adjustSupplierBalance('Updating supplier payable', nextSupplierId, nextPayable - oldPayable, 0);
+    } else {
+      if (oldPayable) await adjustSupplierBalance('Reversing previous supplier payable', oldSupplierId, -oldPayable, 0);
+      if (nextPayable) await adjustSupplierBalance('Updating new supplier payable', nextSupplierId, nextPayable, 0);
     }
 
     return updatedShipment;
@@ -1866,11 +1971,58 @@ export function BusinessProvider({ children }) {
       }).eq('id', item.id));
     if (itemWrites.length) await runCloudBatch('Allocating landed costs', itemWrites);
 
-    const bankAccount = bankAccounts.find(account => account.id === expenseData.bank_account_id);
+    const paymentMethod = expenseData.paid_by || expenseData.payment_method || 'bank';
+    const paymentId = generateUUID();
+    const chequeId = paymentMethod === 'cheque' ? generateUUID() : null;
+    const paymentBankId = paymentMethod === 'bank' && isValidUUID(expenseData.bank_account_id) ? expenseData.bank_account_id : null;
+    const landedPayment = {
+      id: paymentId,
+      payment_no: `PAY-${newExpense.cost_no}`,
+      payment_date: expenseData.payment_date || new Date().toISOString().slice(0, 10),
+      payment_type: 'operational_expense',
+      party_type: 'payee',
+      party_id: null,
+      amount: expenseLkr,
+      payment_method: paymentMethod,
+      bank_account_id: paymentBankId,
+      cheque_id: null,
+      transit_shipment_id: shipmentId,
+      landed_cost_id: expenseId,
+      source_key: `landed-cost:${expenseId}:payment`,
+      reference: expenseData.reference || newExpense.cost_no,
+      notes: [expenseData.payee, expenseData.expense_type, expenseData.notes].filter(Boolean).join(' | ') || 'Landed cost payment'
+    };
+    await runCloudWrite('Recording landed cost payment', () => supabase.from('payments').upsert(landedPayment, { onConflict: 'source_key' }));
+
+    if (paymentMethod === 'cheque') {
+      if (!expenseData.cheque_no || !expenseData.cheque_date) throw new Error('Cheque number and cheque date are required.');
+      const cheque = {
+        id: chequeId,
+        cheque_no: expenseData.cheque_no,
+        direction: 'issued',
+        party_type: 'other',
+        party_id: null,
+        payment_id: paymentId,
+        transit_shipment_id: shipmentId,
+        landed_cost_id: expenseId,
+        bank_name: expenseData.cheque_bank || 'Bank',
+        cheque_date: expenseData.cheque_date,
+        received_or_issued_date: landedPayment.payment_date,
+        amount: expenseLkr,
+        status: 'held',
+        notes: landedPayment.notes
+      };
+      await runCloudWrite('Recording landed cost cheque', () => supabase.from('cheque_register').upsert(cheque));
+      await runCloudWrite('Linking landed cost cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+      landedPayment.cheque_id = chequeId;
+      setCheques(prev => [{ ...cheque, party_name: expenseData.payee || 'Landed cost payee' }, ...prev.filter(item => item.id !== chequeId)]);
+    }
+
+    setPayments(prev => [{ ...landedPayment, payee_name: expenseData.payee || 'Landed cost payee', expense_category: 'Landed Cost', created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== landedPayment.source_key)]);
+
+    const bankAccount = bankAccounts.find(account => account.id === paymentBankId);
     if (bankAccount) {
-      const nextBalance = (Number(bankAccount.current_balance) || 0) - expenseLkr;
-      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
-      setBankAccounts(prev => prev.map(account => account.id === bankAccount.id ? { ...account, current_balance: nextBalance } : account));
+      await adjustBankBalance('Updating bank balance', bankAccount.id, -expenseLkr);
     }
 
     setTransitShipments(prev => prev.map(item => item.id === shipmentId ? {
@@ -1890,6 +2042,27 @@ export function BusinessProvider({ children }) {
     const shp = transitShipments.find(s => s.id === shipmentId);
     if (!shp) return;
 
+    const linkedPayments = payments.filter(payment => payment.transit_shipment_id === shipmentId || payment.reference === shp.shipment_no);
+    for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing transit payment');
+
+    if (shp.status === 'in_transit' && shp.payment_type === 'credit' && shp.supplier_id) {
+      const totalCost = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
+      await adjustSupplierBalance('Reversing transit supplier payable', shp.supplier_id, -totalCost, 0);
+    }
+
+    if (shp.status === 'in_transit') {
+      const stockReversals = (shp.items || [])
+        .filter(item => isValidUUID(item.product_id))
+        .map(item => supabase.rpc('rpc_adjust_stock_balance', {
+          p_product_id: item.product_id,
+          p_qty_on_hand_delta: 0,
+          p_qty_reserved_delta: 0,
+          p_qty_in_transit_delta: -(Number(item.shipped_qty || item.qty) || 0),
+          p_qty_damaged_delta: 0
+        }));
+      if (stockReversals.length) await runCloudBatch('Reversing transit stock', stockReversals);
+    }
+
     setTransitShipments(prev => prev.filter(s => s.id !== shipmentId));
 
     if (shp.status === 'in_transit') {
@@ -1908,26 +2081,15 @@ export function BusinessProvider({ children }) {
       });
     }
 
-    if (shp.status === 'in_transit' && shp.payment_type === 'credit' && shp.supplier_id) {
-      const totalCost = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
-      setSuppliers(prev => prev.map(s => s.id === shp.supplier_id ? {
-        ...s,
-        current_payable: Math.max(0, (s.current_payable || 0) - totalCost)
-      } : s));
-    }
-
     setPayments(prev => prev.filter(p => p.transit_shipment_id !== shipmentId && p.reference !== shp.shipment_no));
+    setCheques(prev => prev.filter(cheque => cheque.transit_shipment_id !== shipmentId && !linkedPayments.some(payment => payment.id === cheque.payment_id)));
 
-    try {
-      if (supabase) {
-        await supabase.from('transit_shipment_items').delete().eq('transit_shipment_id', shipmentId);
-        await supabase.from('transit_shipments').delete().eq('id', shipmentId);
-        await supabase.from('payments').delete().eq('transit_shipment_id', shipmentId);
-        if (shp.shipment_no) {
-          await supabase.from('payments').delete().or(`reference.eq.${shp.shipment_no},payment_no.ilike.%${shp.shipment_no}%`);
-        }
-      }
-    } catch (e) {}
+    await runCloudWrite('Deleting transit cheques', () => supabase.from('cheque_register').delete().eq('transit_shipment_id', shipmentId));
+    await runCloudWrite('Deleting transit payments', () => supabase.from('payments').delete().eq('transit_shipment_id', shipmentId));
+    if (shp.shipment_no) {
+      await runCloudWrite('Deleting referenced transit payments', () => supabase.from('payments').delete().or(`reference.eq.${shp.shipment_no},payment_no.ilike.%${shp.shipment_no}%`));
+    }
+    await runCloudWrite('Deleting transit shipment', () => supabase.from('transit_shipments').delete().eq('id', shipmentId));
 
     notifySuccess(`Shipment ${shp.shipment_no || ''} deleted`);
   };
@@ -2061,39 +2223,6 @@ export function BusinessProvider({ children }) {
         } : s));
       }
 
-      // Update supplier balance if credit, or record payment if cash/bank/cheque for direct purchase
-      const purPayType = newPurchaseDoc.payment_type || 'credit';
-      if (purPayType === 'credit') {
-        if (supId) {
-          setSuppliers(prev => prev.map(s => s.id === supId ? {
-            ...s,
-            current_payable: (s.current_payable || 0) + totalLandedLkr
-          } : s));
-        }
-      } else if (isDirect) {
-        // Direct Purchase Paid Now -> Record in payments & Cashflow
-        setPayments(prev => [{
-          id: 'pay-' + Date.now(),
-          payment_no: `PAY-PUR-${Date.now().toString().slice(-4)}`,
-          payment_date: receiptDate,
-          payment_type: 'purchase_payment',
-          party_type: 'supplier',
-          party_id: supId,
-          amount: totalLandedLkr,
-          currency: 'LKR',
-          payment_method: purPayType, // 'cash' | 'bank' | 'cheque'
-          reference: newPurchaseDoc.doc_no,
-          created_at: new Date().toISOString()
-        }, ...prev]);
-
-        if (purPayType === 'cash' || purPayType === 'bank') {
-          setBankAccounts(prev => {
-            if (!prev.length) return prev;
-            return prev.map((b, idx) => idx === 0 ? { ...b, current_balance: (b.current_balance || 0) - totalLandedLkr } : b);
-          });
-        }
-      }
-
       // Record stock movement
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
@@ -2180,20 +2309,83 @@ export function BusinessProvider({ children }) {
           if (!isDraft) {
             for (const it of items) {
               if (isValidUUID(it.product_id)) {
-                const cur = stockBalances[it.product_id] || { qty_on_hand: 0, qty_available: 0, qty_in_transit: 0 };
                 const sellable = Number(it.received_sellable_qty) || 0;
                 const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
-                await runCloudWrite('Updating received inventory', () => supabase.from('stock_balances').upsert({
-                  product_id: it.product_id,
-                  qty_on_hand: (cur.qty_on_hand || 0) + sellable,
-                  qty_available: (cur.qty_available || 0) + sellable,
-                  qty_in_transit: Math.max(0, (cur.qty_in_transit || 0) - shipped)
+                await runCloudWrite('Updating received inventory', () => supabase.rpc('rpc_adjust_stock_balance', {
+                  p_product_id: it.product_id,
+                  p_qty_on_hand_delta: sellable,
+                  p_qty_reserved_delta: 0,
+                  p_qty_in_transit_delta: -shipped,
+                  p_qty_damaged_delta: Number(it.damaged_qty) || 0
                 }));
               }
             }
           }
         };
     await performSupabaseSync();
+
+    // Transit credit was already recorded when the shipment was dispatched.
+    // Only direct credit purchases create a new supplier payable at receiving.
+    if (!isDraft && isDirect && newPurchaseDoc.payment_type === 'credit') {
+      await adjustSupplierBalance('Updating purchase supplier payable', suppId, totalLandedLkr, 0);
+    }
+
+    if (!isDraft && isDirect && newPurchaseDoc.payment_type !== 'credit') {
+      const paymentId = generateUUID();
+      const chequeId = newPurchaseDoc.payment_type === 'cheque' ? generateUUID() : null;
+      const requestedBankId = newPurchaseDoc.payment_details?.bank_account_id;
+      const bankId = newPurchaseDoc.payment_type === 'bank' && isValidUUID(requestedBankId) ? requestedBankId : null;
+      const payment = {
+        id: paymentId,
+        payment_no: `PAY-${grnNo}`,
+        payment_date: receiptDate,
+        payment_type: 'purchase_payment',
+        party_type: 'supplier',
+        party_id: suppId,
+        purchase_id: purchaseId,
+        amount: totalLandedLkr,
+        payment_method: newPurchaseDoc.payment_type,
+        bank_account_id: bankId,
+        cheque_id: null,
+        source_key: `purchase:${purchaseId}:payment`,
+        reference: grnNo,
+        notes: `Payment for purchase ${grnNo}`
+      };
+      await runCloudWrite('Recording purchase payment', () => supabase.from('payments').upsert(payment, { onConflict: 'source_key' }));
+
+      if (newPurchaseDoc.payment_type === 'cheque') {
+        const details = newPurchaseDoc.payment_details;
+        if (!details?.cheque_no || !details?.cheque_date) throw new Error('Cheque number and cheque date are required.');
+        const cheque = {
+          id: chequeId,
+          cheque_no: details.cheque_no,
+          direction: 'issued',
+          party_type: 'supplier',
+          party_id: suppId,
+          payment_id: paymentId,
+          purchase_receipt_id: purchaseId,
+          bank_name: details.bank_name || 'Bank',
+          cheque_date: details.cheque_date,
+          received_or_issued_date: receiptDate,
+          amount: totalLandedLkr,
+          status: 'held',
+          notes: `Payment for purchase ${grnNo}`
+        };
+        await runCloudWrite('Recording purchase cheque', () => supabase.from('cheque_register').upsert(cheque));
+        await runCloudWrite('Linking purchase cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+        payment.cheque_id = chequeId;
+        setCheques(prev => [{ ...cheque, party_name: supplierName }, ...prev.filter(item => item.id !== chequeId)]);
+      }
+
+      if (bankId) {
+        const account = bankAccounts.find(item => item.id === bankId);
+        if (account) {
+          await adjustBankBalance('Updating purchase bank balance', bankId, -totalLandedLkr);
+        }
+      }
+
+      setPayments(prev => [{ ...payment, supplier_name: supplierName, created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== payment.source_key)]);
+    }
 
     return newPurchaseDoc;
   };
@@ -2235,6 +2427,10 @@ export function BusinessProvider({ children }) {
     const wasDraft = existingPur.status === 'draft';
     const newStatus = updatedData.status || existingPur.status || 'received';
     const isNowDraft = newStatus === 'draft';
+    const linkedPurchaseShipment = transitShipments.find(shipment => shipment.id === existingPur.transit_shipment_id);
+    const isDirectPurchase = !existingPur.transit_shipment_id
+      || String(linkedPurchaseShipment?.shipment_no || existingPur.shipment_no || '').startsWith('DIR-TRN-')
+      || existingPur.shipment_no === 'DIRECT';
 
     const updatedPurchaseDoc = {
       ...existingPur,
@@ -2326,20 +2522,7 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      // Step 3: Financial delta adjustment
-      const oldTotal = existingPur.total_amount_lkr || existingPur.total_landed_lkr || 0;
-      const newTotal = totalLandedLkr;
-      const totalDelta = newTotal - oldTotal;
-
-      const purPayType = updatedPurchaseDoc.payment_type || existingPur.payment_type || 'credit';
-      if (purPayType === 'credit' && supId) {
-        setSuppliers(prev => prev.map(s => s.id === supId ? {
-          ...s,
-          current_payable: Math.max(0, (s.current_payable || 0) + totalDelta)
-        } : s));
-      }
-
-      // Step 4: Record adjustment movement
+      // Step 3: Record adjustment movement
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
         date: updatedPurchaseDoc.receipt_date || new Date().toISOString().slice(0, 10),
@@ -2396,14 +2579,6 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      const purPayType = updatedPurchaseDoc.payment_type || existingPur.payment_type || 'credit';
-      if (purPayType === 'credit' && supId) {
-        setSuppliers(prev => prev.map(s => s.id === supId ? {
-          ...s,
-          current_payable: (s.current_payable || 0) + totalLandedLkr
-        } : s));
-      }
-
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
         date: updatedPurchaseDoc.receipt_date || new Date().toISOString().slice(0, 10),
@@ -2416,16 +2591,70 @@ export function BusinessProvider({ children }) {
       }, ...prev]);
     }
 
-    try {
-      if (supabase && isValidUUID(purchaseId)) {
-        supabase.from('purchase_receipts').update({
-          is_fully_received: updatedPurchaseDoc.status !== 'draft',
-          total_landed_lkr: totalLandedLkr,
-          receipt_date: updatedPurchaseDoc.receipt_date,
-          notes: updatedPurchaseDoc.notes
-        }).eq('id', purchaseId).then(() => {}).catch(() => {});
+    if (!isValidUUID(purchaseId)) throw new Error('This purchase has an invalid cloud identifier.');
+    await runCloudWrite('Updating purchase receipt', () => supabase.from('purchase_receipts').update({
+      supplier_id: isValidUUID(supId) ? supId : existingPur.supplier_id,
+      is_fully_received: updatedPurchaseDoc.status !== 'draft',
+      total_landed_lkr: totalLandedLkr,
+      supplier_goods_payable_lkr: totalLandedLkr,
+      payment_type: updatedPurchaseDoc.payment_type || existingPur.payment_type || 'credit',
+      receipt_date: updatedPurchaseDoc.receipt_date,
+      notes: updatedPurchaseDoc.notes
+    }).eq('id', purchaseId));
+
+    await runCloudWrite('Replacing purchase receipt items', () => supabase.from('purchase_receipt_items').delete().eq('purchase_receipt_id', purchaseId));
+    const cloudPurchaseItems = newItems
+      .filter(item => isValidUUID(item.product_id))
+      .map(item => ({
+        id: generateUUID(),
+        purchase_receipt_id: purchaseId,
+        product_id: item.product_id,
+        received_sellable_qty: Number(item.received_sellable_qty) || 0,
+        damaged_qty: Number(item.damaged_qty) || 0,
+        missing_qty: Number(item.missing_qty) || 0,
+        foreign_unit_cost: Number(item.foreign_unit_cost || item.unit_cost_lkr || item.final_landed_unit_cost_lkr) || 0,
+        allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
+        final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr || item.foreign_unit_cost) || 0
+      }));
+    if (cloudPurchaseItems.length) {
+      await runCloudWrite('Saving updated purchase items', () => supabase.from('purchase_receipt_items').insert(cloudPurchaseItems));
+    }
+
+    const purchaseStockWrites = allProductIds
+      .filter(isValidUUID)
+      .map(productId => {
+        const oldItem = oldItems.find(item => item.product_id === productId);
+        const nextItem = newItems.find(item => item.product_id === productId);
+        const oldQty = wasDraft ? 0 : Number(oldItem?.received_sellable_qty || oldItem?.shipped_qty || oldItem?.qty) || 0;
+        const nextQty = isNowDraft ? 0 : Number(nextItem?.received_sellable_qty || nextItem?.shipped_qty || nextItem?.qty) || 0;
+        const oldDamaged = wasDraft ? 0 : Number(oldItem?.damaged_qty) || 0;
+        const nextDamaged = isNowDraft ? 0 : Number(nextItem?.damaged_qty) || 0;
+        return supabase.rpc('rpc_adjust_stock_balance', {
+          p_product_id: productId,
+          p_qty_on_hand_delta: nextQty - oldQty,
+          p_qty_reserved_delta: 0,
+          p_qty_in_transit_delta: 0,
+          p_qty_damaged_delta: nextDamaged - oldDamaged
+        });
+      });
+    if (purchaseStockWrites.length) await runCloudBatch('Updating edited purchase inventory', purchaseStockWrites);
+
+    if (isDirectPurchase) {
+      const oldSupplierId = existingPur.supplier_id;
+      const nextSupplierId = updatedPurchaseDoc.supplier_id;
+      const oldPayable = !wasDraft && (existingPur.payment_type || 'credit') === 'credit'
+        ? Number(existingPur.total_amount_lkr || existingPur.total_landed_lkr) || 0
+        : 0;
+      const nextPayable = !isNowDraft && (updatedPurchaseDoc.payment_type || 'credit') === 'credit'
+        ? totalLandedLkr
+        : 0;
+      if (oldSupplierId === nextSupplierId) {
+        await adjustSupplierBalance('Updating purchase supplier payable', nextSupplierId, nextPayable - oldPayable, 0);
+      } else {
+        if (oldPayable) await adjustSupplierBalance('Reversing previous purchase payable', oldSupplierId, -oldPayable, 0);
+        if (nextPayable) await adjustSupplierBalance('Updating new purchase payable', nextSupplierId, nextPayable, 0);
       }
-    } catch (e) {}
+    }
 
     return updatedPurchaseDoc;
   };
@@ -2434,6 +2663,44 @@ export function BusinessProvider({ children }) {
   const deletePurchaseDocument = async (purchaseId) => {
     const pur = purchases.find(p => p.id === purchaseId);
     if (!pur) return;
+
+    const linkedPayments = payments.filter(payment => payment.purchase_id === purchaseId || payment.reference === pur.doc_no || payment.reference === pur.grn_no);
+    for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing purchase payment');
+
+    const sourceTransit = transitShipments.find(shipment => shipment.id === pur.transit_shipment_id);
+    const restoreToTransit = !!sourceTransit && !String(sourceTransit.shipment_no || '').startsWith('DIR-TRN-');
+
+    // Transit purchases already carry the supplier payable on the shipment.
+    // Direct credit purchases own their payable and must reverse it on deletion.
+    if (pur.status !== 'draft' && !restoreToTransit && pur.payment_type === 'credit' && pur.supplier_id) {
+      const totalAmount = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
+      await adjustSupplierBalance('Reversing purchase supplier payable', pur.supplier_id, -totalAmount, 0);
+    }
+
+    if (pur.status !== 'draft') {
+      const stockReversals = (pur.items || [])
+        .filter(item => isValidUUID(item.product_id))
+        .map(item => {
+          const sellable = Number(item.received_sellable_qty || item.shipped_qty || item.qty) || 0;
+          const shipped = Number(item.shipped_qty || item.received_sellable_qty || item.qty) || 0;
+          const damaged = Math.min(Number(stockBalances[item.product_id]?.qty_damaged) || 0, Number(item.damaged_qty) || 0);
+          return supabase.rpc('rpc_adjust_stock_balance', {
+            p_product_id: item.product_id,
+            p_qty_on_hand_delta: -sellable,
+            p_qty_reserved_delta: 0,
+            p_qty_in_transit_delta: restoreToTransit ? shipped : 0,
+            p_qty_damaged_delta: -damaged
+          });
+        });
+      if (stockReversals.length) await runCloudBatch('Reversing received inventory', stockReversals);
+      if (restoreToTransit) {
+        await runCloudWrite('Restoring shipment to transit', () => supabase.from('transit_shipments').update({
+          status: 'in_transit',
+          actual_arrival_date: null,
+          updated_at: new Date().toISOString()
+        }).eq('id', sourceTransit.id));
+      }
+    }
 
     // 1. Remove from purchases
     setPurchases(prev => prev.filter(p => p.id !== purchaseId));
@@ -2482,36 +2749,22 @@ export function BusinessProvider({ children }) {
         };
       }));
 
-      // 4. Adjust supplier payable if credit
-      if (pur.payment_type === 'credit' && pur.supplier_id) {
-        const totalAmount = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
-        setSuppliers(prev => prev.map(s => s.id === pur.supplier_id ? {
-          ...s,
-          current_payable: Math.max(0, (s.current_payable || 0) - totalAmount)
-        } : s));
-      }
-
-      // 5. Remove any direct payment
-      setPayments(prev => prev.filter(p => p.purchase_id !== purchaseId && p.reference !== pur.doc_no && p.reference !== pur.grn_no));
     }
 
-    // 5. Remove any direct payment
+    // Remove any direct payment or cheque linked to this purchase.
     setPayments(prev => prev.filter(p => p.purchase_id !== purchaseId && p.reference !== pur.doc_no && p.reference !== pur.grn_no));
+    setCheques(prev => prev.filter(cheque => cheque.purchase_receipt_id !== purchaseId && !linkedPayments.some(payment => payment.id === cheque.payment_id)));
 
-    try {
-      if (supabase) {
-        await supabase.from('purchase_receipt_items').delete().eq('purchase_receipt_id', purchaseId);
-        await supabase.from('purchase_receipts').delete().eq('id', purchaseId);
-        await supabase.from('payments').delete().eq('purchase_id', purchaseId);
-        const refNo = pur.doc_no || pur.grn_no;
-        if (refNo) {
-          await supabase.from('payments').delete().or(`reference.eq.${refNo},payment_no.eq.PAY-${refNo},payment_no.eq.PAY-PUR-${refNo}`);
-        }
-        if (pur.transit_shipment_id) {
-          await supabase.from('transit_shipments').delete().eq('id', pur.transit_shipment_id).ilike('shipment_no', 'DIR-TRN-%');
-        }
-      }
-    } catch (e) {}
+    await runCloudWrite('Deleting purchase cheques', () => supabase.from('cheque_register').delete().eq('purchase_receipt_id', purchaseId));
+    await runCloudWrite('Deleting purchase payments', () => supabase.from('payments').delete().eq('purchase_id', purchaseId));
+    const refNo = pur.doc_no || pur.grn_no;
+    if (refNo) {
+      await runCloudWrite('Deleting referenced purchase payments', () => supabase.from('payments').delete().or(`reference.eq.${refNo},payment_no.eq.PAY-${refNo},payment_no.eq.PAY-PUR-${refNo}`));
+    }
+    await runCloudWrite('Deleting purchase receipt', () => supabase.from('purchase_receipts').delete().eq('id', purchaseId));
+    if (pur.transit_shipment_id) {
+      await runCloudWrite('Deleting direct purchase link', () => supabase.from('transit_shipments').delete().eq('id', pur.transit_shipment_id).ilike('shipment_no', 'DIR-TRN-%'));
+    }
 
     notifySuccess(`Purchase document ${pur.doc_no || ''} deleted and inventory reversed`);
   };
@@ -2692,7 +2945,7 @@ export function BusinessProvider({ children }) {
       const defaultProductId = dbProducts?.[0]?.id || Object.values(productIdMap)[0] || null;
 
       // 4. Sync Suppliers & resolve defaultSupplierId
-      let defaultSupplierId = 'efe224ca-693a-4eb2-ba78-8e436d6e0beb';
+      let defaultSupplierId = null;
       const supplierIdMap = {};
       for (const s of suppliers) {
         const sId = isValidUUID(s.id) ? s.id : generateUUID();
@@ -2700,7 +2953,7 @@ export function BusinessProvider({ children }) {
         if (s.name) supplierIdMap[s.name.toLowerCase().trim()] = sId;
         await supabase.from('suppliers').upsert({
           id: sId,
-          supplier_code: s.supplier_code || 'SUP-001',
+          supplier_code: s.supplier_code || `SUP-${sId.slice(0, 8).toUpperCase()}`,
           name: s.name,
           country: s.country || 'China',
           phone: s.phone || null,
@@ -2722,6 +2975,7 @@ export function BusinessProvider({ children }) {
       for (const shp of transitShipments) {
         const sId = isValidUUID(shp.id) ? shp.id : generateUUID();
         const suppId = supplierIdMap[shp.supplier_id] || (isValidUUID(shp.supplier_id) ? shp.supplier_id : defaultSupplierId);
+        if (!isValidUUID(suppId)) throw new Error(`Shipment ${shp.shipment_no || shp.id} has no valid supplier.`);
         const dbStatus = shp.status === 'draft' ? 'preparing' : (shp.status === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(shp.status) ? shp.status : 'in_transit'));
 
         await supabase.from('transit_shipments').upsert({
@@ -2761,6 +3015,7 @@ export function BusinessProvider({ children }) {
       for (const pur of purchases) {
         const purId = isValidUUID(pur.id) ? pur.id : generateUUID();
         const suppId = supplierIdMap[pur.supplier_id] || (isValidUUID(pur.supplier_id) ? pur.supplier_id : defaultSupplierId);
+        if (!isValidUUID(suppId)) throw new Error(`Purchase ${pur.doc_no || pur.grn_no || pur.id} has no valid supplier.`);
         let linkTransitId = isValidUUID(pur.transit_shipment_id) ? pur.transit_shipment_id : null;
 
         if (!linkTransitId) {
@@ -3103,61 +3358,6 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      // Record Advance Cheque if provided
-      if (docData.cheque_details && docData.payment_lines?.some(p => p.method === 'cheque')) {
-        const chequeLine = docData.payment_lines.find(p => p.method === 'cheque');
-        const newCheque = {
-          id: 'chq-' + Date.now(),
-          direction: 'received',
-          party_type: 'customer',
-          party_id: docData.customer_id,
-          party_name: docData.customer_name,
-          sales_doc_id: newDoc.id,
-          sales_doc_no: docNo,
-          cheque_no: docData.cheque_details.cheque_no,
-          bank_name: docData.cheque_details.bank_name,
-          branch: docData.cheque_details.branch,
-          cheque_date: docData.cheque_details.cheque_date,
-          amount: Number(chequeLine.amount) || 0,
-          status: 'received',
-          notes: `Advance for Reservation ${docNo}`,
-          created_at: new Date().toISOString()
-        };
-        setCheques(prev => [newCheque, ...prev]);
-      }
-
-      // Record Advance Payment Receipts
-      (docData.payment_lines || []).forEach(p => {
-        if (p.method === 'cash' || p.method === 'bank') {
-          const amt = Number(p.amount) || 0;
-          if (amt > 0) {
-            setPayments(prev => [{
-              id: 'pay-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-              payment_no: `PAY-RES-${Date.now().toString().slice(-4)}`,
-              payment_date: new Date().toISOString().slice(0, 10),
-              payment_type: 'customer_advance',
-              party_type: 'customer',
-              party_id: docData.customer_id,
-              customer_name: docData.customer_name,
-              sales_doc_id: newDoc.id,
-              amount: amt,
-              currency: 'LKR',
-              payment_method: p.method,
-              bank_account_id: p.bank_account_id,
-              reference: p.reference || `Advance deposit for ${docNo}`,
-              created_at: new Date().toISOString()
-            }, ...prev]);
-
-            if (p.bank_account_id) {
-              setBankAccounts(prev => prev.map(b => b.id === p.bank_account_id ? {
-                ...b,
-                current_balance: (b.current_balance || 0) + amt
-              } : b));
-            }
-          }
-        }
-      });
-
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
         date: new Date().toISOString().slice(0, 10),
@@ -3221,72 +3421,10 @@ export function BusinessProvider({ children }) {
           };
         }
 
-        if (balanceDue > 0) {
-          setCustomers(prev => prev.map(c => {
-            const matches = (docData.customer_id != null && String(c.id) === String(docData.customer_id)) ||
-              (docData.customer_name && c.business_name && docData.customer_name.trim().toLowerCase() === c.business_name.trim().toLowerCase());
-            if (!matches) return c;
-            return {
-              ...c,
-              current_receivable: (Number(c.current_receivable) || 0) + balanceDue
-            };
-          }));
-        }
       }
 
       newDoc.customer = updatedCustomerObj || docData.customer;
       newDoc.customer_receivable = finalCustomerReceivable;
-
-      if (docData.cheque_details && docData.payment_lines?.some(p => p.method === 'cheque')) {
-        const chequeLine = docData.payment_lines.find(p => p.method === 'cheque');
-        const newCheque = {
-          id: 'chq-' + Date.now(),
-          direction: 'received',
-          party_type: 'customer',
-          party_id: docData.customer_id,
-          party_name: docData.customer_name,
-          sales_doc_id: newDoc.id,
-          sales_doc_no: docNo,
-          cheque_no: docData.cheque_details.cheque_no,
-          bank_name: docData.cheque_details.bank_name,
-          branch: docData.cheque_details.branch,
-          cheque_date: docData.cheque_details.cheque_date,
-          amount: Number(chequeLine.amount) || 0,
-          status: 'received',
-          created_at: new Date().toISOString()
-        };
-        setCheques(prev => [newCheque, ...prev]);
-      }
-
-      (docData.payment_lines || []).forEach(p => {
-        if (p.method === 'cash' || p.method === 'bank') {
-          const amt = Number(p.amount) || 0;
-          if (amt > 0) {
-            setPayments(prev => [{
-              id: 'pay-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-              payment_no: `PAY-INV-${Date.now().toString().slice(-4)}`,
-              payment_date: new Date().toISOString().slice(0, 10),
-              payment_type: 'sales_receipt',
-              party_type: 'customer',
-              party_id: docData.customer_id,
-              sales_doc_id: newDoc.id,
-              amount: amt,
-              currency: 'LKR',
-              payment_method: p.method,
-              bank_account_id: p.bank_account_id,
-              reference: p.reference || docNo,
-              created_at: new Date().toISOString()
-            }, ...prev]);
-
-            if (p.bank_account_id) {
-              setBankAccounts(prev => prev.map(b => b.id === p.bank_account_id ? {
-                ...b,
-                current_balance: (b.current_balance || 0) + amt
-              } : b));
-            }
-          }
-        }
-      });
 
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
@@ -3346,16 +3484,13 @@ export function BusinessProvider({ children }) {
       const stockWrites = (docData.items || []).map(item => {
         const productId = item.product?.id || item.product_id;
         if (!isValidUUID(productId)) return null;
-        const current = stockBalances[productId] || {};
         const qty = Number(item.qty) || 1;
-        return supabase.from('stock_balances').upsert({
-          product_id: productId,
-          qty_on_hand: isReservation ? Number(current.qty_on_hand) || 0 : Math.max(0, (Number(current.qty_on_hand) || 0) - qty),
-          qty_reserved: isReservation ? (Number(current.qty_reserved) || 0) + qty : (releasedFromReservation ? Math.max(0, (Number(current.qty_reserved) || 0) - qty) : Number(current.qty_reserved) || 0),
-          qty_available: isReservation ? Math.max(0, (Number(current.qty_available) || 0) - qty) : (releasedFromReservation ? Number(current.qty_available) || 0 : Math.max(0, (Number(current.qty_available) || 0) - qty)),
-          qty_in_transit: Number(current.qty_in_transit) || 0,
-          qty_damaged: (Number(current.qty_damaged) || 0) + (item.is_warranty_replacement ? qty : 0),
-          updated_at: new Date().toISOString()
+        return supabase.rpc('rpc_adjust_stock_balance', {
+          p_product_id: productId,
+          p_qty_on_hand_delta: isReservation ? 0 : -qty,
+          p_qty_reserved_delta: isReservation ? qty : (releasedFromReservation ? -qty : 0),
+          p_qty_in_transit_delta: 0,
+          p_qty_damaged_delta: item.is_warranty_replacement ? qty : 0
         });
       }).filter(Boolean);
       if (stockWrites.length) await runCloudBatch('Updating inventory', stockWrites);
@@ -3364,47 +3499,77 @@ export function BusinessProvider({ children }) {
     if (custId && balanceDue > 0) {
       const foundCustomer = customers.find(customer => customer.id === custId);
       if (foundCustomer) {
-        await runCloudWrite('Updating customer receivable', () => supabase.from('customers').update({
-          current_receivable: (Number(foundCustomer.current_receivable) || 0) + balanceDue,
-          updated_at: new Date().toISOString()
-        }).eq('id', custId));
+        await adjustCustomerBalance('Updating customer receivable', custId, balanceDue, 0);
       }
     }
 
-    if (paidAmount > 0 && !isQuotation) {
-      await runCloudWrite('Recording sales payment', () => supabase.from('payments').insert({
-        id: generateUUID(),
-        payment_no: `PAY-${docNo}`,
+    const paidLines = (docData.payment_lines || [])
+      .filter(line => !['credit', 'cod'].includes(line.method) && (Number(line.amount) || 0) > 0);
+    const savedPayments = [];
+    const savedCheques = [];
+
+    for (let index = 0; index < paidLines.length; index += 1) {
+      const line = paidLines[index];
+      const paymentId = generateUUID();
+      const paymentNo = `PAY-${docNo}-${index + 1}`;
+      const chequeId = line.method === 'cheque' ? generateUUID() : null;
+      const bankId = line.method === 'bank' && isValidUUID(line.bank_account_id) ? line.bank_account_id : null;
+      const payment = {
+        id: paymentId,
+        payment_no: paymentNo,
         payment_type: isReservation ? 'customer_advance' : 'sales_receipt',
         party_type: 'customer',
         party_id: custId,
-        payment_date: new Date().toISOString().slice(0, 10),
-        amount: paidAmount,
-        payment_method: isCod ? 'cash' : (docData.payment_lines?.[0]?.method || 'cash'),
-        bank_account_id: isValidUUID(docData.payment_lines?.[0]?.bank_account_id) ? docData.payment_lines[0].bank_account_id : null,
-        reference: docNo,
+        sales_doc_id: docId,
+        payment_date: newDoc.doc_date,
+        amount: Number(line.amount),
+        payment_method: line.method,
+        bank_account_id: bankId,
+        cheque_id: null,
+        source_key: `sales:${docId}:${index + 1}`,
+        reference: line.reference || docNo,
         notes: `Payment for ${docNo}`
-      }));
+      };
+
+      await runCloudWrite('Recording sales payment', () => supabase.from('payments').upsert(payment, { onConflict: 'source_key' }));
+
+      if (line.method === 'bank' && bankId) {
+        const account = bankAccounts.find(item => item.id === bankId);
+        if (account) {
+          await adjustBankBalance('Updating sales bank balance', bankId, Number(line.amount));
+        }
+      }
+
+      if (line.method === 'cheque') {
+        const details = line.cheque_details || docData.cheque_details;
+        if (!details?.cheque_no || !details?.cheque_date) throw new Error('Cheque number and cheque date are required.');
+        const cheque = {
+          id: chequeId,
+          cheque_no: details.cheque_no,
+          direction: 'received',
+          party_type: 'customer',
+          party_id: custId,
+          payment_id: paymentId,
+          sales_document_id: docId,
+          bank_name: details.bank_name || 'Bank',
+          branch: details.branch || null,
+          cheque_date: details.cheque_date,
+          received_or_issued_date: newDoc.doc_date,
+          amount: Number(line.amount),
+          status: 'received',
+          notes: `${isReservation ? 'Advance for reservation' : 'Payment for invoice'} ${docNo}`
+        };
+        await runCloudWrite('Recording sales cheque', () => supabase.from('cheque_register').upsert(cheque));
+        await runCloudWrite('Linking sales cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+        payment.cheque_id = chequeId;
+        savedCheques.push({ ...cheque, party_name: docData.customer_name || 'Customer', sales_doc_no: docNo });
+      }
+
+      savedPayments.push({ ...payment, customer_name: docData.customer_name || 'Customer', created_at: new Date().toISOString() });
     }
 
-    const chequeLine = docData.payment_lines?.find(payment => payment.method === 'cheque' && Number(payment.amount) > 0);
-    if (chequeLine && docData.cheque_details) {
-      await runCloudWrite('Recording sales cheque', () => supabase.from('cheque_register').insert({
-        id: generateUUID(),
-        cheque_no: docData.cheque_details.cheque_no,
-        direction: 'received',
-        party_type: 'customer',
-        party_id: custId,
-        sales_document_id: docId,
-        bank_name: docData.cheque_details.bank_name || 'Bank',
-        branch: docData.cheque_details.branch || null,
-        cheque_date: docData.cheque_details.cheque_date || new Date().toISOString().slice(0, 10),
-        received_or_issued_date: new Date().toISOString().slice(0, 10),
-        amount: Number(chequeLine.amount),
-        status: 'received',
-        notes: `${isReservation ? 'Advance for reservation' : 'Payment for invoice'} ${docNo}`
-      }));
-    }
+    if (savedPayments.length) setPayments(prev => [...savedPayments, ...prev.filter(item => !savedPayments.some(saved => saved.source_key === item.source_key))]);
+    if (savedCheques.length) setCheques(prev => [...savedCheques, ...prev.filter(item => !savedCheques.some(saved => saved.id === item.id))]);
 
     if (sourceDoc && isValidUUID(sourceDoc.id)) {
       await runCloudWrite('Closing converted document', () => supabase.from('sales_documents').update({
@@ -3430,16 +3595,13 @@ export function BusinessProvider({ children }) {
 
     const stockWrites = (doc.items || []).map(item => {
       const productId = item.product?.id || item.product_id;
-      const current = stockBalances[productId] || {};
       const qty = Number(item.qty) || 0;
-      return supabase.from('stock_balances').upsert({
-        product_id: productId,
-        qty_on_hand: Number(current.qty_on_hand) || 0,
-        qty_reserved: Math.max(0, (Number(current.qty_reserved) || 0) - qty),
-        qty_available: (Number(current.qty_available) || 0) + qty,
-        qty_in_transit: Number(current.qty_in_transit) || 0,
-        qty_damaged: Number(current.qty_damaged) || 0,
-        updated_at: new Date().toISOString()
+      return supabase.rpc('rpc_adjust_stock_balance', {
+        p_product_id: productId,
+        p_qty_on_hand_delta: 0,
+        p_qty_reserved_delta: -qty,
+        p_qty_in_transit_delta: 0,
+        p_qty_damaged_delta: 0
       });
     });
     if (stockWrites.length) await runCloudBatch('Releasing reserved stock', stockWrites);
@@ -3484,6 +3646,34 @@ export function BusinessProvider({ children }) {
     const docNo = doc.doc_no;
     const docIdStr = String(docId);
 
+    const cloudLinkedPayments = payments.filter(payment =>
+      (payment.sales_doc_id && String(payment.sales_doc_id) === docIdStr) ||
+      (docNo && (payment.reference === docNo || payment.reference?.includes(docNo) || payment.payment_no?.includes(docNo)))
+    );
+    for (const payment of cloudLinkedPayments) await reversePaymentBalance(payment, 'Reversing sales payment');
+
+    if (doc.customer_id && Number(doc.balance_due) > 0) {
+      await adjustCustomerBalance('Reversing customer receivable', doc.customer_id, -Number(doc.balance_due), 0);
+    }
+
+    if (doc.status !== 'cancelled' && (doc.doc_type === 'sales_invoice' || doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order')) {
+      const isReservationDocument = doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order';
+      const stockReversals = (doc.items || [])
+        .filter(item => isValidUUID(item.product_id || item.product?.id))
+        .map(item => {
+          const productId = item.product_id || item.product?.id;
+          const qty = Number(item.qty) || 0;
+          return supabase.rpc('rpc_adjust_stock_balance', {
+            p_product_id: productId,
+            p_qty_on_hand_delta: isReservationDocument ? 0 : qty,
+            p_qty_reserved_delta: isReservationDocument ? -qty : 0,
+            p_qty_in_transit_delta: 0,
+            p_qty_damaged_delta: item.is_warranty_replacement ? -Math.min(qty, Number(stockBalances[productId]?.qty_damaged) || 0) : 0
+          });
+        });
+      if (stockReversals.length) await runCloudBatch('Reversing sales inventory', stockReversals);
+    }
+
     setSalesDocuments(prev => prev.filter(d => String(d.id) !== docIdStr));
 
     // Reverse inventory impact
@@ -3519,14 +3709,6 @@ export function BusinessProvider({ children }) {
       });
     }
 
-    // Reverse customer balance due if unpaid balance existed
-    if (doc.customer_id && doc.balance_due > 0) {
-      setCustomers(prev => prev.map(c => c.id === doc.customer_id ? {
-        ...c,
-        current_receivable: Math.max(0, (c.current_receivable || 0) - doc.balance_due)
-      } : c));
-    }
-
     // Identify all linked payments (by sales_doc_id or doc_no in reference/notes/payment_no)
     const isLinkedPayment = (p) => {
       if (!p) return false;
@@ -3538,19 +3720,6 @@ export function BusinessProvider({ children }) {
       }
       return false;
     };
-
-    const linkedPayments = payments.filter(isLinkedPayment);
-
-    // Reverse bank account balances from linked payments
-    linkedPayments.forEach(p => {
-      const amt = Number(p.amount) || 0;
-      if (amt > 0 && p.bank_account_id) {
-        setBankAccounts(prev => prev.map(b => b.id === p.bank_account_id ? {
-          ...b,
-          current_balance: Math.max(0, (Number(b.current_balance) || 0) - amt)
-        } : b));
-      }
-    });
 
     // Remove payments linked to this sales doc
     setPayments(prev => prev.filter(p => !isLinkedPayment(p)));
@@ -3570,21 +3739,14 @@ export function BusinessProvider({ children }) {
       setStockMovements(prev => prev.filter(m => m.doc_no !== docNo && !m.reference?.includes(docNo)));
     }
 
-    try {
-      if (supabase) {
-        await supabase.from('sales_document_items').delete().eq('sales_document_id', docId);
-        await supabase.from('sales_documents').delete().eq('id', docId);
-        await supabase.from('payments').delete().eq('sales_doc_id', docId);
-        if (docNo) {
-          await supabase.from('payments').delete().or(`reference.eq.${docNo},payment_no.eq.PAY-${docNo},payment_no.eq.PAY-INV-${docNo},notes.ilike.%${docNo}%`);
-          await supabase.from('cheque_register').delete().or(`sales_document_id.eq.${docId},notes.ilike.%${docNo}%`);
-        } else {
-          await supabase.from('cheque_register').delete().eq('sales_document_id', docId);
-        }
-      }
-    } catch (e) {
-      console.warn('Supabase sales doc deletion notice:', e);
+    if (docNo) {
+      await runCloudWrite('Deleting sales cheques', () => supabase.from('cheque_register').delete().or(`sales_document_id.eq.${docId},notes.ilike.%${docNo}%`));
+      await runCloudWrite('Deleting referenced sales payments', () => supabase.from('payments').delete().or(`reference.eq.${docNo},payment_no.eq.PAY-${docNo},payment_no.eq.PAY-INV-${docNo},notes.ilike.%${docNo}%`));
+    } else {
+      await runCloudWrite('Deleting sales cheques', () => supabase.from('cheque_register').delete().eq('sales_document_id', docId));
     }
+    await runCloudWrite('Deleting sales payments', () => supabase.from('payments').delete().eq('sales_doc_id', docId));
+    await runCloudWrite('Deleting sales document', () => supabase.from('sales_documents').delete().eq('id', docId));
 
     notifySuccess(`Document ${docNo || ''} deleted and related cash flow and stock reversed`);
   };
@@ -3594,40 +3756,15 @@ export function BusinessProvider({ children }) {
     const payment = payments.find(p => p.id === paymentId);
     if (!payment) return;
 
-    // 1. Remove from payments state
+    await reversePaymentBalance(payment, 'Reversing bank payment');
+
+    if (payment.cheque_id) {
+      await runCloudWrite('Deleting linked cheque', () => supabase.from('cheque_register').delete().eq('id', payment.cheque_id));
+    }
+    await runCloudWrite('Deleting payment', () => supabase.from('payments').delete().eq('id', paymentId));
+
     setPayments(prev => prev.filter(p => p.id !== paymentId));
-
-    // 2. Reverse bank account balance if applicable
-    const amt = Number(payment.amount) || 0;
-    if (amt > 0 && payment.bank_account_id) {
-      const isOutflow = payment.payment_type === 'transit_purchase_payment' ||
-                        payment.payment_type === 'purchase_payment' ||
-                        payment.payment_type === 'operational_expense' ||
-                        payment.payment_type === 'supplier_advance' ||
-                        payment.payment_type === 'expense';
-      setBankAccounts(prev => prev.map(b => {
-        if (b.id !== payment.bank_account_id) return b;
-        const curBal = Number(b.current_balance) || 0;
-        return {
-          ...b,
-          current_balance: isOutflow ? curBal + amt : Math.max(0, curBal - amt)
-        };
-      }));
-    }
-
-    // 3. If tied to a cheque, remove or cancel it in cheque register
-    if (payment.payment_method === 'cheque' || payment.cheque_no) {
-      setCheques(prev => prev.filter(c => c.id !== payment.cheque_id && c.cheque_no !== payment.cheque_no));
-    }
-
-    // 4. Delete from Supabase
-    try {
-      if (supabase) {
-        await supabase.from('payments').delete().eq('id', paymentId);
-      }
-    } catch (e) {
-      console.warn('Supabase delete payment notice:', e);
-    }
+    setCheques(prev => prev.filter(c => c.id !== payment.cheque_id && c.payment_id !== paymentId));
 
     notifySuccess(`Payment entry ${payment.payment_no || ''} deleted`);
   };
@@ -3666,21 +3803,16 @@ export function BusinessProvider({ children }) {
     if (newStatus === 'cleared' && isValidUUID(extraData.deposit_bank_account_id)) {
       const account = bankAccounts.find(item => item.id === extraData.deposit_bank_account_id);
       if (account) {
-        await runCloudWrite('Updating deposited cheque balance', () => supabase.from('bank_accounts').update({
-          current_balance: (Number(account.current_balance) || 0) + (Number(chq.amount) || 0),
-          updated_at: new Date().toISOString()
-        }).eq('id', account.id));
+        const directionMultiplier = chq.direction === 'issued' ? -1 : 1;
+        await adjustBankBalance('Updating deposited cheque balance', account.id, directionMultiplier * (Number(chq.amount) || 0));
       }
     }
 
-    if (newStatus === 'returned') {
+    if (newStatus === 'returned' && chq.direction === 'received') {
       if (isValidUUID(chq.party_id)) {
         const customer = customers.find(item => item.id === chq.party_id);
         if (customer) {
-          await runCloudWrite('Reopening customer receivable', () => supabase.from('customers').update({
-            current_receivable: (Number(customer.current_receivable) || 0) + (Number(chq.amount) || 0),
-            updated_at: new Date().toISOString()
-          }).eq('id', customer.id));
+          await adjustCustomerBalance('Reopening customer receivable', customer.id, Number(chq.amount) || 0, 0);
         }
       }
       const salesDocumentId = chq.sales_document_id || chq.sales_doc_id;
@@ -3709,21 +3841,7 @@ export function BusinessProvider({ children }) {
       return_date: newStatus === 'returned' ? today : c.return_date
     } : c));
 
-    if (newStatus === 'cleared' && extraData.deposit_bank_account_id) {
-      setBankAccounts(prev => prev.map(b => b.id === extraData.deposit_bank_account_id ? {
-        ...b,
-        current_balance: (b.current_balance || 0) + chq.amount
-      } : b));
-    }
-
-    if (newStatus === 'returned') {
-      if (chq.party_id) {
-        setCustomers(prev => prev.map(c => c.id === chq.party_id ? {
-          ...c,
-          current_receivable: (c.current_receivable || 0) + chq.amount
-        } : c));
-      }
-
+    if (newStatus === 'returned' && chq.direction === 'received') {
       const salesDocumentId = chq.sales_document_id || chq.sales_doc_id;
       if (salesDocumentId) {
         setSalesDocuments(prev => prev.map(d => d.id === salesDocumentId ? {

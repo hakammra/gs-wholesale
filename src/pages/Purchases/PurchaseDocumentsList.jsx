@@ -48,6 +48,10 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
   const [purchaseDate, setPurchaseDate] = useState(() => savedDraft?.purchaseDate || new Date().toISOString().slice(0, 10));
   const [paymentType, setPaymentType] = useState(() => savedDraft?.paymentType || 'credit');
   const [bankAccountId, setBankAccountId] = useState(() => savedDraft?.bankAccountId || bankAccounts[0]?.id || '');
+  const [chequeNo, setChequeNo] = useState(() => savedDraft?.chequeNo || '');
+  const [chequeDate, setChequeDate] = useState(() => savedDraft?.chequeDate || new Date().toISOString().slice(0, 10));
+  const [chequeBank, setChequeBank] = useState(() => savedDraft?.chequeBank || '');
+  const [isSaving, setIsSaving] = useState(false);
   const [notes, setNotes] = useState(() => savedDraft?.notes || '');
   const [items, setItems] = useState(() => savedDraft?.items || []);
 
@@ -80,6 +84,9 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
         purchaseDate,
         paymentType,
         bankAccountId,
+        chequeNo,
+        chequeDate,
+        chequeBank,
         notes,
         items
       };
@@ -94,6 +101,9 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     purchaseDate,
     paymentType,
     bankAccountId,
+    chequeNo,
+    chequeDate,
+    chequeBank,
     notes,
     items
   ]);
@@ -107,6 +117,9 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     setPurchaseDate(new Date().toISOString().slice(0, 10));
     setPaymentType('credit');
     setBankAccountId(bankAccounts[0]?.id || '');
+    setChequeNo('');
+    setChequeDate(new Date().toISOString().slice(0, 10));
+    setChequeBank('');
     setNotes('');
     setItems([]);
     notifySuccess('Unsaved purchase draft cleared');
@@ -145,9 +158,15 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     );
   });
 
-  const handlePromoteDraftToReceived = (doc) => {
-    updatePurchaseDocument(doc.id, { status: 'received' });
-    notifySuccess(`Purchase Document ${doc.doc_no} confirmed & stock added to inventory!`);
+  const handlePromoteDraftToReceived = async (doc) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      await updatePurchaseDocument(doc.id, { status: 'received' });
+      notifySuccess(`Purchase Document ${doc.doc_no} confirmed & stock added to inventory!`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleOpenDirectPurchase = () => {
@@ -328,6 +347,15 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
 
   const handleSaveDirectPurchase = async (e, asDraft = false) => {
     if (e) e.preventDefault();
+    if (isSaving) return;
+    if (paymentType === 'bank' && !bankAccountId) {
+      notifyError('Select the bank account used for this payment.');
+      return;
+    }
+    if (paymentType === 'cheque' && (!chequeNo.trim() || !chequeDate)) {
+      notifyError('Cheque number and cheque date are required.');
+      return;
+    }
     
     // Auto-resolve supplier
     let resolvedSupplierId = supplierId;
@@ -351,12 +379,18 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
       return;
     }
 
+    setIsSaving(true);
+
     const directShipmentMock = {
       transit_shipment_id: editingPurchaseId ? null : ('direct-' + Date.now()),
       supplier_id: resolvedSupplierId,
       supplier_name: resolvedSupplierName,
       payment_type: paymentType,
-      payment_details: paymentType === 'bank' ? { bank_account_id: bankAccountId } : null,
+      payment_details: paymentType === 'bank'
+        ? { bank_account_id: bankAccountId }
+        : paymentType === 'cheque'
+          ? { cheque_no: chequeNo.trim(), cheque_date: chequeDate, bank_name: chequeBank.trim() || 'Bank' }
+          : null,
       receipt_date: purchaseDate,
       notes: notes || 'Direct Stock Purchase',
       status: asDraft ? 'draft' : 'received',
@@ -386,6 +420,8 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
       setIsDirectPurchaseOpen(false);
     } catch {
       // Keep the form open; the shared sync layer displays the cloud error.
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -425,6 +461,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
             <button
               type="button"
               onClick={(e) => handleSaveDirectPurchase(e, true)}
+              disabled={isSaving}
               className="secondary-button"
               style={{ borderColor: '#ffca58', color: '#ffca58', fontWeight: 700 }}
               title="Save as Draft without affecting inventory balances or WAC"
@@ -434,10 +471,11 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
             <button
               type="button"
               onClick={(e) => handleSaveDirectPurchase(e, false)}
+              disabled={isSaving}
               className="primary-button"
               style={{ fontWeight: 800 }}
             >
-              {editingPurchaseId ? '💾 Update & Add to Stock' : 'Save & Add to Stock'}
+              {isSaving ? 'Saving…' : editingPurchaseId ? '💾 Update & Add to Stock' : 'Save & Add to Stock'}
             </button>
           </div>
         </div>
@@ -717,6 +755,22 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                 <span>📝</span> Cheque Issued
               </button>
             </div>
+            {paymentType === 'bank' && (
+              <div className="payment-detail-grid">
+                <label>Paid from bank account *</label>
+                <select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)} required>
+                  <option value="">Select bank account</option>
+                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                </select>
+              </div>
+            )}
+            {paymentType === 'cheque' && (
+              <div className="payment-detail-grid cheque-detail-grid">
+                <div><label>Cheque number *</label><input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} required /></div>
+                <div><label>Cheque date *</label><input type="date" value={chequeDate} onChange={(e) => setChequeDate(e.target.value)} required /></div>
+                <div><label>Cheque bank *</label><input value={chequeBank} onChange={(e) => setChequeBank(e.target.value)} required /></div>
+              </div>
+            )}
           </div>
 
           {/* Bottom Totals & Submit Bar */}
@@ -742,10 +796,11 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
               </button>
               <button
                 type="submit"
+                disabled={isSaving}
                 className="primary-button"
                 style={{ padding: '10px 24px', fontSize: 14, fontWeight: 800 }}
               >
-                {editingPurchaseId ? '💾 Update & Add to Stock' : 'Save & Add to Stock'}
+                {isSaving ? 'Saving…' : editingPurchaseId ? '💾 Update & Add to Stock' : 'Save & Add to Stock'}
               </button>
             </div>
           </div>
@@ -1088,11 +1143,12 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                           <button
                             type="button"
                             onClick={(e) => { e.stopPropagation(); handlePromoteDraftToReceived(doc); }}
+                            disabled={isSaving}
                             className="primary-button small-button"
                             style={{ background: '#52e37e', color: '#000', padding: '4px 10px', fontWeight: 700 }}
                             title="Confirm & Receive stock into inventory"
                           >
-                            ✅ Receive
+                            {isSaving ? 'Saving…' : '✅ Receive'}
                           </button>
                         </>
                       ) : (

@@ -49,6 +49,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [arrivalDate, setArrivalDate] = useState(new Date().toISOString().slice(0, 10));
   const [receivingItems, setReceivingItems] = useState([]);
   const [arrivalNotes, setArrivalNotes] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isReceiving, setIsReceiving] = useState(false);
 
   // Form State for New Stock in Transit
   const [supplierId, setSupplierId] = useState(() => savedDraft?.supplierId || suppliers[0]?.id || '');
@@ -65,7 +67,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [bankAccountId, setBankAccountId] = useState(() => savedDraft?.bankAccountId || bankAccounts[0]?.id || '');
   const [chequeNo, setChequeNo] = useState(() => savedDraft?.chequeNo || '');
   const [chequeDate, setChequeDate] = useState(() => savedDraft?.chequeDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
-  const [chequeBank, setChequeBank] = useState(() => savedDraft?.chequeBank || 'Commercial Bank');
+  const [chequeBank, setChequeBank] = useState(() => savedDraft?.chequeBank || '');
 
   // Items State (in direct LKR, no foreign currency conversion)
   const [items, setItems] = useState(() => savedDraft?.items || []);
@@ -196,9 +198,13 @@ export default function TransitShipmentList({ onNavigateTab }) {
     .filter(s => s.status === 'in_transit' && !checkIsArrived(s))
     .reduce((sum, s) => sum + (Number(s.total_estimated_cost_lkr || s.foreign_items_subtotal) || 0), 0);
 
-  const handlePromoteDraftToTransit = (shipment) => {
-    updateTransitShipment(shipment.id, { status: 'in_transit' });
-    notifySuccess(`Draft shipment ${shipment.shipment_no} dispatched! In-transit inventory updated.`);
+  const handlePromoteDraftToTransit = async (shipment) => {
+    try {
+      await updateTransitShipment(shipment.id, { status: 'in_transit' });
+      notifySuccess(`Draft shipment ${shipment.shipment_no} dispatched! In-transit inventory updated.`);
+    } catch {
+      // Shared sync handling reports the error.
+    }
   };
 
   const handleOpenNewShipment = () => {
@@ -371,16 +377,16 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
   const handleSaveShipment = async (e, asDraft = false) => {
     if (e) e.preventDefault();
+    if (isSaving) return;
 
-    // Auto-resolve supplier
-    let resolvedSupplierId = supplierId;
-    if (!resolvedSupplierId) {
-      if (suppliers.length > 0) {
-        resolvedSupplierId = suppliers[0].id;
-      } else {
-        const autoSup = await saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
-        resolvedSupplierId = autoSup?.id || 'sup-general';
-      }
+    if (paymentType === 'cheque' && (!chequeNo.trim() || !chequeDate)) {
+      notifyError('Cheque number and cheque date are required.');
+      return;
+    }
+
+    if (paymentType === 'bank' && !bankAccountId) {
+      notifyError('Select the bank account used for this payment.');
+      return;
     }
 
     const validItems = items.filter(it => it.product_id);
@@ -389,7 +395,20 @@ export default function TransitShipmentList({ onNavigateTab }) {
       return;
     }
 
-    const payload = {
+    setIsSaving(true);
+    try {
+      // Auto-resolve supplier
+      let resolvedSupplierId = supplierId;
+      if (!resolvedSupplierId) {
+        if (suppliers.length > 0) {
+          resolvedSupplierId = suppliers[0].id;
+        } else {
+          const autoSup = await saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
+          resolvedSupplierId = autoSup?.id || 'sup-general';
+        }
+      }
+
+      const payload = {
       supplier_id: resolvedSupplierId,
       bill_of_lading_no: externalReference || `REF-${Date.now().toString().slice(-4)}`,
       shipping_line_carrier: shippingMethod,
@@ -410,9 +429,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
       currency: 'LKR',
       exchange_rate_snapshot: 1.0,
       status: asDraft ? 'draft' : 'in_transit'
-    };
+      };
 
-    try {
       if (editingShipmentId) {
         await updateTransitShipment(editingShipmentId, payload);
         notifySuccess(asDraft ? 'Transit draft shipment updated!' : 'Stock in Transit shipment updated! In-transit inventory counts re-applied.');
@@ -426,6 +444,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
       setIsFormOpen(false);
     } catch {
       // Keep the form open; the shared sync layer displays the cloud error.
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -447,20 +467,27 @@ export default function TransitShipmentList({ onNavigateTab }) {
   };
 
   // Confirm Arrival & Convert to Purchase Document
-  const handleConfirmArrival = (e) => {
+  const handleConfirmArrival = async (e) => {
     e.preventDefault();
-    if (!shipmentToReceive) return;
+    if (!shipmentToReceive || isReceiving) return;
 
-    const purDoc = receivePurchaseShipment({
-      transit_shipment_id: shipmentToReceive.id,
-      receipt_date: arrivalDate,
-      notes: arrivalNotes,
-      items: receivingItems
-    });
+    setIsReceiving(true);
+    try {
+      const purDoc = await receivePurchaseShipment({
+        transit_shipment_id: shipmentToReceive.id,
+        receipt_date: arrivalDate,
+        notes: arrivalNotes,
+        items: receivingItems
+      });
 
-    notifySuccess(`Shipment ${shipmentToReceive.shipment_no} marked as ARRIVED and converted to Purchase Document ${purDoc?.doc_no || ''}! Stock quantities added to inventory.`);
-    setIsReceiveModalOpen(false);
-    setShipmentToReceive(null);
+      notifySuccess(`Shipment ${shipmentToReceive.shipment_no} marked as ARRIVED and converted to Purchase Document ${purDoc?.doc_no || ''}! Stock quantities added to inventory.`);
+      setIsReceiveModalOpen(false);
+      setShipmentToReceive(null);
+    } catch {
+      // Keep the modal open so the operation can be safely retried.
+    } finally {
+      setIsReceiving(false);
+    }
   };
 
   // RENDER FULL IN-PAGE WORKSPACE WHEN CREATING NEW SHIPMENT
@@ -492,6 +519,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
             <button
               type="button"
               onClick={(e) => handleSaveShipment(e, true)}
+              disabled={isSaving}
               className="secondary-button"
               style={{ borderColor: '#ffca58', color: '#ffca58', fontWeight: 700 }}
               title="Save as Draft without affecting in-transit stock balances"
@@ -501,10 +529,11 @@ export default function TransitShipmentList({ onNavigateTab }) {
             <button
               type="button"
               onClick={(e) => handleSaveShipment(e, false)}
+              disabled={isSaving}
               className="primary-button"
               style={{ fontWeight: 800 }}
             >
-              {editingShipmentId ? '💾 Update & Dispatch' : '🚀 Place & Dispatch Shipment'}
+              {isSaving ? 'Saving…' : editingShipmentId ? '💾 Update & Dispatch' : '🚀 Place & Dispatch Shipment'}
             </button>
           </div>
         </div>
@@ -817,6 +846,22 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 <span>📝</span> Cheque Issued
               </button>
             </div>
+            {paymentType === 'bank' && (
+              <div className="payment-detail-grid">
+                <label>Paid from bank account *</label>
+                <select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)} required>
+                  <option value="">Select bank account</option>
+                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                </select>
+              </div>
+            )}
+            {paymentType === 'cheque' && (
+              <div className="payment-detail-grid cheque-detail-grid">
+                <div><label>Cheque number *</label><input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} required /></div>
+                <div><label>Cheque date *</label><input type="date" value={chequeDate} onChange={(e) => setChequeDate(e.target.value)} required /></div>
+                <div><label>Cheque bank *</label><input value={chequeBank} onChange={(e) => setChequeBank(e.target.value)} required /></div>
+              </div>
+            )}
           </div>
 
           {/* Bottom Totals & Submit Bar */}
@@ -842,10 +887,11 @@ export default function TransitShipmentList({ onNavigateTab }) {
               </button>
               <button
                 type="submit"
+                disabled={isSaving}
                 className="primary-button"
                 style={{ padding: '10px 24px', fontSize: 14, fontWeight: 800 }}
               >
-                {editingShipmentId ? '💾 Update & Dispatch' : '🚀 Place & Dispatch Shipment'}
+                {isSaving ? 'Saving…' : editingShipmentId ? '💾 Update & Dispatch' : '🚀 Place & Dispatch Shipment'}
               </button>
             </div>
           </div>
@@ -1467,8 +1513,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 <button type="button" onClick={() => setIsReceiveModalOpen(false)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button" style={{ background: '#52e37e', color: '#000', fontWeight: 800 }}>
-                  Confirm Arrival & Convert to Purchase Document
+                <button type="submit" disabled={isReceiving} className="primary-button" style={{ background: '#52e37e', color: '#000', fontWeight: 800 }}>
+                  {isReceiving ? 'Receiving…' : 'Confirm Arrival & Convert to Purchase Document'}
                 </button>
               </div>
             </form>

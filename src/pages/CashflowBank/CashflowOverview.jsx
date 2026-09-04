@@ -10,13 +10,6 @@ export default function CashflowOverview() {
     recordDirectExpense,
     recordDirectIncome,
     deletePayment,
-    deleteSalesDocument,
-    deletePurchaseDocument,
-    deleteTransitShipment,
-    resetTransactionsOnly,
-    transitShipments = [],
-    purchases = [],
-    salesDocuments = [],
     cheques = [],
     suppliers = [],
     customers = []
@@ -28,6 +21,7 @@ export default function CashflowOverview() {
   const [filterType, setFilterType] = useState('all'); // 'all' | 'inflow' | 'outflow' | 'capital' | 'cash' | 'bank' | 'cheque'
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isIncomeModalOpen, setIsIncomeModalOpen] = useState(false);
+  const [isSavingEntry, setIsSavingEntry] = useState(false);
 
   const [expenseForm, setExpenseForm] = useState({
     amount: '',
@@ -35,6 +29,10 @@ export default function CashflowOverview() {
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: 'cash',
     bank_account_id: bankAccounts[0]?.id || '',
+    cheque_no: '',
+    cheque_date: new Date().toISOString().slice(0, 10),
+    cheque_bank: '',
+    cheque_branch: '',
     payee_name: '',
     reference: '',
     notes: ''
@@ -46,195 +44,22 @@ export default function CashflowOverview() {
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: 'cash',
     bank_account_id: bankAccounts[0]?.id || '',
-    payer_name: 'Managing Director / Owner',
+    payer_name: '',
     reference: '',
     notes: ''
   });
 
-  // Aggregate All Cashflow Transactions into a unified ledger
+  // Cash flow is built from actual payment rows only. Sales, purchase and
+  // transit documents are commitments/source documents, not a second cash
+  // movement. This keeps every real-world payment represented exactly once.
   const allTransactions = useMemo(() => {
-    const list = [];
-    const seenSalesDocIds = new Set();
-    const seenPurchaseDocIds = new Set();
-    const seenPaymentIds = new Set();
-
-    // 1. Sales Documents (Wholesale Sales Invoices & Customer Reservations)
-    // Every active sales document is a business sales inflow transaction!
-    salesDocuments.forEach(doc => {
-      if (doc.status !== 'cancelled' && doc.doc_type !== 'quotation') {
-        seenSalesDocIds.add(String(doc.id));
-        if (doc.doc_no) seenSalesDocIds.add(doc.doc_no);
-
-        const total = Number(doc.grand_total) || 0;
-        const paid = Number(doc.paid_amount) || 0;
-        const balDue = Number(doc.balance_due) || 0;
-        const isPureCredit = doc.payment_status === 'credit' ||
-                             (doc.notes || '').toLowerCase().includes('credit') ||
-                             (balDue >= total && paid === 0) ||
-                             (doc.payment_status === 'unpaid' && paid === 0);
-        const isPartial = paid > 0 && balDue > 0;
-        const isFullyPaid = balDue <= 0.01 && paid > 0;
-
-        // Determine payment method accurately
-        let method = 'credit';
-        if (isPureCredit) {
-          method = 'credit';
-        } else if (doc.is_cod || (doc.notes || '').toLowerCase().includes('cod')) {
-          method = 'cod';
-        } else if (isPartial) {
-          const activeLines = (doc.payment_lines || []).filter(p => p.method !== 'credit' && (Number(p.amount) || 0) > 0);
-          if (activeLines.length > 0) {
-            method = `${activeLines.map(p => p.method).join(', ')} + credit`;
-          } else {
-            method = 'partial (credit)';
-          }
-        } else if (doc.payment_lines && doc.payment_lines.length > 0) {
-          const activeLines = doc.payment_lines.filter(p => (Number(p.amount) || 0) > 0);
-          method = activeLines.length > 0 ? activeLines.map(p => p.method).join(', ') : (isFullyPaid ? 'cash' : 'credit');
-        } else if (paid > 0) {
-          const linkedPay = payments.find(p => p.sales_doc_id === doc.id || (doc.doc_no && p.reference?.includes(doc.doc_no)));
-          method = linkedPay?.payment_method || 'cash';
-        } else {
-          method = 'credit';
-        }
-
-        const statusLabel = doc.status === 'reserved'
-          ? 'Reserved'
-          : isPureCredit
-            ? 'Credit / Unpaid'
-            : isPartial
-              ? `Partial (Paid Rs. ${paid.toLocaleString()})`
-              : 'Fully Paid';
-
-        list.push({
-          id: `sales-doc-${doc.id}`,
-          doc_id: doc.id,
-          doc_type: 'sales',
-          voucher_no: `REC-${doc.doc_no}`,
-          date: doc.doc_date || doc.created_at,
-          category: doc.doc_type === 'reserved_order' ? 'Reservation Sales' : 'Wholesale Sales Invoice',
-          party: doc.customer_name || 'Walk-in Customer',
-          method: method,
-          reference: `${doc.doc_no} [${statusLabel}]`,
-          is_outflow: false,
-          amount: total,
-          paid_amount: paid,
-          balance_due: balDue,
-          payment_status: isPureCredit ? 'credit' : doc.payment_status,
-          is_direct_cashflow: false,
-          is_document_entry: true
-        });
-      }
-    });
-
-    // 2. Purchase Documents (Goods Receipts / Direct Purchases)
-    // Every active purchase document represents an inventory purchase outflow!
-    purchases.forEach(pur => {
-      if (pur.status !== 'cancelled') {
-        seenPurchaseDocIds.add(String(pur.id));
-        const docNo = pur.doc_no || pur.grn_no;
-        if (docNo) seenPurchaseDocIds.add(docNo);
-
-        const total = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
-        const payType = pur.payment_type || (pur.notes?.toLowerCase().includes('cash') ? 'cash' : pur.notes?.toLowerCase().includes('bank') ? 'bank' : 'credit');
-
-        list.push({
-          id: `pur-doc-${pur.id}`,
-          doc_id: pur.id,
-          doc_type: 'purchase',
-          voucher_no: `PAY-${docNo}`,
-          date: pur.receipt_date || pur.created_at,
-          category: 'Purchase Document (Inventory)',
-          party: pur.supplier_name || 'Supplier',
-          method: payType,
-          reference: `${docNo}${pur.shipment_no && pur.shipment_no !== 'DIRECT' ? ` (Transit: ${pur.shipment_no})` : ''}`,
-          is_outflow: true,
-          amount: total,
-          status: pur.status,
-          is_direct_cashflow: false,
-          is_document_entry: true
-        });
-      }
-    });
-
-    // 3. Stock in Transit Shipments (Only active shipments that have NOT arrived / converted to purchases yet)
-    transitShipments.forEach(shp => {
-      // Exclude companion shipments, cancelled, arrived/received
-      if (
-        shp.status !== 'cancelled' &&
-        shp.status !== 'arrived' &&
-        shp.status !== 'received' &&
-        !shp.shipment_no?.startsWith('DIR-TRN-') &&
-        !shp.notes?.includes('Direct purchase companion')
-      ) {
-        // Also check if already covered by an arrived purchase
-        if (shp.purchase_doc_id || (shp.shipment_no && seenPurchaseDocIds.has(shp.shipment_no))) return;
-
-        const total = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
-        const sup = suppliers.find(s => s.id === shp.supplier_id);
-        const refNo = shp.shipment_no || shp.bill_of_lading_no;
-        const payType = shp.payment_type || (shp.notes?.toLowerCase().includes('cash') ? 'cash' : shp.notes?.toLowerCase().includes('bank') ? 'bank' : 'credit');
-
-        list.push({
-          id: `trn-shp-${shp.id}`,
-          doc_id: shp.id,
-          doc_type: 'transit',
-          voucher_no: `TRN-${shp.shipment_no}`,
-          date: shp.departure_date || shp.shipping_date || shp.created_at,
-          category: 'Stock in Transit Order',
-          party: shp.supplier_name || sup?.name || 'Import Supplier',
-          method: payType,
-          reference: `${refNo} (${shp.status === 'in_transit' ? 'In Transit' : 'Draft'})`,
-          is_outflow: true,
-          amount: total,
-          is_direct_cashflow: false,
-          is_document_entry: true
-        });
-      }
-    });
-
-    // 4. Standalone Payments (Capital Inflows, Owner Investments, Direct Expenses, Customer Account Settlements)
-    // Build a set of arrived transit shipment IDs & shipment numbers to deduplicate transit companion payments
-    const arrivedTransitIds = new Set(
-      transitShipments
-        .filter(s => s.status === 'arrived' || s.status === 'received' || s.purchase_doc_id)
-        .flatMap(s => [String(s.id), s.shipment_no].filter(Boolean))
-    );
-
-    payments.forEach(p => {
-      // Skip if this payment is already represented by a sales document or purchase document in the list
-      const matchesSalesDoc = (p.sales_doc_id && seenSalesDocIds.has(String(p.sales_doc_id))) ||
-                              (p.reference && seenSalesDocIds.has(p.reference)) ||
-                              (p.payment_no && (seenSalesDocIds.has(p.payment_no) || p.payment_no.includes('INV-')));
-
-      const matchesPurDoc = (p.purchase_doc_id && seenPurchaseDocIds.has(String(p.purchase_doc_id))) ||
-                            (p.reference && seenPurchaseDocIds.has(p.reference)) ||
-                            (p.payment_no && (seenPurchaseDocIds.has(p.payment_no) || p.payment_no.includes('PUR-')));
-
-      // Skip transit companion payments (PAY-TRN-*) if the transit has already arrived and is shown as a purchase doc
-      const isTransitPayment = p.payment_type === 'transit_purchase_payment' || p.payment_no?.startsWith('PAY-TRN-');
-      const transitAlreadyCoveredByPurchase = isTransitPayment && (
-        (p.transit_shipment_id && arrivedTransitIds.has(String(p.transit_shipment_id))) ||
-        (p.reference && arrivedTransitIds.has(p.reference)) ||
-        // If the transit shipment for this payment now has a purchase doc in our list, skip it
-        transitShipments.some(s =>
-          (s.id === p.transit_shipment_id || s.shipment_no === p.reference) &&
-          (s.status === 'arrived' || s.status === 'received' || s.purchase_doc_id) &&
-          seenPurchaseDocIds.has(String(s.purchase_doc_id || ''))
-        )
-      );
-
-      if (matchesSalesDoc || matchesPurDoc || transitAlreadyCoveredByPurchase) {
-        return; // Already represented cleanly by the sales/purchase document above
-      }
-
-      seenPaymentIds.add(p.id);
-
+    const list = payments.map(p => {
       const isOutflow = p.payment_type === 'transit_purchase_payment' ||
                         p.payment_type === 'purchase_payment' ||
                         p.payment_type === 'operational_expense' ||
                         p.payment_type === 'supplier_advance' ||
-                        p.payment_type === 'expense';
+                        p.payment_type === 'expense' ||
+                        p.payment_type === 'customer_refund';
 
       let partyName = p.customer_name || p.payee_name || p.payer_name || p.supplier_name;
       if (!partyName && p.party_type === 'supplier') {
@@ -247,10 +72,29 @@ export default function CashflowOverview() {
         partyName = 'Owner / Investor';
       }
 
-      const categoryLabel = p.income_category ||
-                            p.expense_category ||
-                            p.payment_type?.replace(/_/g, ' ') ||
-                            'Payment';
+      const categoryLabels = {
+        sales_receipt: 'Sales Receipt',
+        customer_payment: 'Customer Payment',
+        customer_settlement: 'Customer Settlement',
+        customer_advance: 'Customer Advance',
+        customer_refund: 'Customer Refund',
+        purchase_payment: 'Purchase Payment',
+        transit_purchase_payment: 'Transit Purchase Payment',
+        supplier_payment: 'Supplier Payment',
+        supplier_advance: 'Supplier Advance',
+        supplier_refund: 'Supplier Refund',
+        operational_expense: 'Operating Expense',
+        expense: 'Expense',
+        direct_income: 'Capital / Other Inflow',
+        other_income: 'Other Income'
+      };
+      const categoryLabel = p.income_category || p.expense_category || categoryLabels[p.payment_type] || 'Payment';
+
+      const linkedCheque = p.cheque_id
+        ? cheques.find(cheque => String(cheque.id) === String(p.cheque_id))
+        : cheques.find(cheque => String(cheque.payment_id) === String(p.id));
+      const chequeStatus = linkedCheque?.status || (p.payment_method === 'cheque' ? 'pending' : null);
+      const isPendingCheque = p.payment_method === 'cheque' && chequeStatus !== 'cleared';
 
       // An entry is ONLY a direct cashflow expense/income if it was recorded inside Cash Flow without a document
       const isDirectCashflow = (
@@ -263,42 +107,38 @@ export default function CashflowOverview() {
         p.payment_no?.startsWith('CAP-')
       ) && !p.sales_doc_id && !p.purchase_doc_id && !p.purchase_id && !p.transit_shipment_id && !p.order_id;
 
-      list.push({
+      return {
         id: p.id,
         voucher_no: p.payment_no || `PAY-${p.id?.slice(-4)}`,
         date: p.payment_date || p.created_at,
         category: categoryLabel,
         party: partyName || 'General Account',
         method: p.payment_method || 'cash',
-        reference: p.reference || p.notes || '-',
+        reference: [p.reference || p.notes || '-', linkedCheque ? `Cheque #${linkedCheque.cheque_no} (${chequeStatus})` : ''].filter(Boolean).join(' · '),
         is_outflow: isOutflow,
         amount: Number(p.amount) || 0,
+        cheque_status: chequeStatus,
+        is_pending_cheque: isPendingCheque,
         is_direct_cashflow: isDirectCashflow,
         is_document_entry: !isDirectCashflow
-      });
+      };
     });
 
     // Sort descending by date
     return list.sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [salesDocuments, purchases, transitShipments, payments, suppliers, customers]);
+  }, [payments, cheques, suppliers, customers]);
 
   // Financial Calculations (Realized Inflow)
   const totalInflow = allTransactions
-    .filter(t => !t.is_outflow)
-    .reduce((s, t) => {
-      // If sales document, only real cash/bank/cheque paid amount counts towards realized cashflow!
-      if (t.doc_type === 'sales') {
-        return s + (Number(t.paid_amount) || 0);
-      }
-      return s + t.amount;
-    }, 0);
+    .filter(t => !t.is_outflow && !t.is_pending_cheque)
+    .reduce((s, t) => s + t.amount, 0);
 
-  const totalOutflow = allTransactions.filter(t => t.is_outflow).reduce((s, t) => s + t.amount, 0);
+  const totalOutflow = allTransactions.filter(t => t.is_outflow && !t.is_pending_cheque).reduce((s, t) => s + t.amount, 0);
   const netCashflow = totalInflow - totalOutflow;
-  const pendingChequesTotal = cheques.filter(c => c.direction === 'received' && (c.status === 'received' || c.status === 'held' || c.status === 'deposited')).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const pendingChequesTotal = cheques.filter(c => c.status === 'received' || c.status === 'held' || c.status === 'deposited').reduce((s, c) => s + (Number(c.amount) || 0), 0);
   
   const capitalInflowsTotal = allTransactions
-    .filter(t => !t.is_outflow && (
+    .filter(t => !t.is_outflow && !t.is_pending_cheque && (
       (t.category || '').toLowerCase().includes('capital') ||
       (t.category || '').toLowerCase().includes('equity') ||
       (t.category || '').toLowerCase().includes('loan') ||
@@ -356,19 +196,25 @@ export default function CashflowOverview() {
 
   const handleSaveExpense = async (e) => {
     e.preventDefault();
+    if (isSavingEntry) return;
     const amt = Number(expenseForm.amount);
     if (amt <= 0) {
       notifyError('Please enter a valid expense amount');
       return;
     }
 
+    setIsSavingEntry(true);
     try {
       await recordDirectExpense({
         amount: amt,
         expense_category: expenseForm.expense_category,
         payment_date: expenseForm.payment_date,
         payment_method: expenseForm.payment_method,
-        bank_account_id: expenseForm.payment_method === 'bank' ? (expenseForm.bank_account_id || bankAccounts[0]?.id || 'bank-default') : null,
+        bank_account_id: expenseForm.payment_method === 'bank' ? expenseForm.bank_account_id : null,
+        cheque_no: expenseForm.cheque_no,
+        cheque_date: expenseForm.cheque_date,
+        cheque_bank: expenseForm.cheque_bank,
+        cheque_branch: expenseForm.cheque_branch,
         payee_name: expenseForm.payee_name,
         reference: expenseForm.reference,
         notes: expenseForm.notes
@@ -380,30 +226,38 @@ export default function CashflowOverview() {
         payment_date: new Date().toISOString().slice(0, 10),
         payment_method: 'cash',
         bank_account_id: bankAccounts[0]?.id || '',
+        cheque_no: '',
+        cheque_date: new Date().toISOString().slice(0, 10),
+        cheque_bank: '',
+        cheque_branch: '',
         payee_name: '',
         reference: '',
         notes: ''
       });
     } catch (err) {
       notifyError(err.message);
+    } finally {
+      setIsSavingEntry(false);
     }
   };
 
   const handleSaveIncome = async (e) => {
     e.preventDefault();
+    if (isSavingEntry) return;
     const amt = Number(incomeForm.amount);
     if (amt <= 0) {
       notifyError('Please enter a valid inflow amount');
       return;
     }
 
+    setIsSavingEntry(true);
     try {
       await recordDirectIncome({
         amount: amt,
         income_category: incomeForm.income_category,
         payment_date: incomeForm.payment_date,
         payment_method: incomeForm.payment_method,
-        bank_account_id: incomeForm.payment_method === 'bank' ? (incomeForm.bank_account_id || bankAccounts[0]?.id || 'bank-default') : null,
+        bank_account_id: incomeForm.payment_method === 'bank' ? incomeForm.bank_account_id : null,
         payer_name: incomeForm.payer_name,
         reference: incomeForm.reference,
         notes: incomeForm.notes
@@ -415,12 +269,14 @@ export default function CashflowOverview() {
         payment_date: new Date().toISOString().slice(0, 10),
         payment_method: 'cash',
         bank_account_id: bankAccounts[0]?.id || '',
-        payer_name: 'Managing Director / Owner',
+        payer_name: '',
         reference: '',
         notes: ''
       });
     } catch (err) {
       notifyError(err.message);
+    } finally {
+      setIsSavingEntry(false);
     }
   };
 
@@ -531,19 +387,6 @@ export default function CashflowOverview() {
           >
             + Record Expense / Outflow
           </button>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={async () => {
-              if (window.confirm("WARNING: Are you sure you want to delete all transactions and documents across all devices?\n\nThis will permanently wipe all sales invoices, purchases, in-transit shipments, and payments from Supabase Cloud and local cache, resetting stock to 0 while keeping your products and customer list.")) {
-                await resetTransactionsOnly();
-              }
-            }}
-            style={{ borderColor: 'rgba(239, 68, 68, 0.4)', color: '#ef4444', fontWeight: 600 }}
-            title="Reset and clear all transactions and documents across all devices"
-          >
-            🗑️ Wipe Transactions
-          </button>
         </div>
       </div>
 
@@ -601,22 +444,6 @@ export default function CashflowOverview() {
             onClick={() => setFilterType('cheque')}
           >
             📝 Cheques
-          </button>
-          <button
-            type="button"
-            className={`secondary-button small-button ${filterType === 'credit' ? 'active' : ''}`}
-            onClick={() => setFilterType('credit')}
-            style={{ color: '#ffca58' }}
-          >
-            ⏳ Credit / Due
-          </button>
-          <button
-            type="button"
-            className={`secondary-button small-button ${filterType === 'cod' ? 'active' : ''}`}
-            onClick={() => setFilterType('cod')}
-            style={{ color: '#f59e0b' }}
-          >
-            📦 COD
           </button>
         </div>
       </div>
@@ -809,6 +636,29 @@ export default function CashflowOverview() {
                   </div>
                 </div>
 
+                {expenseForm.payment_method === 'bank' && (
+                  <div style={{ marginTop: 12 }}>
+                    <label>Bank Account *</label>
+                    <select
+                      required
+                      value={expenseForm.bank_account_id}
+                      onChange={(e) => setExpenseForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
+                    >
+                      <option value="">Select bank account</option>
+                      {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {expenseForm.payment_method === 'cheque' && (
+                  <div className="transaction-details-grid" style={{ marginTop: 12 }}>
+                    <div><label>Cheque Number *</label><input required value={expenseForm.cheque_no} onChange={(e) => setExpenseForm(prev => ({ ...prev, cheque_no: e.target.value }))} /></div>
+                    <div><label>Cheque Date *</label><input type="date" required value={expenseForm.cheque_date} onChange={(e) => setExpenseForm(prev => ({ ...prev, cheque_date: e.target.value }))} /></div>
+                    <div><label>Cheque Bank *</label><input required value={expenseForm.cheque_bank} onChange={(e) => setExpenseForm(prev => ({ ...prev, cheque_bank: e.target.value }))} /></div>
+                    <div><label>Branch</label><input value={expenseForm.cheque_branch} onChange={(e) => setExpenseForm(prev => ({ ...prev, cheque_branch: e.target.value }))} /></div>
+                  </div>
+                )}
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
                   <div>
                     <label>Bill / Voucher Reference</label>
@@ -835,8 +685,8 @@ export default function CashflowOverview() {
                 <button type="button" onClick={() => setIsExpenseModalOpen(false)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button" style={{ fontWeight: 800 }}>
-                  Save Expense Outflow
+                <button type="submit" className="primary-button" style={{ fontWeight: 800 }} disabled={isSavingEntry}>
+                  {isSavingEntry ? 'Saving…' : 'Save Expense Outflow'}
                 </button>
               </div>
             </form>
@@ -953,6 +803,20 @@ export default function CashflowOverview() {
                   </div>
                 </div>
 
+                {incomeForm.payment_method === 'bank' && (
+                  <div style={{ marginTop: 12 }}>
+                    <label>Receiving Bank Account *</label>
+                    <select
+                      required
+                      value={incomeForm.bank_account_id}
+                      onChange={(e) => setIncomeForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
+                    >
+                      <option value="">Select bank account</option>
+                      {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                    </select>
+                  </div>
+                )}
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
                   <div>
                     <label>Deposit Slip / Reference #</label>
@@ -979,8 +843,8 @@ export default function CashflowOverview() {
                 <button type="button" onClick={() => setIsIncomeModalOpen(false)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button" style={{ background: '#1d733a', borderColor: '#28a745', fontWeight: 800 }}>
-                  Save Capital Inflow
+                <button type="submit" className="primary-button" style={{ background: '#1d733a', borderColor: '#28a745', fontWeight: 800 }} disabled={isSavingEntry}>
+                  {isSavingEntry ? 'Saving…' : 'Save Capital Inflow'}
                 </button>
               </div>
             </form>

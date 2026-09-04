@@ -27,6 +27,7 @@ export default function CustomerList({ onNavigateTab }) {
   // Modals
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [isSettlementModalOpen, setIsSettlementModalOpen] = useState(false);
+  const [isSavingSettlement, setIsSavingSettlement] = useState(false);
   const [customerModalMode, setCustomerModalMode] = useState('create'); // 'create' | 'edit'
 
   const [customerForm, setCustomerForm] = useState({
@@ -52,7 +53,7 @@ export default function CustomerList({ onNavigateTab }) {
     notes: '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
-    bank_name: 'Commercial Bank'
+    bank_name: ''
   });
 
   // Calculate live dynamic outstanding balance for any customer based on posted, non-cancelled invoices
@@ -271,22 +272,23 @@ export default function CustomerList({ onNavigateTab }) {
       notes: ref ? `Payment for ${ref}` : `Credit settlement for ${selectedCust.business_name}`,
       cheque_no: '',
       cheque_date: new Date().toISOString().slice(0, 10),
-      bank_name: 'Commercial Bank'
+      bank_name: ''
     });
     setIsSettlementModalOpen(true);
   };
 
-  const handleSaveSettlement = (e) => {
+  const handleSaveSettlement = async (e) => {
     e.preventDefault();
-    if (!selectedCust) return;
+    if (!selectedCust || isSavingSettlement) return;
     const amt = Number(settlementForm.amount);
     if (amt <= 0) {
       notifyError('Please enter a valid settlement amount');
       return;
     }
 
+    setIsSavingSettlement(true);
     try {
-      recordCustomerSettlement({
+      await recordCustomerSettlement({
         customer_id: selectedCust.id,
         customer_name: selectedCust.business_name,
         amount: amt,
@@ -302,6 +304,8 @@ export default function CustomerList({ onNavigateTab }) {
       setIsSettlementModalOpen(false);
     } catch (err) {
       notifyError(err.message);
+    } finally {
+      setIsSavingSettlement(false);
     }
   };
 
@@ -742,7 +746,7 @@ export default function CustomerList({ onNavigateTab }) {
                           <td className="mono font-semibold" style={{ color: 'var(--primary)' }}>
                             {chq.cheque_no}
                           </td>
-                          <td>{chq.bank_name || 'Commercial Bank'}</td>
+                          <td>{chq.bank_name || 'Bank'}</td>
                           <td>{formatDate(chq.cheque_date)}</td>
                           <td className="mono font-semibold" style={{ textAlign: 'right', color: '#52e37e' }}>
                             {formatCurrency(chq.amount)}
@@ -1075,8 +1079,8 @@ export default function CustomerList({ onNavigateTab }) {
                 <button type="button" onClick={() => setIsSettlementModalOpen(false)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button" style={{ fontWeight: 800, background: '#52e37e', color: '#000' }}>
-                  Save Payment & Settle Invoices
+                <button type="submit" disabled={isSavingSettlement} className="primary-button" style={{ fontWeight: 800, background: '#52e37e', color: '#000' }}>
+                  {isSavingSettlement ? 'Saving…' : 'Save Payment & Settle Invoices'}
                 </button>
               </div>
             </form>

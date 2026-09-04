@@ -14,7 +14,7 @@ export default function ReportsIndex() {
     let cost = 0;
 
     salesDocuments.forEach(doc => {
-      if (doc.doc_type === 'sales_invoice') {
+      if (doc.doc_type === 'sales_invoice' && doc.status !== 'cancelled') {
         (doc.items || []).forEach(it => {
           if (it.product_id === p.id) {
             soldQty += (it.base_qty || it.qty);
@@ -31,17 +31,33 @@ export default function ReportsIndex() {
     return { name: p.name, code: p.item_code, soldQty, revenue, cost, profit, margin };
   });
 
-  // Aging
-  const agingReport = customers.filter(c => c.current_receivable > 0).map(c => ({
-    code: c.customer_code,
-    name: c.business_name,
-    limit: c.credit_limit,
-    totalDue: c.current_receivable,
-    current: c.current_receivable * 0.6,
-    days30: c.current_receivable * 0.3,
-    days60: c.current_receivable * 0.1,
-    days90Plus: 0
-  }));
+  // Real aging from each open invoice date/due date. No estimated percentages.
+  const today = new Date();
+  const agingReport = customers.map(customer => {
+    const result = {
+      code: customer.customer_code,
+      name: customer.business_name,
+      limit: Number(customer.credit_limit) || 0,
+      totalDue: 0,
+      current: 0,
+      days30: 0,
+      days60: 0,
+      days90Plus: 0
+    };
+    salesDocuments
+      .filter(document => document.doc_type === 'sales_invoice' && document.status !== 'cancelled' && document.customer_id === customer.id && (Number(document.balance_due) || 0) > 0)
+      .forEach(document => {
+        const due = new Date(document.due_date || document.doc_date || document.created_at);
+        const ageDays = Math.max(0, Math.floor((today - due) / 86400000));
+        const balance = Number(document.balance_due) || 0;
+        result.totalDue += balance;
+        if (ageDays <= 30) result.current += balance;
+        else if (ageDays <= 60) result.days30 += balance;
+        else if (ageDays <= 90) result.days60 += balance;
+        else result.days90Plus += balance;
+      });
+    return result;
+  }).filter(row => row.totalDue > 0);
 
   const handleExport = () => {
     if (reportType === 'sales_profit') {
@@ -50,7 +66,7 @@ export default function ReportsIndex() {
       })), 'Sales_Gross_Profit');
     } else {
       exportToExcel(agingReport.map(r => ({
-        'Code': r.code, 'Customer': r.name, 'Total Due': r.totalDue, '1-30 Days': r.current, '31-60 Days': r.days30, '61-90 Days': r.days60
+        'Code': r.code, 'Customer': r.name, 'Total Due': r.totalDue, '1-30 Days': r.current, '31-60 Days': r.days30, '61-90 Days': r.days60, '90+ Days': r.days90Plus
       })), 'Accounts_Receivable_Aging');
     }
   };
@@ -120,6 +136,7 @@ export default function ReportsIndex() {
                   <th>Current (1-30 Days)</th>
                   <th>31-60 Days</th>
                   <th>61-90 Days</th>
+                  <th>90+ Days</th>
                 </tr>
               </thead>
               <tbody>
@@ -131,8 +148,10 @@ export default function ReportsIndex() {
                     <td className="mono">{formatCurrency(r.current)}</td>
                     <td className="mono" style={{ color: '#ffca58' }}>{formatCurrency(r.days30)}</td>
                     <td className="mono" style={{ color: '#ff8e8e' }}>{formatCurrency(r.days60)}</td>
+                    <td className="mono" style={{ color: '#ff8e8e' }}>{formatCurrency(r.days90Plus)}</td>
                   </tr>
                 ))}
+                {agingReport.length === 0 && <tr><td colSpan="7" className="empty-state-cell">No outstanding customer balances.</td></tr>}
               </tbody>
             </table>
           )}

@@ -10,36 +10,35 @@ export default function SupplierOrderList() {
   const [isNewOrderOpen, setIsNewOrderOpen] = useState(false);
   const [dispatchOrder, setDispatchOrder] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   const [orderForm, setOrderForm] = useState({
     supplier_id: suppliers[0]?.id || '',
     currency: 'USD',
     exchange_rate_snapshot: 305.5,
     incoterm: 'FOB',
-    port_of_loading: 'Shenzhen, China',
-    destination_port: 'Colombo, Sri Lanka',
+    port_of_loading: '',
+    destination_port: '',
     notes: '',
-    items: [
-      { product_id: products[0]?.id || '', ordered_qty: 100, foreign_unit_cost: 14.5 }
-    ]
+    items: []
   });
 
   const [dispatchForm, setDispatchForm] = useState({
     bill_of_lading_no: '',
-    shipping_line_carrier: 'Maersk Line',
+    shipping_line_carrier: '',
     vessel_name: '',
     origin_country: 'China',
-    departure_port: 'Shenzhen',
-    destination_port: 'Colombo Port',
+    departure_port: '',
+    destination_port: '',
     departure_date: new Date().toISOString().slice(0, 10),
     estimated_arrival_date: new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
-    customs_clearing_agent: 'Lanka Logistics (Pvt) Ltd'
+    customs_clearing_agent: ''
   });
 
   const handleAddItem = () => {
     setOrderForm(prev => ({
       ...prev,
-      items: [...prev.items, { product_id: products[0]?.id || '', ordered_qty: 50, foreign_unit_cost: 10 }]
+      items: [...prev.items, { product_id: products[0]?.id || '', ordered_qty: 1, foreign_unit_cost: '' }]
     }));
   };
 
@@ -59,19 +58,24 @@ export default function SupplierOrderList() {
 
   const handleSaveOrder = async (e) => {
     e.preventDefault();
+    if (isSaving) return;
+    setIsSaving(true);
     try {
       await createSupplierOrder(orderForm);
       notifySuccess('Supplier Purchase Order issued successfully');
       setIsNewOrderOpen(false);
     } catch {
       // Keep the order open; the shared sync layer displays the cloud error.
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleConfirmDispatch = async (e) => {
     e.preventDefault();
-    if (!dispatchOrder) return;
+    if (!dispatchOrder || isSaving) return;
 
+    setIsSaving(true);
     try {
       await createTransitShipment({
         ...dispatchForm,
@@ -91,6 +95,8 @@ export default function SupplierOrderList() {
       setDispatchOrder(null);
     } catch {
       // Keep the dispatch dialog open; the shared sync layer displays the error.
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -290,8 +296,8 @@ export default function SupplierOrderList() {
                 <button type="button" onClick={() => setIsNewOrderOpen(false)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button">
-                  Issue Supplier Order
+                <button type="submit" className="primary-button" disabled={isSaving}>
+                  {isSaving ? 'Saving…' : 'Issue Supplier Order'}
                 </button>
               </div>
             </form>
@@ -365,8 +371,8 @@ export default function SupplierOrderList() {
                 <button type="button" onClick={() => setDispatchOrder(null)} className="secondary-button">
                   Cancel
                 </button>
-                <button type="submit" className="primary-button">
-                  Confirm Dispatch & Open Shipment
+                <button type="submit" className="primary-button" disabled={isSaving}>
+                  {isSaving ? 'Saving…' : 'Confirm Dispatch & Open Shipment'}
                 </button>
               </div>
             </form>

@@ -9,15 +9,19 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
 
   const [form, setForm] = useState({
     expense_type: 'customs_duty',
-    payee: 'Sri Lanka Customs',
+    payee: '',
     currency: 'LKR',
-    amount: 125000,
+    amount: '',
     exchange_rate: 1.0,
     paid_by: 'bank',
     bank_account_id: bankAccounts[0]?.id || '',
+    cheque_no: '',
+    cheque_date: new Date().toISOString().slice(0, 10),
+    cheque_bank: '',
     reference: '',
-    notes: 'Import tariff & PAL charge'
+    notes: ''
   });
+  const [isSaving, setIsSaving] = useState(false);
 
   if (!isOpen || !shipment) return null;
 
@@ -32,11 +36,16 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSaving) return;
+    if (form.paid_by === 'cheque' && (!form.cheque_no.trim() || !form.cheque_date)) return;
+    setIsSaving(true);
     try {
       await addLandedCostExpense(shipmentId, form);
       onClose();
     } catch {
       // The shared sync layer keeps the dialog open and displays the cloud error.
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -143,6 +152,7 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
                 >
                   <option value="bank">Bank Transfer</option>
                   <option value="cash">Cash</option>
+                  <option value="cheque">Cheque</option>
                 </select>
               </div>
 
@@ -156,14 +166,30 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
                 />
               </div>
             </div>
+            {form.paid_by === 'bank' && (
+              <div>
+                <label>Paid from bank account *</label>
+                <select value={form.bank_account_id} onChange={(e) => setForm(prev => ({ ...prev, bank_account_id: e.target.value }))} required>
+                  <option value="">Select bank account</option>
+                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                </select>
+              </div>
+            )}
+            {form.paid_by === 'cheque' && (
+              <div className="payment-detail-grid cheque-detail-grid">
+                <div><label>Cheque number *</label><input value={form.cheque_no} onChange={(e) => setForm(prev => ({ ...prev, cheque_no: e.target.value }))} required /></div>
+                <div><label>Cheque date *</label><input type="date" value={form.cheque_date} onChange={(e) => setForm(prev => ({ ...prev, cheque_date: e.target.value }))} required /></div>
+                <div><label>Cheque bank *</label><input value={form.cheque_bank} onChange={(e) => setForm(prev => ({ ...prev, cheque_bank: e.target.value }))} required /></div>
+              </div>
+            )}
           </div>
 
           <div className="modal-footer">
             <button type="button" onClick={onClose} className="secondary-button">
               Cancel
             </button>
-            <button type="submit" className="primary-button">
-              Post Landed Expense & Allocate Cost
+            <button type="submit" className="primary-button" disabled={isSaving}>
+              {isSaving ? 'Saving…' : 'Post Landed Expense & Allocate Cost'}
             </button>
           </div>
         </form>

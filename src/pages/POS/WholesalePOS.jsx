@@ -21,7 +21,8 @@ export default function WholesalePOS() {
     cancelReservation,
     customers,
     products = [],
-    stockBalances = {}
+    stockBalances = {},
+    bankAccounts = []
   } = useBusiness();
 
   const { notifySuccess, notifyError, notifyWarning } = useNotification();
@@ -67,8 +68,11 @@ export default function WholesalePOS() {
     customer_phone: '',
     advance_amount: '',
     payment_method: 'cash',
+    bank_account_id: '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
+    cheque_bank: '',
+    cheque_branch: '',
     notes: ''
   });
   const [newCustomerForm, setNewCustomerForm] = useState({
@@ -270,8 +274,11 @@ export default function WholesalePOS() {
       customer_phone: currentTab.customer?.phone || '',
       advance_amount: '',
       payment_method: 'cash',
+      bank_account_id: bankAccounts[0]?.id || '',
       cheque_no: '',
       cheque_date: new Date().toISOString().slice(0, 10),
+      cheque_bank: '',
+      cheque_branch: '',
       notes: ''
     });
 
@@ -293,6 +300,16 @@ export default function WholesalePOS() {
       return;
     }
 
+    if (advAmt > 0 && reservationForm.payment_method === 'bank' && !reservationForm.bank_account_id) {
+      notifyWarning('Select the bank account receiving the advance.');
+      return;
+    }
+
+    if (advAmt > 0 && reservationForm.payment_method === 'cheque' && (!reservationForm.cheque_no || !reservationForm.cheque_date || !reservationForm.cheque_bank)) {
+      notifyWarning('Enter the cheque number, cheque date and bank.');
+      return;
+    }
+
     try {
       const docPayload = {
         doc_type: 'reserved_order',
@@ -306,12 +323,20 @@ export default function WholesalePOS() {
           method: reservationForm.payment_method,
           amount: advAmt,
           currency: 'LKR',
+          bank_account_id: reservationForm.payment_method === 'bank' ? reservationForm.bank_account_id : null,
+          cheque_details: reservationForm.payment_method === 'cheque' ? {
+            cheque_no: reservationForm.cheque_no,
+            cheque_date: reservationForm.cheque_date,
+            bank_name: reservationForm.cheque_bank,
+            branch: reservationForm.cheque_branch || null
+          } : null,
           reference: `Advance deposit for Reservation`
         }] : [],
         cheque_details: (reservationForm.payment_method === 'cheque' && advAmt > 0) ? {
           cheque_no: reservationForm.cheque_no,
           cheque_date: reservationForm.cheque_date,
-          bank_name: 'Commercial Bank'
+          bank_name: reservationForm.cheque_bank,
+          branch: reservationForm.cheque_branch || null
         } : null,
         notes: reservationForm.notes || `Stock hold reserved for ${reservationForm.customer_name || currentTab.customer?.business_name || 'Customer'}`
       };
@@ -451,6 +476,7 @@ export default function WholesalePOS() {
       setIsPaymentOpen(false);
     } catch (err) {
       notifyError('Failed to post sales invoice: ' + err.message);
+      throw err;
     }
   };
 
@@ -861,6 +887,20 @@ export default function WholesalePOS() {
                     </div>
                   </div>
 
+                  {Number(reservationForm.advance_amount) > 0 && reservationForm.payment_method === 'bank' && (
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed rgba(56, 189, 248, 0.25)' }}>
+                      <label style={{ fontSize: 11 }}>Receiving Bank Account *</label>
+                      <select
+                        required
+                        value={reservationForm.bank_account_id}
+                        onChange={(e) => setReservationForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
+                      >
+                        <option value="">Select bank account</option>
+                        {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
+                      </select>
+                    </div>
+                  )}
+
                   {/* Cheque Fields if Cheque Method */}
                   {Number(reservationForm.advance_amount) > 0 && reservationForm.payment_method === 'cheque' && (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10, paddingTop: 10, borderTop: '1px dashed rgba(255, 202, 88, 0.2)' }}>
@@ -881,6 +921,25 @@ export default function WholesalePOS() {
                           type="date"
                           value={reservationForm.cheque_date}
                           onChange={(e) => setReservationForm(prev => ({ ...prev, cheque_date: e.target.value }))}
+                          style={{ fontSize: 12 }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11 }}>Cheque Bank *</label>
+                        <input
+                          type="text"
+                          required
+                          value={reservationForm.cheque_bank}
+                          onChange={(e) => setReservationForm(prev => ({ ...prev, cheque_bank: e.target.value }))}
+                          style={{ fontSize: 12 }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11 }}>Branch</label>
+                        <input
+                          type="text"
+                          value={reservationForm.cheque_branch}
+                          onChange={(e) => setReservationForm(prev => ({ ...prev, cheque_branch: e.target.value }))}
                           style={{ fontSize: 12 }}
                         />
                       </div>
