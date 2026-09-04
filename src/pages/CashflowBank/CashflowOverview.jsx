@@ -194,6 +194,13 @@ export default function CashflowOverview() {
     });
 
     // 4. Standalone Payments (Capital Inflows, Owner Investments, Direct Expenses, Customer Account Settlements)
+    // Build a set of arrived transit shipment IDs & shipment numbers to deduplicate transit companion payments
+    const arrivedTransitIds = new Set(
+      transitShipments
+        .filter(s => s.status === 'arrived' || s.status === 'received' || s.purchase_doc_id)
+        .flatMap(s => [String(s.id), s.shipment_no].filter(Boolean))
+    );
+
     payments.forEach(p => {
       // Skip if this payment is already represented by a sales document or purchase document in the list
       const matchesSalesDoc = (p.sales_doc_id && seenSalesDocIds.has(String(p.sales_doc_id))) ||
@@ -204,7 +211,20 @@ export default function CashflowOverview() {
                             (p.reference && seenPurchaseDocIds.has(p.reference)) ||
                             (p.payment_no && (seenPurchaseDocIds.has(p.payment_no) || p.payment_no.includes('PUR-')));
 
-      if (matchesSalesDoc || matchesPurDoc) {
+      // Skip transit companion payments (PAY-TRN-*) if the transit has already arrived and is shown as a purchase doc
+      const isTransitPayment = p.payment_type === 'transit_purchase_payment' || p.payment_no?.startsWith('PAY-TRN-');
+      const transitAlreadyCoveredByPurchase = isTransitPayment && (
+        (p.transit_shipment_id && arrivedTransitIds.has(String(p.transit_shipment_id))) ||
+        (p.reference && arrivedTransitIds.has(p.reference)) ||
+        // If the transit shipment for this payment now has a purchase doc in our list, skip it
+        transitShipments.some(s =>
+          (s.id === p.transit_shipment_id || s.shipment_no === p.reference) &&
+          (s.status === 'arrived' || s.status === 'received' || s.purchase_doc_id) &&
+          seenPurchaseDocIds.has(String(s.purchase_doc_id || ''))
+        )
+      );
+
+      if (matchesSalesDoc || matchesPurDoc || transitAlreadyCoveredByPurchase) {
         return; // Already represented cleanly by the sales/purchase document above
       }
 

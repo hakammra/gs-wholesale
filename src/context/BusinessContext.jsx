@@ -1410,6 +1410,8 @@ export function BusinessProvider({ children }) {
           payment_date: newPayment.payment_date,
           payment_type: newPayment.payment_type,
           party_type: newPayment.party_type,
+          payee_name: newPayment.payee_name,
+          expense_category: newPayment.expense_category,
           amount: newPayment.amount,
           currency: newPayment.currency,
           payment_method: newPayment.payment_method,
@@ -1481,6 +1483,9 @@ export function BusinessProvider({ children }) {
           payment_date: newPayment.payment_date,
           payment_type: newPayment.payment_type,
           party_type: newPayment.party_type,
+          payee_name: newPayment.payee_name,
+          payer_name: newPayment.payer_name,
+          income_category: newPayment.income_category,
           amount: newPayment.amount,
           currency: newPayment.currency,
           payment_method: newPayment.payment_method,
@@ -1685,10 +1690,11 @@ export function BusinessProvider({ children }) {
           payment_type: 'transit_purchase_payment',
           party_type: 'supplier',
           party_id: shipmentData.supplier_id,
+          transit_shipment_id: trnId,
           amount: totalOrderVal,
           currency: 'LKR',
           payment_method: payType, // 'cash' | 'bank' | 'cheque'
-          reference: shipmentData.external_reference || shpNo,
+          reference: shpNo,
           created_at: new Date().toISOString()
         }, ...prev]);
 
@@ -1725,6 +1731,7 @@ export function BusinessProvider({ children }) {
           foreign_items_subtotal: foreignSubtotal,
           total_landed_expenses_lkr: 0,
           total_estimated_cost_lkr: lkrFob,
+          payment_type: shipmentData.payment_type || 'credit',
           status: isDraft ? 'preparing' : 'in_transit',
           notes: shipmentData.notes || null
         }).then(() => {
@@ -1907,6 +1914,7 @@ export function BusinessProvider({ children }) {
           exchange_rate_snapshot: rate,
           foreign_items_subtotal: foreignSubtotal,
           total_estimated_cost_lkr: totalCostLkr,
+          payment_type: updatedShipment.payment_type || existingShp.payment_type || 'credit',
           notes: updatedData.notes || existingShp.notes
         }).eq('id', shipmentId).then(() => {}).catch(() => {});
       }
@@ -2234,6 +2242,7 @@ export function BusinessProvider({ children }) {
             landed_expenses_lkr_total: 0,
             total_landed_lkr: totalLandedLkr,
             supplier_goods_payable_lkr: totalLandedLkr,
+            payment_type: newPurchaseDoc.payment_type || 'credit',
             is_fully_received: !isDraft,
             notes: newPurchaseDoc.notes || null
           });
