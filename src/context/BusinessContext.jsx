@@ -506,11 +506,20 @@ export function BusinessProvider({ children }) {
         localStorage.setItem('gs_wholesale_cheques', JSON.stringify(chqData));
       }
 
-      // 12. Payments
+      // 12. Payments — merge with any locally-added direct entries not yet in Supabase
       const { data: payData, error: payErr } = await supabase.from('payments').select('*').order('created_at', { ascending: false });
       if (!payErr && payData) {
-        setPayments(payData);
-        localStorage.setItem('gs_wholesale_payments', JSON.stringify(payData));
+        // Preserve locally-added direct expense/income entries that may not have synced yet
+        setPayments(prev => {
+          const remoteIds = new Set(payData.map(p => p.id));
+          const localOnlyEntries = prev.filter(p =>
+            !remoteIds.has(p.id) &&
+            (p.payment_type === 'operational_expense' || p.payment_type === 'direct_income')
+          );
+          const merged = [...localOnlyEntries, ...payData];
+          localStorage.setItem('gs_wholesale_payments', JSON.stringify(merged));
+          return merged;
+        });
       }
 
       // 13. Currencies & Company Settings
@@ -1412,21 +1421,26 @@ export function BusinessProvider({ children }) {
       } : b));
     }
 
-    // Save to Supabase using only columns that exist in the payments table
+    // Save to Supabase — async, log any error to console for debugging
     if (supabase) {
-      supabase.from('payments').insert({
-        id: paymentId,
-        payment_no: expNo,
-        payment_date: newPayment.payment_date,
-        payment_type: 'operational_expense',
-        party_type: 'payee',
-        party_id: null,
-        amount: amt,
-        payment_method: payment_method || 'cash',
-        bank_account_id: validBankId,
-        reference: combinedReference,
-        notes: combinedNotes
-      }).then(() => {}).catch(e => console.warn('Supabase expense record notice:', e));
+      (async () => {
+        const { error: insErr } = await supabase.from('payments').insert({
+          id: paymentId,
+          payment_no: expNo,
+          payment_date: newPayment.payment_date,
+          payment_type: 'operational_expense',
+          party_type: 'payee',
+          party_id: null,
+          amount: amt,
+          payment_method: payment_method || 'cash',
+          bank_account_id: validBankId,
+          reference: combinedReference,
+          notes: combinedNotes
+        });
+        if (insErr) {
+          console.error('Supabase expense insert FAILED:', insErr.message, insErr.details, insErr.hint);
+        }
+      })();
     }
 
     notifySuccess(`Expense of Rs. ${amt.toLocaleString()} recorded`);
@@ -1490,21 +1504,26 @@ export function BusinessProvider({ children }) {
       } : b));
     }
 
-    // Save to Supabase using only columns that exist in the payments table
+    // Save to Supabase — async, log any error to console for debugging
     if (supabase) {
-      supabase.from('payments').insert({
-        id: paymentId,
-        payment_no: incNo,
-        payment_date: newPayment.payment_date,
-        payment_type: 'direct_income',
-        party_type: 'payer',
-        party_id: null,
-        amount: amt,
-        payment_method: payment_method || 'cash',
-        bank_account_id: validBankId,
-        reference: combinedReference,
-        notes: combinedNotes
-      }).then(() => {}).catch(e => console.warn('Supabase income record notice:', e));
+      (async () => {
+        const { error: insErr } = await supabase.from('payments').insert({
+          id: paymentId,
+          payment_no: incNo,
+          payment_date: newPayment.payment_date,
+          payment_type: 'direct_income',
+          party_type: 'payer',
+          party_id: null,
+          amount: amt,
+          payment_method: payment_method || 'cash',
+          bank_account_id: validBankId,
+          reference: combinedReference,
+          notes: combinedNotes
+        });
+        if (insErr) {
+          console.error('Supabase income insert FAILED:', insErr.message, insErr.details, insErr.hint);
+        }
+      })();
     }
 
     notifySuccess(`${categoryName} of Rs. ${amt.toLocaleString()} recorded`);
