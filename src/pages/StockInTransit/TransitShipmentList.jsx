@@ -313,19 +313,23 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setItems(prev => prev.filter((_, i) => i !== idx));
   };
 
-  const handleSaveSupplier = (e) => {
+  const handleSaveSupplier = async (e) => {
     e.preventDefault();
     if (!newSupplierName.trim()) return;
-    const newSup = saveSupplier({
-      name: newSupplierName,
-      phone: newSupplierPhone,
-      country: 'Sri Lanka'
-    });
-    if (newSup?.id) setSupplierId(newSup.id);
-    setNewSupplierName('');
-    setNewSupplierPhone('');
-    setIsAddSupplierOpen(false);
-    notifySuccess('Supplier added successfully');
+    try {
+      const newSup = await saveSupplier({
+        name: newSupplierName,
+        phone: newSupplierPhone,
+        country: 'Sri Lanka'
+      });
+      if (newSup?.id) setSupplierId(newSup.id);
+      setNewSupplierName('');
+      setNewSupplierPhone('');
+      setIsAddSupplierOpen(false);
+      notifySuccess('Supplier added successfully');
+    } catch {
+      // Keep the dialog open; the shared sync layer displays the cloud error.
+    }
   };
 
   const handleSaveQuickProduct = async (e) => {
@@ -365,7 +369,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setIsAddProductOpen(false);
   };
 
-  const handleSaveShipment = (e, asDraft = false) => {
+  const handleSaveShipment = async (e, asDraft = false) => {
     if (e) e.preventDefault();
 
     // Auto-resolve supplier
@@ -374,7 +378,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
       if (suppliers.length > 0) {
         resolvedSupplierId = suppliers[0].id;
       } else {
-        const autoSup = saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
+        const autoSup = await saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
         resolvedSupplierId = autoSup?.id || 'sup-general';
       }
     }
@@ -408,17 +412,21 @@ export default function TransitShipmentList({ onNavigateTab }) {
       status: asDraft ? 'draft' : 'in_transit'
     };
 
-    if (editingShipmentId) {
-      updateTransitShipment(editingShipmentId, payload);
-      notifySuccess(asDraft ? 'Transit draft shipment updated!' : 'Stock in Transit shipment updated! In-transit inventory counts re-applied.');
-    } else {
-      createTransitShipment(payload);
-      notifySuccess(asDraft ? 'Stock in Transit saved as Draft! (No inventory impact until dispatched)' : 'Stock in Transit order placed! Inventory balances remain unchanged until shipment arrives.');
+    try {
+      if (editingShipmentId) {
+        await updateTransitShipment(editingShipmentId, payload);
+        notifySuccess(asDraft ? 'Transit draft shipment updated!' : 'Stock in Transit shipment updated! In-transit inventory counts re-applied.');
+      } else {
+        await createTransitShipment(payload);
+        notifySuccess(asDraft ? 'Stock in Transit saved as Draft! (No inventory impact until dispatched)' : 'Stock in Transit order placed! Inventory balances remain unchanged until shipment arrives.');
+      }
+      localStorage.removeItem('gs_transit_form_draft');
+      setHasDraftBanner(false);
+      setEditingShipmentId(null);
+      setIsFormOpen(false);
+    } catch {
+      // Keep the form open; the shared sync layer displays the cloud error.
     }
-    localStorage.removeItem('gs_transit_form_draft');
-    setHasDraftBanner(false);
-    setEditingShipmentId(null);
-    setIsFormOpen(false);
   };
 
   // Open Receive & Convert Modal
@@ -1470,4 +1478,3 @@ export default function TransitShipmentList({ onNavigateTab }) {
     </div>
   );
 }
-

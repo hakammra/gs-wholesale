@@ -21,9 +21,20 @@ const TAB_INFO = {
 
 export default function Header({ currentTab, onToggleMobileNav }) {
   const { user, logout } = useAuth();
-  const { refreshData, dataLoading } = useBusiness();
+  const { refreshData, dataLoading, syncState } = useBusiness();
 
   const info = TAB_INFO[currentTab] || { title: 'GS Wholesale POS', desc: 'Wholesale Computer Products Management' };
+  const syncLabel = {
+    connecting: 'Connecting',
+    reconnecting: 'Reconnecting',
+    syncing: syncState?.pendingWrites ? `Saving ${syncState.pendingWrites}` : 'Syncing',
+    synced: 'Cloud synced',
+    offline: 'Offline',
+    error: 'Sync issue'
+  }[syncState?.status] || 'Cloud status';
+  const lastSyncLabel = syncState?.lastSyncedAt
+    ? `Last synced ${new Date(syncState.lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : 'Waiting for first sync';
 
   return (
     <header className="topbar">
@@ -48,23 +59,32 @@ export default function Header({ currentTab, onToggleMobileNav }) {
       </div>
 
       <div className="topbar-right">
-        <div className="topbar-ticker" style={{ background: '#252525', border: '1px solid var(--line)', padding: '5px 12px', borderRadius: 4 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--primary)' }}>LKR (Rs.)</span>
+        <div
+          className={`sync-health sync-health-${syncState?.status || 'connecting'}`}
+          title={syncState?.error || lastSyncLabel}
+          role="status"
+          aria-live="polite"
+        >
+          <span className="sync-health-dot" aria-hidden="true" />
+          <span className="sync-health-copy">
+            <strong>{syncLabel}</strong>
+            <small>{syncState?.status === 'error' ? 'Tap refresh for details' : lastSyncLabel}</small>
+          </span>
         </div>
 
         <button
           onClick={refreshData}
           disabled={dataLoading}
-          className="secondary-button small-button"
-          title="Fetch latest updates from Supabase"
-          style={{ display: 'flex', alignItems: 'center', gap: 5 }}
+          className="secondary-button small-button sync-refresh-button"
+          title={syncState?.error || 'Fetch the latest updates from Supabase'}
         >
-          <span>🔄</span>
-          <span>{dataLoading ? 'Syncing...' : 'Sync Supabase'}</span>
+          <span className={dataLoading ? 'sync-spin' : ''}>↻</span>
+          <span>{dataLoading ? 'Refreshing' : 'Refresh'}</span>
         </button>
 
-        <button onClick={logout} className="secondary-button small-button" style={{ fontWeight: 700 }}>
-          Logout ({user?.email?.split('@')[0] || 'Owner'})
+        <button onClick={logout} className="secondary-button small-button logout-button" style={{ fontWeight: 700 }}>
+          <span>Sign out</span>
+          <small>{user?.email?.split('@')[0] || 'Owner'}</small>
         </button>
       </div>
     </header>

@@ -57,34 +57,41 @@ export default function SupplierOrderList() {
     }));
   };
 
-  const handleSaveOrder = (e) => {
+  const handleSaveOrder = async (e) => {
     e.preventDefault();
-    createSupplierOrder(orderForm);
-    notifySuccess('Supplier Purchase Order issued successfully');
-    setIsNewOrderOpen(false);
+    try {
+      await createSupplierOrder(orderForm);
+      notifySuccess('Supplier Purchase Order issued successfully');
+      setIsNewOrderOpen(false);
+    } catch {
+      // Keep the order open; the shared sync layer displays the cloud error.
+    }
   };
 
-  const handleConfirmDispatch = (e) => {
+  const handleConfirmDispatch = async (e) => {
     e.preventDefault();
     if (!dispatchOrder) return;
 
-    createTransitShipment({
-      ...dispatchForm,
-      supplier_order_id: dispatchOrder.id,
-      supplier_id: dispatchOrder.supplier_id,
-      currency: dispatchOrder.currency,
-      exchange_rate_snapshot: dispatchOrder.exchange_rate_snapshot,
-      items: dispatchOrder.items.map(it => ({
-        product_id: it.product_id,
-        shipped_qty: it.ordered_qty,
-        foreign_unit_cost: it.foreign_unit_cost,
-        weight_kg: 0.15,
-        volume_cbm: 0.001
-      }))
-    });
-
-    notifySuccess(`Order ${dispatchOrder.order_no} dispatched into Stock in Transit!`);
-    setDispatchOrder(null);
+    try {
+      await createTransitShipment({
+        ...dispatchForm,
+        supplier_order_id: dispatchOrder.id,
+        supplier_id: dispatchOrder.supplier_id,
+        currency: dispatchOrder.currency,
+        exchange_rate_snapshot: dispatchOrder.exchange_rate_snapshot,
+        items: dispatchOrder.items.map(it => ({
+          product_id: it.product_id,
+          shipped_qty: it.ordered_qty,
+          foreign_unit_cost: it.foreign_unit_cost,
+          weight_kg: 0.15,
+          volume_cbm: 0.001
+        }))
+      });
+      notifySuccess(`Order ${dispatchOrder.order_no} dispatched into Stock in Transit!`);
+      setDispatchOrder(null);
+    } catch {
+      // Keep the dispatch dialog open; the shared sync layer displays the error.
+    }
   };
 
   return (

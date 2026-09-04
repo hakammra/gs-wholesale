@@ -354,7 +354,7 @@ export default function CashflowOverview() {
     });
   }, [allTransactions, filterType, searchTerm]);
 
-  const handleSaveExpense = (e) => {
+  const handleSaveExpense = async (e) => {
     e.preventDefault();
     const amt = Number(expenseForm.amount);
     if (amt <= 0) {
@@ -363,7 +363,7 @@ export default function CashflowOverview() {
     }
 
     try {
-      recordDirectExpense({
+      await recordDirectExpense({
         amount: amt,
         expense_category: expenseForm.expense_category,
         payment_date: expenseForm.payment_date,
@@ -389,7 +389,7 @@ export default function CashflowOverview() {
     }
   };
 
-  const handleSaveIncome = (e) => {
+  const handleSaveIncome = async (e) => {
     e.preventDefault();
     const amt = Number(incomeForm.amount);
     if (amt <= 0) {
@@ -398,7 +398,7 @@ export default function CashflowOverview() {
     }
 
     try {
-      recordDirectIncome({
+      await recordDirectIncome({
         amount: amt,
         income_category: incomeForm.income_category,
         payment_date: incomeForm.payment_date,

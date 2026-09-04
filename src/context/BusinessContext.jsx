@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { useNotification } from './NotificationContext';
 import { firstCell } from '../lib/exportUtils';
@@ -71,6 +71,14 @@ const safeGet = (key, fallback) => {
 export function BusinessProvider({ children }) {
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useNotification();
   const [dataLoading, setDataLoading] = useState(false);
+  const [syncState, setSyncState] = useState({
+    status: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connecting',
+    lastSyncedAt: null,
+    pendingWrites: 0,
+    error: ''
+  });
+  const fetchInFlightRef = useRef(null);
+  const realtimeRefreshTimerRef = useRef(null);
 
   // States initialized safely from local storage cache
   const [companySettings, setCompanySettings] = useState(() => {
@@ -116,490 +124,328 @@ export function BusinessProvider({ children }) {
   useEffect(() => { localStorage.setItem('gs_wholesale_payments', JSON.stringify(payments)); }, [payments]);
   useEffect(() => { localStorage.setItem('gs_wholesale_stock_movements', JSON.stringify(stockMovements)); }, [stockMovements]);
 
-  // Keep inventory balances (on-hand, in-transit, reserved, available) guaranteed in sync
-  useEffect(() => {
-    if (!products || products.length === 0) return;
-    setStockBalances(prev => {
-      let changed = false;
-      const updated = { ...prev };
-      products.forEach(p => {
-        const pId = p.id;
-
-        // 1. In-Transit Qty from active transit shipments
-        const inTransitQty = (transitShipments || [])
-          .filter(s => s.status === 'in_transit')
-          .reduce((sum, s) => {
-            const it = (s.items || []).find(x => x.product_id === pId);
-            return sum + (Number(it?.shipped_qty || it?.qty) || 0);
-          }, 0);
-
-        // 2. Arrived / Received Qty from Purchase Documents
-        const totalPurchasedOnHand = (purchases || []).reduce((sum, pur) => {
-          const it = (pur.items || []).find(x => x.product_id === pId);
-          return sum + (Number(it?.received_sellable_qty || it?.shipped_qty || it?.qty) || 0);
-        }, 0);
-
-        // 3. Qty Sold from Posted Sales Invoices
-        const totalSold = (salesDocuments || [])
-          .filter(d => d.doc_type === 'sales_invoice' && d.status !== 'cancelled')
-          .reduce((sum, doc) => {
-            const it = (doc.items || []).find(x => (x.product?.id || x.product_id) === pId);
-            return sum + (Number(it?.qty) || 0);
-          }, 0);
-
-        // 4. Qty Reserved from Active Reservations
-        const totalReserved = (salesDocuments || [])
-          .filter(d => (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') && d.status === 'reserved')
-          .reduce((sum, doc) => {
-            const it = (doc.items || []).find(x => (x.product?.id || x.product_id) === pId);
-            return sum + (Number(it?.qty) || 0);
-          }, 0);
-
-        const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-        const initialOnHand = Number(p.stock_quantity ?? p.qty_on_hand ?? 0);
-        const hasTransactions = (purchases && purchases.length > 0) || (salesDocuments && salesDocuments.length > 0);
-        const baseOnHand = hasTransactions ? (totalPurchasedOnHand + initialOnHand) : initialOnHand;
-        const finalOnHand = Math.max(0, baseOnHand - totalSold);
-        const finalAvailable = Math.max(0, finalOnHand - totalReserved);
-
-        if (
-          cur.qty_in_transit !== inTransitQty ||
-          cur.qty_on_hand !== finalOnHand ||
-          cur.qty_available !== finalAvailable ||
-          cur.qty_reserved !== totalReserved
-        ) {
-          updated[pId] = {
-            ...cur,
-            qty_on_hand: finalOnHand,
-            qty_available: finalAvailable,
-            qty_reserved: totalReserved,
-            qty_in_transit: inTransitQty
-          };
-          changed = true;
-        }
-      });
-      return changed ? updated : prev;
-    });
-  }, [transitShipments, purchases, salesDocuments, products]);
-
-  // AUTO-RECONCILE UNALLOCATED CUSTOMER SETTLEMENTS TO INVOICES
-  // If settlements were recorded in payments, ensure they are reflected on invoice balances
-  useEffect(() => {
-    if (!payments.length || !salesDocuments.length) return;
-
-    const settlementPayments = payments.filter(p => p.payment_type === 'customer_settlement');
-    if (settlementPayments.length === 0) return;
-
-    setSalesDocuments(prev => {
-      let anyChanged = false;
-      const updated = prev.map(doc => ({ ...doc }));
-
-      customers.forEach(c => {
-        const cId = c.id != null ? String(c.id).trim() : '';
-        const cName = (c.business_name || '').trim().toLowerCase();
-
-        const isMatch = (itemCustId, itemCustName) => {
-          const idStr = itemCustId != null ? String(itemCustId).trim() : '';
-          const nameStr = (itemCustName || '').trim().toLowerCase();
-          if (cId && idStr && cId === idStr) return true;
-          if (cName && nameStr && (cName === nameStr || nameStr.includes(cName) || cName.includes(nameStr))) return true;
-          return false;
-        };
-
-        const custSettlements = settlementPayments.filter(p => isMatch(p.party_id, p.customer_name));
-        const totalSettled = custSettlements.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-        if (totalSettled <= 0) return;
-
-        // Find customer invoices
-        const custInvoices = updated
-          .filter(d => d.doc_type !== 'quotation' && d.status !== 'cancelled' && isMatch(d.customer_id, d.customer_name))
-          .sort((a, b) => new Date(a.doc_date || a.created_at) - new Date(b.doc_date || b.created_at));
-
-        if (custInvoices.length === 0) return;
-
-        let rem = totalSettled;
-        for (const inv of custInvoices) {
-          const due = inv.balance_due !== undefined
-            ? Number(inv.balance_due)
-            : Math.max(0, (Number(inv.grand_total) || 0) - (Number(inv.paid_amount) || 0));
-
-          if (rem > 0 && due > 0) {
-            const alloc = Math.min(due, rem);
-            inv.paid_amount = (Number(inv.paid_amount) || 0) + alloc;
-            inv.balance_due = Math.max(0, due - alloc);
-            inv.payment_status = inv.balance_due <= 0.01 ? 'paid' : 'partial';
-            rem -= alloc;
-            anyChanged = true;
-          }
-        }
-      });
-
-      return anyChanged ? updated : prev;
-    });
-  }, [payments.length]);
-
-  // REAL-TIME CUSTOMER RECEIVABLES SYNCHRONIZATION EFFECT
-  // Automatically computes and maintains current_receivable for every customer
-  // based on all active posted sales documents and recorded settlements.
-  useEffect(() => {
-    setCustomers(prev => {
-      let changed = false;
-      const updated = prev.map(c => {
-        const cId = c.id != null ? String(c.id).trim() : '';
-        const cName = (c.business_name || '').trim().toLowerCase();
-
-        const isMatch = (itemCustId, itemCustName) => {
-          const idStr = itemCustId != null ? String(itemCustId).trim() : '';
-          const nameStr = (itemCustName || '').trim().toLowerCase();
-          if (cId && idStr && cId === idStr) return true;
-          if (cName && nameStr && (cName === nameStr || nameStr.includes(cName) || cName.includes(nameStr))) return true;
-          return false;
-        };
-
-        const custDocs = (salesDocuments || []).filter(d =>
-          d.doc_type !== 'quotation' &&
-          d.status !== 'cancelled' &&
-          isMatch(d.customer_id, d.customer_name)
-        );
-
-        const invoiceDue = custDocs.reduce((sum, d) => {
-          const bal = d.balance_due !== undefined
-            ? Number(d.balance_due)
-            : Math.max(0, (Number(d.grand_total) || 0) - (Number(d.paid_amount) || 0));
-          return sum + Math.max(0, bal);
-        }, 0);
-
-        const currentRec = Number(c.current_receivable || 0);
-
-        // If customer has posted documents, use invoiceDue (or currentRec if lowered by settlement)
-        const computedRec = custDocs.length > 0
-          ? (invoiceDue <= 0 ? 0 : Math.min(invoiceDue, currentRec > 0 ? currentRec : invoiceDue))
-          : Math.max(0, currentRec);
-
-        if (Math.abs(currentRec - computedRec) > 0.01) {
-          changed = true;
-          return {
-            ...c,
-            current_receivable: Math.round(computedRec * 100) / 100
-          };
-        }
-        return c;
-      });
-
-      return changed ? updated : prev;
-    });
-  }, [salesDocuments, payments]);
-
-  // LOAD REAL DATA FROM SUPABASE
+  // LOAD AUTHORITATIVE DATA FROM SUPABASE. Local storage is only a startup cache;
+  // successful cloud reads always replace it, including when a table is empty.
   const fetchSupabaseData = useCallback(async () => {
-    if (!supabase) return;
-    setDataLoading(true);
-    try {
-      // 1. Categories
-      const { data: catData, error: catErr } = await supabase.from('categories').select('*').order('sort_order', { ascending: true });
-      if (!catErr && catData && catData.length > 0) setCategories(catData);
+    if (!supabase) return false;
+    if (fetchInFlightRef.current) return fetchInFlightRef.current;
 
-      // 2. Brands
-      const { data: brandData, error: brandErr } = await supabase.from('brands').select('*').order('name', { ascending: true });
-      if (!brandErr && brandData && brandData.length > 0) setBrands(brandData);
+    const request = (async () => {
+      setDataLoading(true);
+      setSyncState(prev => ({ ...prev, status: 'syncing', error: '' }));
 
-      // 3. Products (Preserve locally updated costs and WAC from purchase documents)
-      const { data: prodData, error: prodErr } = await supabase.from('products').select('*').order('created_at', { ascending: false });
-      if (!prodErr && prodData && prodData.length > 0) {
-        const localPurchases = safeGet('gs_wholesale_purchases', []);
-        setProducts(prev => {
-          return prodData.map(remoteP => {
-            const localP = prev.find(p => p.id === remoteP.id) || {};
-            
-            // Calculate WAC from all arrived purchases for this product
-            const prodPurchases = localPurchases.flatMap(pur => (pur.items || []).filter(it => it.product_id === remoteP.id));
-            let totalPurchasedQty = 0;
-            let totalPurchasedCost = 0;
-            let lastLandedCost = Number(localP.last_landed_cost_lkr || remoteP.last_landed_cost_lkr) || 0;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setSyncState(prev => ({ ...prev, status: 'offline', error: 'No internet connection' }));
+        setDataLoading(false);
+        return false;
+      }
 
-            prodPurchases.forEach(it => {
-              const q = Number(it.received_sellable_qty || it.shipped_qty || it.qty) || 0;
-              const c = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.unit_cost) || 0;
-              if (q > 0 && c > 0) {
-                totalPurchasedQty += q;
-                totalPurchasedCost += (q * c);
-                lastLandedCost = c;
-              }
-            });
+      try {
+        const queryEntries = await Promise.all([
+          supabase.from('categories').select('*').order('sort_order', { ascending: true }),
+          supabase.from('brands').select('*').order('name', { ascending: true }),
+          supabase.from('products').select('*').order('created_at', { ascending: false }),
+          supabase.from('stock_balances').select('*'),
+          supabase.from('sales_documents').select('*, items:sales_document_items(*, product:products(name, item_code)), customer:customers(business_name, billing_address, phone)').order('created_at', { ascending: false }),
+          supabase.from('customers').select('*').order('business_name', { ascending: true }),
+          supabase.from('suppliers').select('*').order('name', { ascending: true }),
+          supabase.from('bank_accounts').select('*').order('created_at', { ascending: true }),
+          supabase.from('purchase_receipts').select('*, items:purchase_receipt_items(*, product:products(name, item_code)), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)').order('created_at', { ascending: false }),
+          supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false }),
+          supabase.from('cheque_register').select('*').order('created_at', { ascending: false }),
+          supabase.from('payments').select('*').order('created_at', { ascending: false }),
+          supabase.from('currencies').select('*').order('code', { ascending: true }),
+          supabase.from('company_settings').select('*').order('updated_at', { ascending: false }).limit(1).maybeSingle(),
+          supabase.from('audit_log').select('details').eq('entity_type', 'company_logo').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+          supabase.from('supplier_orders').select('*, items:supplier_order_items(*), supplier:suppliers(name)').order('created_at', { ascending: false }),
+          supabase.from('supplier_advances').select('*').order('created_at', { ascending: false }),
+          supabase.from('stock_movements').select('*').order('created_at', { ascending: false })
+        ]);
 
-            const purchaseWAC = totalPurchasedQty > 0 ? (totalPurchasedCost / totalPurchasedQty) : 0;
-            const effectiveWAC = purchaseWAC > 0 
-              ? purchaseWAC 
-              : (Number(localP.weighted_cost_lkr) || Number(localP.cost_price) || Number(localP.cost) || Number(remoteP.weighted_cost_lkr) || Number(remoteP.cost_price) || 0);
+        const labels = [
+          'categories', 'brands', 'products', 'stock balances', 'sales documents',
+          'customers', 'suppliers', 'bank accounts', 'purchase receipts',
+          'transit shipments', 'cheques', 'payments', 'currencies',
+          'company settings', 'company logo', 'supplier orders',
+          'supplier advances', 'stock movements'
+        ];
+        const failures = queryEntries
+          .map((result, index) => result.error ? `${labels[index]}: ${result.error.message}` : null)
+          .filter(Boolean);
 
+        const [
+          catRes, brandRes, prodRes, stockRes, docRes, custRes, suppRes,
+          bankRes, grnRes, trnRes, chqRes, payRes, currRes, compRes,
+          logoRes, orderRes, advanceRes, movementRes
+        ] = queryEntries;
+
+        const prodData = prodRes.error ? null : (prodRes.data || []);
+        const grnData = grnRes.error ? null : (grnRes.data || []);
+        const docData = docRes.error ? null : (docRes.data || []);
+
+        if (!catRes.error) setCategories(catRes.data || []);
+        if (!brandRes.error) setBrands(brandRes.data || []);
+
+        if (prodData) {
+          const remoteReceiptItems = (grnData || []).flatMap(receipt => receipt.items || []);
+          setProducts(prodData.map(remoteProduct => {
+            const productReceipts = remoteReceiptItems.filter(item => item.product_id === remoteProduct.id);
+            const totals = productReceipts.reduce((acc, item) => {
+              const qty = Number(item.received_sellable_qty) || 0;
+              const cost = Number(item.final_landed_unit_cost_lkr) || 0;
+              return qty > 0 && cost > 0
+                ? { qty: acc.qty + qty, cost: acc.cost + (qty * cost), last: cost }
+                : acc;
+            }, { qty: 0, cost: 0, last: Number(remoteProduct.last_landed_cost_lkr) || 0 });
+            const weightedCost = totals.qty > 0
+              ? totals.cost / totals.qty
+              : Number(remoteProduct.weighted_cost_lkr) || 0;
             return {
-              ...remoteP,
-              weighted_cost_lkr: Number(effectiveWAC.toFixed(2)),
-              cost_price: Number(effectiveWAC.toFixed(2)),
-              cost: Number(effectiveWAC.toFixed(2)),
-              last_landed_cost_lkr: lastLandedCost > 0 ? Number(lastLandedCost.toFixed(2)) : Number(remoteP.last_landed_cost_lkr || 0)
+              ...remoteProduct,
+              weighted_cost_lkr: Number(weightedCost.toFixed(2)),
+              cost_price: Number(weightedCost.toFixed(2)),
+              cost: Number(weightedCost.toFixed(2)),
+              last_landed_cost_lkr: Number(totals.last.toFixed(2))
+            };
+          }));
+        }
+
+        if (!stockRes.error) {
+          const nextBalances = {};
+          (prodData || []).forEach(product => {
+            nextBalances[product.id] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          });
+          (stockRes.data || []).forEach(balance => {
+            const onHand = Number(balance.qty_on_hand) || 0;
+            const reserved = Number(balance.qty_reserved) || 0;
+            nextBalances[balance.product_id] = {
+              ...balance,
+              qty_on_hand: onHand,
+              qty_reserved: reserved,
+              qty_available: balance.qty_available == null ? Math.max(0, onHand - reserved) : Number(balance.qty_available) || 0,
+              qty_in_transit: Number(balance.qty_in_transit) || 0,
+              qty_damaged: Number(balance.qty_damaged) || 0
             };
           });
-        });
-      }
+          setStockBalances(nextBalances);
+        }
 
-      // 4. Stock Balances (Authoritative remote cloud inventory)
-      const { data: stockData, error: stockErr } = await supabase.from('stock_balances').select('*');
-      if (!stockErr && stockData) {
-        setStockBalances(prev => {
-          const updated = {};
-          // Initialize every product with 0 stock
-          (prodData || []).forEach(p => {
-            updated[p.id] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          });
-          stockData.forEach(sb => {
-            const pId = sb.product_id;
-            const remoteOnHand = Number(sb.qty_on_hand) || 0;
-            const remoteReserved = Number(sb.qty_reserved) || 0;
-            const remoteAvailable = Number(sb.qty_available) || Math.max(0, remoteOnHand - remoteReserved);
-            const remoteInTransit = Number(sb.qty_in_transit) || 0;
-            const remoteDamaged = Number(sb.qty_damaged) || 0;
-
-            updated[pId] = {
-              qty_on_hand: remoteOnHand,
-              qty_available: remoteAvailable,
-              qty_reserved: remoteReserved,
-              qty_in_transit: remoteInTransit,
-              qty_damaged: remoteDamaged
-            };
-          });
-          return updated;
-        });
-      }
-
-      // 5. Sales Documents (Enriched with product details and customer info)
-      const { data: docData, error: docErr } = await supabase.from('sales_documents')
-        .select('*, items:sales_document_items(*, product:products(name, item_code, sku)), customer:customers(business_name, billing_address, phone)')
-        .order('created_at', { ascending: false });
-      if (!docErr && docData) {
-        const enrichedSales = docData.map(d => ({
-          ...d,
-          customer_name: d.customer?.business_name || d.customer_name || 'Cash / Counter Customer',
-          customer_phone: d.customer?.phone || d.customer_phone || '',
-          items: (d.items || []).map(it => {
-            const pObj = it.product || products.find(p => p.id === it.product_id);
+        if (docData) {
+          setSalesDocuments(docData.map(document => {
+            const isActiveReservation = document.doc_type === 'sales_order' && document.status === 'confirmed';
             return {
-              ...it,
-              product_name: pObj?.name || it.product_name || 'Product Item',
-              item_code: pObj?.item_code || it.item_code || '',
-              product: pObj || it.product
-            };
-          })
-        }));
-        setSalesDocuments(enrichedSales);
-        localStorage.setItem('gs_wholesale_sales_docs', JSON.stringify(enrichedSales));
-      }
-
-      // 6. Customers (Enriched with live invoice receivables from fetched sales documents)
-      const { data: custData, error: custErr } = await supabase.from('customers').select('*').order('business_name', { ascending: true });
-      if (!custErr && custData) {
-        const liveSales = docData || [];
-        const enrichedCustomers = custData.map(c => {
-          const custDocs = liveSales.filter(d =>
-            d.doc_type === 'sales_invoice' &&
-            d.status !== 'cancelled' &&
-            (
-              (d.customer_id != null && String(d.customer_id) === String(c.id)) ||
-              (d.customer_name && c.business_name && d.customer_name.trim().toLowerCase() === c.business_name.trim().toLowerCase())
-            )
-          );
-          const invoiceDue = custDocs.reduce((sum, d) => {
-            const bal = d.balance_due !== undefined
-              ? Number(d.balance_due)
-              : Math.max(0, (Number(d.grand_total) || 0) - (Number(d.paid_amount) || 0));
-            return sum + Math.max(0, bal);
-          }, 0);
-
-          return {
-            ...c,
-            current_receivable: custDocs.length > 0 ? invoiceDue : (Number(c.current_receivable) || 0)
-          };
-        });
-        setCustomers(enrichedCustomers);
-        localStorage.setItem('gs_wholesale_customers', JSON.stringify(enrichedCustomers));
-      }
-
-      // 7. Suppliers
-      const { data: suppData, error: suppErr } = await supabase.from('suppliers').select('*').order('name', { ascending: true });
-      if (!suppErr && suppData) {
-        setSuppliers(suppData);
-        localStorage.setItem('gs_wholesale_suppliers', JSON.stringify(suppData));
-      }
-
-      // 8. Bank Accounts
-      const { data: bankData, error: bankErr } = await supabase.from('bank_accounts').select('*');
-      if (!bankErr && bankData && bankData.length > 0) setBankAccounts(bankData);
-
-      // 9. Purchase Receipts (Enriched with product details and supplier info)
-      const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts')
-        .select('*, items:purchase_receipt_items(*, product:products(name, item_code, sku)), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)')
-        .order('created_at', { ascending: false });
-
-      const receivedTransitIds = new Set((grnData || []).map(g => g.transit_shipment_id).filter(Boolean));
-
-      if (!grnErr && grnData) {
-        const enrichedPurchases = grnData.map(g => ({
-          ...g,
-          doc_no: g.grn_no || g.doc_no,
-          grn_no: g.grn_no || g.doc_no,
-          total_amount_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
-          total_landed_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
-          supplier_name: g.supplier?.name || 'Supplier',
-          shipment_no: g.transit_shipment?.shipment_no || '',
-          status: g.is_fully_received ? 'received' : 'draft',
-          items: (g.items || []).map(it => {
-            const pObj = it.product || products.find(p => p.id === it.product_id);
-            const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost) || 0;
-            const qty = Number(it.received_sellable_qty || it.qty || it.shipped_qty) || 0;
-            return {
-              ...it,
-              product_name: pObj?.name || it.product_name || 'Product Item',
-              item_code: pObj?.item_code || it.item_code || '',
-              product: pObj || it.product,
-              qty: qty,
-              shipped_qty: qty,
-              received_sellable_qty: qty,
-              damaged_qty: Number(it.damaged_qty) || 0,
-              unit_cost_lkr: cost,
-              final_landed_unit_cost_lkr: cost
-            };
-          })
-        }));
-        setPurchases(enrichedPurchases);
-        localStorage.setItem('gs_wholesale_purchases', JSON.stringify(enrichedPurchases));
-      }
-
-      // 10. Transit Shipments (Cross-checked against arrived purchase receipts)
-      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
-      if (!trnErr && trnData) {
-        const enrichedTransit = trnData
-          .filter(t => !t.shipment_no?.startsWith('DIR-TRN-') && !t.notes?.includes('Direct purchase companion'))
-          .map(t => {
-            const isArrived = t.status === 'received' || receivedTransitIds.has(t.id);
-            return {
-              ...t,
-              status: t.status === 'preparing' ? 'draft' : (isArrived ? 'arrived' : t.status),
-              supplier_name: t.supplier?.name || 'Supplier',
-              items: (t.items || []).map(it => ({
-                ...it,
-                qty: Number(it.shipped_qty) || 0,
-                shipped_qty: Number(it.shipped_qty) || 0,
-                foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
-                unit_cost: Number(it.foreign_unit_cost) || 0,
-                final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
+              ...document,
+              status: isActiveReservation ? 'reserved' : document.status,
+              payment_status: isActiveReservation && document.payment_status === 'unpaid' ? 'reserved' : document.payment_status,
+              customer_name: document.customer?.business_name || 'Cash / Counter Customer',
+              customer_phone: document.customer?.phone || '',
+              items: (document.items || []).map(item => ({
+                ...item,
+                product_name: item.product?.name || 'Product Item',
+                item_code: item.product?.item_code || '',
+                product: item.product || null
               }))
             };
-          });
-        setTransitShipments(enrichedTransit);
-        localStorage.setItem('gs_wholesale_transit', JSON.stringify(enrichedTransit));
-      }
-
-      // 11. Cheques
-      const { data: chqData, error: chqErr } = await supabase.from('cheque_register').select('*').order('created_at', { ascending: false });
-      if (!chqErr && chqData) {
-        setCheques(chqData);
-        localStorage.setItem('gs_wholesale_cheques', JSON.stringify(chqData));
-      }
-
-      // 12. Payments — merge with any locally-added direct entries not yet in Supabase
-      const { data: payData, error: payErr } = await supabase.from('payments').select('*').order('created_at', { ascending: false });
-      if (!payErr && payData) {
-        // Preserve locally-added direct expense/income entries that may not have synced yet
-        setPayments(prev => {
-          const remoteIds = new Set(payData.map(p => p.id));
-          const localOnlyEntries = prev.filter(p =>
-            !remoteIds.has(p.id) &&
-            (p.payment_type === 'operational_expense' || p.payment_type === 'direct_income')
-          );
-          const merged = [...localOnlyEntries, ...payData];
-          localStorage.setItem('gs_wholesale_payments', JSON.stringify(merged));
-          return merged;
-        });
-      }
-
-      // 13. Currencies & Company Settings
-      const { data: currData, error: currErr } = await supabase.from('currencies').select('*');
-      if (!currErr && currData && currData.length > 0) setCurrencies(currData);
-
-      const { data: compData, error: compErr } = await supabase.from('company_settings').select('*').order('updated_at', { ascending: false }).limit(1).maybeSingle();
-      
-      let loadedLogoUrl = '';
-      try {
-        const { data: logoLog } = await supabase.from('audit_log').select('details').eq('entity_type', 'company_logo').order('created_at', { ascending: false }).limit(1).maybeSingle();
-        if (logoLog && logoLog.details?.logo_url) {
-          loadedLogoUrl = logoLog.details.logo_url;
+          }));
         }
-      } catch (e) {
-        console.warn('Could not fetch company logo from cloud:', e);
-      }
 
-      if (!compErr && compData) {
-        const addressParts = (compData.address || '').split('\n').map(s => s.trim()).filter(Boolean);
-        let line1 = '';
-        let line2 = '';
-        if (addressParts.length >= 2) {
-          line1 = addressParts[0];
-          line2 = addressParts.slice(1).join(', ');
-        } else {
-          const commaParts = (compData.address || '').split(',').map(s => s.trim()).filter(Boolean);
-          if (commaParts.length > 1) {
-            line1 = commaParts.slice(0, -1).join(', ');
-            line2 = commaParts[commaParts.length - 1];
+        if (!custRes.error) {
+          setCustomers((custRes.data || []).map(customer => {
+            const invoices = (docData || []).filter(document =>
+              document.doc_type === 'sales_invoice' &&
+              document.status !== 'cancelled' &&
+              document.customer_id === customer.id
+            );
+            const receivable = invoices.reduce((sum, document) => sum + Math.max(0, Number(document.balance_due) || 0), 0);
+            return { ...customer, current_receivable: invoices.length ? receivable : Number(customer.current_receivable) || 0 };
+          }));
+        }
+
+        if (!suppRes.error) setSuppliers(suppRes.data || []);
+        if (!bankRes.error) setBankAccounts(bankRes.data || []);
+
+        const receivedTransitIds = new Set((grnData || []).map(receipt => receipt.transit_shipment_id).filter(Boolean));
+        if (grnData) {
+          setPurchases(grnData.map(receipt => ({
+            ...receipt,
+            doc_no: receipt.grn_no,
+            total_amount_lkr: Number(receipt.total_landed_lkr) || 0,
+            supplier_name: receipt.supplier?.name || 'Supplier',
+            shipment_no: receipt.transit_shipment?.shipment_no || '',
+            status: receipt.is_fully_received ? 'received' : 'draft',
+            items: (receipt.items || []).map(item => {
+              const qty = Number(item.received_sellable_qty) || 0;
+              const cost = Number(item.final_landed_unit_cost_lkr) || 0;
+              return {
+                ...item,
+                product_name: item.product?.name || 'Product Item',
+                item_code: item.product?.item_code || '',
+                product: item.product || null,
+                qty,
+                shipped_qty: qty,
+                unit_cost_lkr: cost
+              };
+            })
+          })));
+        }
+
+        if (!trnRes.error) {
+          setTransitShipments((trnRes.data || [])
+            .filter(shipment => !shipment.shipment_no?.startsWith('DIR-TRN-') && !shipment.notes?.includes('Direct purchase companion'))
+            .map(shipment => ({
+              ...shipment,
+              status: shipment.status === 'preparing'
+                ? 'draft'
+                : (shipment.status === 'received' || receivedTransitIds.has(shipment.id) ? 'arrived' : shipment.status),
+              supplier_name: shipment.supplier?.name || 'Supplier',
+              items: (shipment.items || []).map(item => ({
+                ...item,
+                qty: Number(item.shipped_qty) || 0,
+                unit_cost: Number(item.foreign_unit_cost) || 0
+              }))
+            })));
+        }
+
+        if (!chqRes.error) setCheques((chqRes.data || []).map(cheque => {
+          const linkedDocument = (docData || []).find(document => document.id === cheque.sales_document_id);
+          const linkedCustomer = (custRes.data || []).find(customer => customer.id === cheque.party_id);
+          const linkedSupplier = (suppRes.data || []).find(supplier => supplier.id === cheque.party_id);
+          return {
+            ...cheque,
+            sales_doc_id: cheque.sales_document_id,
+            sales_doc_no: linkedDocument?.doc_no || '',
+            party_name: linkedCustomer?.business_name || linkedSupplier?.name || 'Other'
+          };
+        }));
+        if (!payRes.error) setPayments(payRes.data || []);
+        if (!currRes.error) setCurrencies(currRes.data || []);
+        if (!orderRes.error) setSupplierOrders((orderRes.data || []).map(order => ({
+          ...order,
+          exchange_rate_snapshot: Number(order.exchange_rate_estimate) || 1,
+          supplier_name: order.supplier?.name || 'Supplier'
+        })));
+        if (!advanceRes.error) setSupplierAdvances(advanceRes.data || []);
+        if (!movementRes.error) setStockMovements(movementRes.data || []);
+
+        if (!compRes.error) {
+          if (compRes.data) {
+            const addressParts = (compRes.data.address || '').split(',').map(part => part.trim()).filter(Boolean);
+            setCompanySettings({
+              ...compRes.data,
+              address_line1: addressParts.length > 1 ? addressParts.slice(0, -1).join(', ') : (compRes.data.address || ''),
+              address_line2: addressParts.length > 1 ? addressParts[addressParts.length - 1] : '',
+              logo_url: logoRes.error ? '' : (logoRes.data?.details?.logo_url || '')
+            });
           } else {
-            line1 = compData.address || '';
-            line2 = '';
+            setCompanySettings(INITIAL_COMPANY);
           }
         }
 
-        const fullProfile = {
-          ...compData,
-          address_line1: line1,
-          address_line2: line2,
-          logo_url: loadedLogoUrl
-        };
-        setCompanySettings(fullProfile);
-      }
+        const syncedAt = new Date().toISOString();
+        if (failures.length) {
+          console.warn('Supabase partial refresh:', failures);
+          setSyncState(prev => ({ ...prev, status: 'error', lastSyncedAt: syncedAt, error: failures.join(' | ') }));
+          return false;
+        }
 
-    } catch (err) {
-      console.warn('Supabase fetch notice (operating with cached local data):', err);
+        setSyncState(prev => ({ ...prev, status: prev.pendingWrites > 0 ? 'syncing' : 'synced', lastSyncedAt: syncedAt, error: '' }));
+        return true;
+      } catch (error) {
+        console.warn('Supabase refresh failed; cached data remains available:', error);
+        setSyncState(prev => ({ ...prev, status: navigator.onLine ? 'error' : 'offline', error: error.message || String(error) }));
+        return false;
+      } finally {
+        setDataLoading(false);
+      }
+    })();
+
+    fetchInFlightRef.current = request;
+    try {
+      return await request;
     } finally {
-      setDataLoading(false);
+      fetchInFlightRef.current = null;
     }
   }, []);
 
-  // Fetch from Supabase on mount, tab focus, visibility change, and auto-poll every 10s
+  const runCloudWrite = async (label, operation) => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      const offlineError = new Error(`${label} was not saved because this device is offline.`);
+      setSyncState(prev => ({ ...prev, status: 'offline', error: offlineError.message }));
+      notifyError(offlineError.message);
+      throw offlineError;
+    }
+
+    setSyncState(prev => ({ ...prev, status: 'syncing', pendingWrites: prev.pendingWrites + 1, error: '' }));
+    try {
+      const result = await operation();
+      if (result?.error) throw result.error;
+      setSyncState(prev => ({
+        ...prev,
+        status: prev.pendingWrites <= 1 ? 'synced' : 'syncing',
+        pendingWrites: Math.max(0, prev.pendingWrites - 1),
+        lastSyncedAt: new Date().toISOString(),
+        error: ''
+      }));
+      return result?.data;
+    } catch (error) {
+      const message = error?.message || String(error);
+      console.error(`${label} failed:`, error);
+      setSyncState(prev => ({ ...prev, status: 'error', pendingWrites: Math.max(0, prev.pendingWrites - 1), error: message }));
+      notifyError(`${label} was not saved to the cloud: ${message}`);
+      setTimeout(() => fetchSupabaseData(), 0);
+      throw error;
+    }
+  };
+
+  const runCloudBatch = (label, operations) => runCloudWrite(label, async () => {
+    const results = await Promise.all(operations);
+    const failed = results.find(result => result?.error);
+    return failed || { data: results.map(result => result?.data) };
+  });
+
+  // Realtime is the primary cross-device path; focus/visibility and polling are
+  // fallbacks for suspended mobile tabs and temporarily disconnected sockets.
   useEffect(() => {
     fetchSupabaseData();
 
-    const handleFocus = () => {
+    const scheduleRefresh = () => {
+      clearTimeout(realtimeRefreshTimerRef.current);
+      realtimeRefreshTimerRef.current = setTimeout(fetchSupabaseData, 350);
+    };
+    const handleFocus = () => fetchSupabaseData();
+    const handleVisibility = () => document.visibilityState === 'visible' && fetchSupabaseData();
+    const handleOnline = () => {
+      setSyncState(prev => ({ ...prev, status: 'connecting', error: '' }));
       fetchSupabaseData();
     };
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        fetchSupabaseData();
-      }
-    };
+    const handleOffline = () => setSyncState(prev => ({ ...prev, status: 'offline', error: 'No internet connection' }));
 
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Auto-poll every 10 seconds while tab/app is visible
+    const realtimeChannel = supabase
+      .channel('gs-wholesale-live-sync')
+      .on('postgres_changes', { event: '*', schema: 'public' }, scheduleRefresh)
+      .subscribe(status => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setSyncState(prev => ({ ...prev, status: navigator.onLine ? 'reconnecting' : 'offline' }));
+        }
+      });
+
     const pollInterval = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        fetchSupabaseData();
-      }
-    }, 10000);
+      if (document.visibilityState === 'visible') fetchSupabaseData();
+    }, 30000);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
       document.removeEventListener('visibilitychange', handleVisibility);
+      clearTimeout(realtimeRefreshTimerRef.current);
       clearInterval(pollInterval);
+      supabase.removeChannel(realtimeChannel);
     };
   }, [fetchSupabaseData]);
 
@@ -846,18 +692,12 @@ export function BusinessProvider({ children }) {
 
     if (catData.id) {
       setCategories(prev => prev.map(c => c.id === catData.id ? { ...c, ...catData, parent_id: sanitizedParentId, updated_at: new Date().toISOString() } : c));
-      try {
-        if (supabase) {
-          await supabase.from('categories').update({
-            name: catData.name,
-            parent_id: sanitizedParentId,
-            sort_order: catData.sort_order || 0,
-            is_active: catData.is_active !== false
-          }).eq('id', catData.id);
-        }
-      } catch (e) {
-        console.warn('Category update notice:', e);
-      }
+      await runCloudWrite('Updating category', () => supabase.from('categories').update({
+        name: catData.name,
+        parent_id: sanitizedParentId,
+        sort_order: catData.sort_order || 0,
+        is_active: catData.is_active !== false
+      }).eq('id', catData.id));
       notifySuccess(`Category folder "${catData.name}" updated`);
     } else {
       const newCat = {
@@ -869,19 +709,13 @@ export function BusinessProvider({ children }) {
         created_at: new Date().toISOString()
       };
       setCategories(prev => [...prev, newCat]);
-      try {
-        if (supabase) {
-          await supabase.from('categories').upsert({
-            id: newCat.id,
-            name: newCat.name,
-            parent_id: newCat.parent_id,
-            sort_order: newCat.sort_order,
-            is_active: true
-          });
-        }
-      } catch (e) {
-        console.warn('Category insert notice:', e);
-      }
+      await runCloudWrite('Creating category', () => supabase.from('categories').upsert({
+        id: newCat.id,
+        name: newCat.name,
+        parent_id: newCat.parent_id,
+        sort_order: newCat.sort_order,
+        is_active: true
+      }));
       notifySuccess(`Category folder "${newCat.name}" created`);
       return newCat;
     }
@@ -903,13 +737,7 @@ export function BusinessProvider({ children }) {
     setCategories(prev => prev.filter(c => !idsToDelete.includes(c.id)));
     setProducts(prev => prev.map(p => idsToDelete.includes(p.category_id) ? { ...p, category_id: null } : p));
 
-    try {
-      if (supabase) {
-        await supabase.from('categories').delete().in('id', idsToDelete);
-      }
-    } catch (e) {
-      console.warn('Category delete notice:', e);
-    }
+    await runCloudWrite('Deleting category', () => supabase.from('categories').delete().in('id', idsToDelete));
     notifySuccess('Category folder deleted');
   };
 
@@ -917,13 +745,7 @@ export function BusinessProvider({ children }) {
     setCategories([]);
     setProducts(prev => prev.map(p => ({ ...p, category_id: null })));
     localStorage.removeItem('gs_wholesale_categories');
-    try {
-      if (supabase) {
-        await supabase.from('categories').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      }
-    } catch (e) {
-      console.warn('All categories delete notice:', e);
-    }
+    await runCloudWrite('Deleting all categories', () => supabase.from('categories').delete().neq('id', '00000000-0000-0000-0000-000000000000'));
     notifySuccess('All category folders removed');
   };
 
@@ -932,14 +754,10 @@ export function BusinessProvider({ children }) {
     const targetId = brandData.id || generateUUID();
     if (brandData.id) {
       setBrands(prev => prev.map(b => b.id === brandData.id ? { ...b, ...brandData } : b));
-      try {
-        if (supabase) {
-          await supabase.from('brands').update({
-            name: brandData.name,
-            country: brandData.country || 'Local'
-          }).eq('id', brandData.id);
-        }
-      } catch (e) {}
+      await runCloudWrite('Updating brand', () => supabase.from('brands').update({
+        name: brandData.name,
+        country: brandData.country || 'Local'
+      }).eq('id', brandData.id));
       notifySuccess(`Brand "${brandData.name}" updated`);
     } else {
       const newB = {
@@ -950,16 +768,12 @@ export function BusinessProvider({ children }) {
         created_at: new Date().toISOString()
       };
       setBrands(prev => [...prev, newB]);
-      try {
-        if (supabase) {
-          await supabase.from('brands').upsert({
-            id: newB.id,
-            name: newB.name,
-            country: newB.country,
-            is_active: true
-          });
-        }
-      } catch (e) {}
+      await runCloudWrite('Creating brand', () => supabase.from('brands').upsert({
+        id: newB.id,
+        name: newB.name,
+        country: newB.country,
+        is_active: true
+      }));
       notifySuccess(`Brand "${newB.name}" created`);
       return newB;
     }
@@ -968,11 +782,7 @@ export function BusinessProvider({ children }) {
   const deleteBrand = async (brandId) => {
     setBrands(prev => prev.filter(b => b.id !== brandId));
     setProducts(prev => prev.map(p => p.brand_id === brandId ? { ...p, brand_id: null } : p));
-    try {
-      if (supabase) {
-        await supabase.from('brands').delete().eq('id', brandId);
-      }
-    } catch (e) {}
+    await runCloudWrite('Deleting brand', () => supabase.from('brands').delete().eq('id', brandId));
     notifySuccess('Brand removed');
   };
 
@@ -991,27 +801,22 @@ export function BusinessProvider({ children }) {
         updated_at: new Date().toISOString()
       } : p));
 
-      try {
-        if (supabase) {
-          const { error } = await supabase.from('products').update({
-            name: productData.name,
-            item_code: productData.item_code,
-            barcode: productData.barcode || null,
-            model: productData.model || null,
-            category_id: sanitizedCategoryId,
-            brand_id: sanitizedBrandId,
-            wholesale_price: Number(productData.wholesale_price) || 0,
-            dealer_price: Number(productData.dealer_price) || 0,
-            weighted_cost_lkr: Number(productData.weighted_cost_lkr) || 0,
-            low_stock_threshold: Number(productData.low_stock_threshold) || 5,
-            is_active: productData.is_active !== false
-          }).eq('id', productData.id);
-          if (error) console.error('Supabase product update error:', error);
-        }
-      } catch (e) {
-        console.warn('Product update notice:', e);
-      }
+      await runCloudWrite('Updating product', () => supabase.from('products').update({
+        name: productData.name,
+        item_code: productData.item_code,
+        barcode: productData.barcode || null,
+        model: productData.model || null,
+        category_id: sanitizedCategoryId,
+        brand_id: sanitizedBrandId,
+        wholesale_price: Number(productData.wholesale_price) || 0,
+        dealer_price: Number(productData.dealer_price) || 0,
+        weighted_cost_lkr: Number(productData.weighted_cost_lkr) || 0,
+        low_stock_threshold: Number(productData.low_stock_threshold) || 5,
+        is_active: productData.is_active !== false,
+        updated_at: new Date().toISOString()
+      }).eq('id', productData.id));
       notifySuccess('Product updated successfully');
+      return { ...productData, id: productData.id, category_id: sanitizedCategoryId, brand_id: sanitizedBrandId };
     } else {
       const newProd = {
         ...productData,
@@ -1037,41 +842,29 @@ export function BusinessProvider({ children }) {
         [newProd.id]: prev[newProd.id] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 }
       }));
 
-      try {
-        if (supabase) {
-          const { error: prodErr } = await supabase.from('products').upsert({
-            id: newProd.id,
-            name: newProd.name,
-            item_code: newProd.item_code,
-            barcode: newProd.barcode || null,
-            model: newProd.model || null,
-            category_id: newProd.category_id,
-            brand_id: newProd.brand_id,
-            wholesale_price: newProd.wholesale_price,
-            dealer_price: newProd.dealer_price,
-            weighted_cost_lkr: newProd.weighted_cost_lkr,
-            low_stock_threshold: newProd.low_stock_threshold,
-            is_wholesale_active: true,
-            is_active: true
-          });
-
-          if (prodErr) {
-            console.error('Supabase product insert error:', prodErr);
-          } else {
-            // Also initialize stock_balances in Supabase
-            await supabase.from('stock_balances').upsert({
-              product_id: newProd.id,
-              qty_on_hand: 0,
-              qty_reserved: 0,
-              qty_available: 0,
-              qty_in_transit: 0,
-              qty_damaged: 0
-            });
-          }
-        }
-      } catch (e) {
-        console.warn('Product insert notice:', e);
-      }
+      await runCloudWrite('Creating product', () => supabase.from('products').upsert({
+        id: newProd.id,
+        name: newProd.name,
+        item_code: newProd.item_code,
+        barcode: newProd.barcode || null,
+        model: newProd.model || null,
+        category_id: newProd.category_id,
+        brand_id: newProd.brand_id,
+        wholesale_price: newProd.wholesale_price,
+        dealer_price: newProd.dealer_price,
+        weighted_cost_lkr: newProd.weighted_cost_lkr,
+        low_stock_threshold: newProd.low_stock_threshold,
+        is_wholesale_active: true,
+        is_active: true
+      }));
+      await runCloudWrite('Initializing product stock', () => supabase.from('stock_balances').upsert({
+        product_id: newProd.id,
+        qty_on_hand: 0,
+        qty_reserved: 0,
+        qty_available: 0,
+        qty_in_transit: 0,
+        qty_damaged: 0
+      }));
       notifySuccess('Product added! Stock starts at 0 and will increase when purchase documents or transit orders arrive.');
       return newProd;
     }
@@ -1107,14 +900,8 @@ export function BusinessProvider({ children }) {
       delete updated[productId];
       return updated;
     });
-    try {
-      if (supabase) {
-        await supabase.from('stock_balances').delete().eq('product_id', productId);
-        await supabase.from('products').delete().eq('id', productId);
-      }
-    } catch (e) {
-      console.warn('Product delete error:', e);
-    }
+    await runCloudWrite('Deleting product stock', () => supabase.from('stock_balances').delete().eq('product_id', productId));
+    await runCloudWrite('Deleting product', () => supabase.from('products').delete().eq('id', productId));
     notifySuccess('Product deleted successfully');
     return { success: true };
   };
@@ -1124,23 +911,21 @@ export function BusinessProvider({ children }) {
     const targetId = customerData.id || generateUUID();
     if (customerData.id) {
       setCustomers(prev => prev.map(c => c.id === customerData.id ? { ...c, ...customerData, updated_at: new Date().toISOString() } : c));
-      try {
-        if (supabase) {
-          await supabase.from('customers').update({
-            business_name: customerData.business_name,
-            contact_person: customerData.contact_person,
-            phone: customerData.phone,
-            whatsapp: customerData.whatsapp,
-            email: customerData.email,
-            billing_address: customerData.billing_address,
-            price_tier: customerData.price_tier,
-            credit_allowed: customerData.credit_allowed,
-            credit_limit: customerData.credit_limit,
-            credit_days: customerData.credit_days
-          }).eq('id', customerData.id);
-        }
-      } catch (e) {}
+      await runCloudWrite('Updating customer', () => supabase.from('customers').update({
+        business_name: customerData.business_name,
+        contact_person: customerData.contact_person,
+        phone: customerData.phone,
+        whatsapp: customerData.whatsapp,
+        email: customerData.email,
+        billing_address: customerData.billing_address,
+        price_tier: customerData.price_tier,
+        credit_allowed: customerData.credit_allowed,
+        credit_limit: customerData.credit_limit,
+        credit_days: customerData.credit_days,
+        updated_at: new Date().toISOString()
+      }).eq('id', customerData.id));
       notifySuccess('Customer profile updated');
+      return { ...customerData, id: customerData.id };
     } else {
       const newCust = {
         ...customerData,
@@ -1153,25 +938,21 @@ export function BusinessProvider({ children }) {
       };
       setCustomers(prev => [newCust, ...prev]);
 
-      try {
-        if (supabase) {
-          await supabase.from('customers').upsert({
-            id: newCust.id,
-            customer_code: newCust.customer_code,
-            business_name: newCust.business_name,
-            contact_person: newCust.contact_person,
-            phone: newCust.phone,
-            whatsapp: newCust.whatsapp,
-            email: newCust.email,
-            billing_address: newCust.billing_address,
-            price_tier: newCust.price_tier,
-            credit_allowed: newCust.credit_allowed,
-            credit_limit: newCust.credit_limit,
-            credit_days: newCust.credit_days,
-            is_active: true
-          });
-        }
-      } catch (e) {}
+      await runCloudWrite('Creating customer', () => supabase.from('customers').upsert({
+        id: newCust.id,
+        customer_code: newCust.customer_code,
+        business_name: newCust.business_name,
+        contact_person: newCust.contact_person,
+        phone: newCust.phone,
+        whatsapp: newCust.whatsapp,
+        email: newCust.email,
+        billing_address: newCust.billing_address,
+        price_tier: newCust.price_tier,
+        credit_allowed: newCust.credit_allowed,
+        credit_limit: newCust.credit_limit,
+        credit_days: newCust.credit_days,
+        is_active: true
+      }));
       notifySuccess('New customer created');
       return newCust;
     }
@@ -1179,194 +960,154 @@ export function BusinessProvider({ children }) {
 
   const deleteCustomer = async (customerId) => {
     setCustomers(prev => prev.filter(c => c.id !== customerId));
-    try {
-      if (supabase) {
-        await supabase.from('customers').delete().eq('id', customerId);
-      }
-    } catch (e) {}
+    await runCloudWrite('Deleting customer', () => supabase.from('customers').delete().eq('id', customerId));
     notifySuccess('Customer deleted');
   };
 
   // Record Customer Credit Settlement
-  const recordCustomerSettlement = (settlementData) => {
-    const {
-      customer_id,
-      customer_name,
-      amount,
-      payment_date,
-      payment_method, // 'cash' | 'bank' | 'cheque'
-      reference,
-      notes,
-      bank_account_id,
-      cheque_no,
-      cheque_date,
-      bank_name
-    } = settlementData;
+  const recordCustomerSettlement = async (settlementData) => {
+    const amount = Number(settlementData.amount) || 0;
+    if (amount <= 0) throw new Error('Payment amount must be greater than 0');
 
-    const amt = Number(amount) || 0;
-    if (amt <= 0) throw new Error('Payment amount must be greater than 0');
+    const customer = customers.find(item =>
+      (settlementData.customer_id && String(item.id) === String(settlementData.customer_id)) ||
+      (settlementData.customer_name && item.business_name?.trim().toLowerCase() === settlementData.customer_name.trim().toLowerCase())
+    );
+    const customerId = isValidUUID(customer?.id) ? customer.id : (isValidUUID(settlementData.customer_id) ? settlementData.customer_id : null);
+    if (!customerId) throw new Error('Select a valid customer before recording a settlement.');
 
-    const targetId = customer_id != null ? String(customer_id).trim() : '';
-    const targetName = (customer_name || '').trim().toLowerCase();
-
-    const isCustomerMatch = (c) => {
-      if (!c) return false;
-      const cId = c.id != null ? String(c.id).trim() : '';
-      const cName = (c.business_name || '').trim().toLowerCase();
-      if (targetId && cId && targetId === cId) return true;
-      if (targetName && cName && (targetName === cName || cName.includes(targetName) || targetName.includes(cName))) return true;
-      return false;
-    };
-
-    const isDocMatch = (doc) => {
-      if (!doc) return false;
-      const docCustId = doc.customer_id != null ? String(doc.customer_id).trim() : '';
-      const docCustName = (doc.customer_name || '').trim().toLowerCase();
-      if (targetId && docCustId && targetId === docCustId) return true;
-      if (targetName && docCustName && (targetName === docCustName || docCustName.includes(targetName) || targetName.includes(docCustName))) return true;
-      return false;
-    };
-
-    const cust = customers.find(isCustomerMatch);
-    const payDate = payment_date || new Date().toISOString().slice(0, 10);
-    const payNo = `SETTLE-${Date.now().toString().slice(-4)}`;
+    const paymentDate = settlementData.payment_date || new Date().toISOString().slice(0, 10);
     const paymentId = generateUUID();
+    const paymentNo = `SETTLE-${Date.now().toString().slice(-6)}`;
+    const effectiveBankId = isValidUUID(settlementData.bank_account_id)
+      ? settlementData.bank_account_id
+      : (settlementData.payment_method === 'bank' && isValidUUID(bankAccounts[0]?.id) ? bankAccounts[0].id : null);
+    const paymentReference = settlementData.reference || (settlementData.cheque_no ? `Cheque #${settlementData.cheque_no}` : 'Customer Credit Settlement');
 
-    // 1. Create Payment Record (Recorded as Inflow in Cash Flow & Ledger)
-    const newPayment = {
+    const allocations = [];
+    let remaining = amount;
+    salesDocuments
+      .filter(document => document.customer_id === customerId && document.doc_type !== 'quotation' && document.status !== 'cancelled' && (Number(document.balance_due) || 0) > 0.01)
+      .sort((a, b) => new Date(a.doc_date || a.created_at) - new Date(b.doc_date || b.created_at))
+      .forEach(document => {
+        if (remaining <= 0) return;
+        const allocated = Math.min(Number(document.balance_due) || 0, remaining);
+        allocations.push({ document, allocated });
+        remaining -= allocated;
+      });
+
+    await runCloudWrite('Recording customer settlement', () => supabase.from('payments').insert({
       id: paymentId,
-      payment_no: payNo,
-      payment_date: payDate,
+      payment_no: paymentNo,
       payment_type: 'customer_settlement',
       party_type: 'customer',
-      party_id: cust?.id || customer_id,
-      customer_name: cust?.business_name || customer_name || 'Customer',
-      amount: amt,
-      currency: 'LKR',
-      payment_method: payment_method || 'cash',
-      bank_account_id: bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null),
-      reference: reference || (cheque_no ? `Cheque #${cheque_no}` : 'Customer Credit Settlement'),
-      notes: notes || '',
-      created_at: new Date().toISOString()
-    };
+      party_id: customerId,
+      payment_date: paymentDate,
+      amount,
+      payment_method: settlementData.payment_method || 'cash',
+      bank_account_id: effectiveBankId,
+      reference: paymentReference,
+      notes: settlementData.notes || null
+    }));
 
-    setPayments(prev => [newPayment, ...prev]);
-
-    try {
-      if (supabase) {
-        const cId = isValidUUID(cust?.id) ? cust.id : (isValidUUID(customer_id) ? customer_id : null);
-        supabase.from('payments').insert({
-          id: paymentId,
-          payment_no: payNo,
-          payment_type: 'customer_payment',
-          party_type: 'customer',
-          party_id: cId,
-          payment_date: payDate,
-          amount: amt,
-          payment_method: payment_method || 'cash',
-          reference: reference || (cheque_no ? `Cheque #${cheque_no}` : 'Customer Credit Settlement'),
-          notes: notes || ''
-        }).then(() => {}).catch(e => console.warn('Supabase payment insert notice:', e));
-
-        if (cId) {
-          const cur = Number(cust?.current_receivable) || 0;
-          supabase.from('customers').update({
-            current_receivable: Math.max(0, cur - amt)
-          }).eq('id', cId).then(() => {}).catch(() => {});
-        }
-      }
-    } catch (e) {}
-
-    // 2. If cheque, record in cheque register
-    if (payment_method === 'cheque' && cheque_no) {
-      const newCheque = {
-        id: 'chq-' + Date.now(),
-        cheque_no,
-        bank_name: bank_name || 'Commercial Bank',
-        party_type: 'customer',
-        party_id: cust?.id || customer_id,
-        party_name: cust?.business_name || customer_name || 'Customer',
-        direction: 'received',
-        amount: amt,
-        cheque_date: cheque_date || payDate,
-        status: 'received',
-        notes: notes || 'Customer Settlement Cheque',
-        created_at: new Date().toISOString()
-      };
-      setCheques(prev => [newCheque, ...prev]);
+    if (allocations.length) {
+      await runCloudBatch('Allocating customer settlement', allocations.map(({ document, allocated }) => {
+        const nextPaid = (Number(document.paid_amount) || 0) + allocated;
+        const nextDue = Math.max(0, (Number(document.balance_due) || 0) - allocated);
+        return supabase.from('sales_documents').update({
+          paid_amount: nextPaid,
+          balance_due: nextDue,
+          payment_status: nextDue <= 0.01 ? 'paid' : 'partially_paid',
+          status: nextDue <= 0.01 ? 'paid' : 'partially_paid',
+          updated_at: new Date().toISOString()
+        }).eq('id', document.id);
+      }));
     }
 
-    // 3. Update customer receivable directly
-    setCustomers(prev => prev.map(c => {
-      if (!isCustomerMatch(c)) return c;
-      const cur = Number(c.current_receivable) || 0;
+    const nextReceivable = Math.max(0, (Number(customer?.current_receivable) || 0) - amount);
+    await runCloudWrite('Updating customer balance', () => supabase.from('customers').update({
+      current_receivable: nextReceivable,
+      updated_at: new Date().toISOString()
+    }).eq('id', customerId));
+
+    let newCheque = null;
+    if (settlementData.payment_method === 'cheque' && settlementData.cheque_no) {
+      newCheque = {
+        id: generateUUID(),
+        cheque_no: settlementData.cheque_no,
+        bank_name: settlementData.bank_name || 'Bank',
+        branch: settlementData.branch || null,
+        party_type: 'customer',
+        party_id: customerId,
+        party_name: customer?.business_name || settlementData.customer_name || 'Customer',
+        direction: 'received',
+        amount,
+        cheque_date: settlementData.cheque_date || paymentDate,
+        received_or_issued_date: paymentDate,
+        status: 'received',
+        notes: settlementData.notes || 'Customer Settlement Cheque',
+        created_at: new Date().toISOString()
+      };
+      await runCloudWrite('Recording settlement cheque', () => supabase.from('cheque_register').insert({
+        id: newCheque.id,
+        cheque_no: newCheque.cheque_no,
+        bank_name: newCheque.bank_name,
+        branch: newCheque.branch,
+        party_type: 'customer',
+        party_id: customerId,
+        direction: 'received',
+        amount,
+        cheque_date: newCheque.cheque_date,
+        received_or_issued_date: paymentDate,
+        status: 'received',
+        notes: newCheque.notes
+      }));
+    }
+
+    const bankAccount = bankAccounts.find(item => item.id === effectiveBankId);
+    if (bankAccount) {
+      const nextBalance = (Number(bankAccount.current_balance) || 0) + amount;
+      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
+      setBankAccounts(prev => prev.map(item => item.id === bankAccount.id ? { ...item, current_balance: nextBalance } : item));
+    }
+
+    const newPayment = {
+      id: paymentId,
+      payment_no: paymentNo,
+      payment_date: paymentDate,
+      payment_type: 'customer_settlement',
+      party_type: 'customer',
+      party_id: customerId,
+      customer_name: customer?.business_name || settlementData.customer_name || 'Customer',
+      amount,
+      currency: 'LKR',
+      payment_method: settlementData.payment_method || 'cash',
+      bank_account_id: effectiveBankId,
+      reference: paymentReference,
+      notes: settlementData.notes || '',
+      created_at: new Date().toISOString()
+    };
+    setPayments(prev => [newPayment, ...prev]);
+    if (newCheque) setCheques(prev => [newCheque, ...prev]);
+    setCustomers(prev => prev.map(item => item.id === customerId ? { ...item, current_receivable: nextReceivable } : item));
+    setSalesDocuments(prev => prev.map(document => {
+      const allocation = allocations.find(item => item.document.id === document.id);
+      if (!allocation) return document;
+      const nextDue = Math.max(0, (Number(document.balance_due) || 0) - allocation.allocated);
       return {
-        ...c,
-        current_receivable: Math.max(0, cur - amt),
-        updated_at: new Date().toISOString()
+        ...document,
+        paid_amount: (Number(document.paid_amount) || 0) + allocation.allocated,
+        balance_due: nextDue,
+        payment_status: nextDue <= 0.01 ? 'paid' : 'partial'
       };
     }));
 
-    // 4. Allocate payment against oldest unpaid invoices (FIFO)
-    setSalesDocuments(prev => {
-      let remainingToAllocate = amt;
-
-      // Find all matching unpaid invoices sorted oldest first
-      const eligibleInvoices = prev
-        .filter(doc => {
-          const due = doc.balance_due !== undefined
-            ? Number(doc.balance_due)
-            : Math.max(0, (Number(doc.grand_total) || 0) - (Number(doc.paid_amount) || 0));
-          return isDocMatch(doc) && doc.doc_type !== 'quotation' && doc.status !== 'cancelled' && due > 0.01;
-        })
-        .sort((a, b) => new Date(a.doc_date || a.created_at) - new Date(b.doc_date || b.created_at));
-
-      const allocations = {};
-      for (const inv of eligibleInvoices) {
-        if (remainingToAllocate <= 0) break;
-        const due = inv.balance_due !== undefined
-          ? Number(inv.balance_due)
-          : Math.max(0, (Number(inv.grand_total) || 0) - (Number(inv.paid_amount) || 0));
-        const alloc = Math.min(due, remainingToAllocate);
-        allocations[inv.id] = alloc;
-        remainingToAllocate -= alloc;
-      }
-
-      return prev.map(doc => {
-        const alloc = allocations[doc.id];
-        if (!alloc) return doc;
-
-        const due = doc.balance_due !== undefined
-          ? Number(doc.balance_due)
-          : Math.max(0, (Number(doc.grand_total) || 0) - (Number(doc.paid_amount) || 0));
-        const newPaid = (Number(doc.paid_amount) || 0) + alloc;
-        const newDue = Math.max(0, due - alloc);
-        const newStatus = newDue <= 0.01 ? 'paid' : 'partial';
-
-        return {
-          ...doc,
-          paid_amount: newPaid,
-          balance_due: newDue,
-          payment_status: newStatus
-        };
-      });
-    });
-
-    // 5. Update Bank Account if cash/bank
-    const effectiveBankId = bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null);
-    if (effectiveBankId) {
-      setBankAccounts(prev => prev.map(b => b.id === effectiveBankId ? {
-        ...b,
-        current_balance: (Number(b.current_balance) || 0) + amt
-      } : b));
-    }
-
-    notifySuccess(`Settlement of Rs. ${amt.toLocaleString()} recorded for ${cust?.business_name || customer_name || 'Customer'}`);
+    notifySuccess(`Settlement of Rs. ${amount.toLocaleString()} recorded for ${customer?.business_name || settlementData.customer_name || 'Customer'}`);
     return newPayment;
   };
 
   // Record Direct Expense / Outflow
-  const recordDirectExpense = (expenseData) => {
+  const recordDirectExpense = async (expenseData) => {
     const {
       amount,
       expense_category,
@@ -1411,44 +1152,37 @@ export function BusinessProvider({ children }) {
       created_at: new Date().toISOString()
     };
 
-    setPayments(prev => [newPayment, ...prev]);
+    await runCloudWrite('Recording expense', () => supabase.from('payments').insert({
+      id: paymentId,
+      payment_no: expNo,
+      payment_date: newPayment.payment_date,
+      payment_type: 'operational_expense',
+      party_type: 'payee',
+      party_id: null,
+      amount: amt,
+      payment_method: payment_method || 'cash',
+      bank_account_id: validBankId,
+      reference: combinedReference,
+      notes: combinedNotes
+    }));
 
-    // Reverse bank balance if paid from bank
     if (validBankId && amt > 0) {
-      setBankAccounts(prev => prev.map(b => b.id === validBankId ? {
-        ...b,
-        current_balance: Math.max(0, (Number(b.current_balance) || 0) - amt)
-      } : b));
+      const account = bankAccounts.find(item => item.id === validBankId);
+      if (account) {
+        const nextBalance = (Number(account.current_balance) || 0) - amt;
+        await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', validBankId));
+        setBankAccounts(prev => prev.map(item => item.id === validBankId ? { ...item, current_balance: nextBalance } : item));
+      }
     }
 
-    // Save to Supabase — async, log any error to console for debugging
-    if (supabase) {
-      (async () => {
-        const { error: insErr } = await supabase.from('payments').insert({
-          id: paymentId,
-          payment_no: expNo,
-          payment_date: newPayment.payment_date,
-          payment_type: 'operational_expense',
-          party_type: 'payee',
-          party_id: null,
-          amount: amt,
-          payment_method: payment_method || 'cash',
-          bank_account_id: validBankId,
-          reference: combinedReference,
-          notes: combinedNotes
-        });
-        if (insErr) {
-          console.error('Supabase expense insert FAILED:', insErr.message, insErr.details, insErr.hint);
-        }
-      })();
-    }
+    setPayments(prev => [newPayment, ...prev]);
 
     notifySuccess(`Expense of Rs. ${amt.toLocaleString()} recorded`);
     return newPayment;
   };
 
   // Record Direct Capital Investment / Other Inflow
-  const recordDirectIncome = (incomeData) => {
+  const recordDirectIncome = async (incomeData) => {
     const {
       amount,
       income_category,
@@ -1494,37 +1228,30 @@ export function BusinessProvider({ children }) {
       created_at: new Date().toISOString()
     };
 
-    setPayments(prev => [newPayment, ...prev]);
+    await runCloudWrite('Recording income', () => supabase.from('payments').insert({
+      id: paymentId,
+      payment_no: incNo,
+      payment_date: newPayment.payment_date,
+      payment_type: 'direct_income',
+      party_type: 'payer',
+      party_id: null,
+      amount: amt,
+      payment_method: payment_method || 'cash',
+      bank_account_id: validBankId,
+      reference: combinedReference,
+      notes: combinedNotes
+    }));
 
-    // Add to bank balance if deposited into bank
     if (validBankId && amt > 0) {
-      setBankAccounts(prev => prev.map(b => b.id === validBankId ? {
-        ...b,
-        current_balance: (Number(b.current_balance) || 0) + amt
-      } : b));
+      const account = bankAccounts.find(item => item.id === validBankId);
+      if (account) {
+        const nextBalance = (Number(account.current_balance) || 0) + amt;
+        await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', validBankId));
+        setBankAccounts(prev => prev.map(item => item.id === validBankId ? { ...item, current_balance: nextBalance } : item));
+      }
     }
 
-    // Save to Supabase — async, log any error to console for debugging
-    if (supabase) {
-      (async () => {
-        const { error: insErr } = await supabase.from('payments').insert({
-          id: paymentId,
-          payment_no: incNo,
-          payment_date: newPayment.payment_date,
-          payment_type: 'direct_income',
-          party_type: 'payer',
-          party_id: null,
-          amount: amt,
-          payment_method: payment_method || 'cash',
-          bank_account_id: validBankId,
-          reference: combinedReference,
-          notes: combinedNotes
-        });
-        if (insErr) {
-          console.error('Supabase income insert FAILED:', insErr.message, insErr.details, insErr.hint);
-        }
-      })();
-    }
+    setPayments(prev => [newPayment, ...prev]);
 
     notifySuccess(`${categoryName} of Rs. ${amt.toLocaleString()} recorded`);
     return newPayment;
@@ -1536,21 +1263,19 @@ export function BusinessProvider({ children }) {
     const targetId = supplierData.id || generateUUID();
     if (supplierData.id) {
       setSuppliers(prev => prev.map(s => s.id === supplierData.id ? { ...s, ...supplierData, updated_at: new Date().toISOString() } : s));
-      try {
-        if (supabase) {
-          await supabase.from('suppliers').update({
-            name: supplierData.name,
-            country: supplierData.country,
-            contact_person: supplierData.contact_person,
-            phone: supplierData.phone,
-            email: supplierData.email,
-            default_currency: supplierData.default_currency,
-            default_lead_days: supplierData.default_lead_days,
-            bank_details: supplierData.bank_details
-          }).eq('id', supplierData.id);
-        }
-      } catch (e) {}
+      await runCloudWrite('Updating supplier', () => supabase.from('suppliers').update({
+        name: supplierData.name,
+        country: supplierData.country,
+        contact_person: supplierData.contact_person,
+        phone: supplierData.phone,
+        email: supplierData.email,
+        default_currency: supplierData.default_currency,
+        default_lead_days: supplierData.default_lead_days,
+        bank_details: supplierData.bank_details,
+        updated_at: new Date().toISOString()
+      }).eq('id', supplierData.id));
       notifySuccess('Supplier profile updated');
+      return { ...supplierData, id: supplierData.id };
     } else {
       const newSupp = {
         ...supplierData,
@@ -1563,50 +1288,79 @@ export function BusinessProvider({ children }) {
       };
       setSuppliers(prev => [newSupp, ...prev]);
 
-      try {
-        if (supabase) {
-          await supabase.from('suppliers').upsert({
-            id: newSupp.id,
-            supplier_code: newSupp.supplier_code,
-            name: newSupp.name,
-            country: newSupp.country,
-            contact_person: newSupp.contact_person,
-            phone: newSupp.phone,
-            email: newSupp.email,
-            default_currency: newSupp.default_currency,
-            default_lead_days: newSupp.default_lead_days,
-            bank_details: newSupp.bank_details,
-            is_active: true
-          });
-        }
-      } catch (e) {}
+      await runCloudWrite('Creating supplier', () => supabase.from('suppliers').upsert({
+        id: newSupp.id,
+        supplier_code: newSupp.supplier_code,
+        name: newSupp.name,
+        country: newSupp.country,
+        contact_person: newSupp.contact_person,
+        phone: newSupp.phone,
+        email: newSupp.email,
+        default_currency: newSupp.default_currency,
+        default_lead_days: newSupp.default_lead_days,
+        bank_details: newSupp.bank_details,
+        is_active: true
+      }));
       notifySuccess('New supplier profile created');
+      return newSupp;
     }
   };
 
   const deleteSupplier = async (supplierId) => {
     setSuppliers(prev => prev.filter(s => s.id !== supplierId));
-    try {
-      if (supabase) {
-        await supabase.from('suppliers').delete().eq('id', supplierId);
-      }
-    } catch (e) {
-      console.warn('Supplier delete error:', e);
-    }
+    await runCloudWrite('Deleting supplier', () => supabase.from('suppliers').delete().eq('id', supplierId));
     notifySuccess('Supplier deleted successfully');
   };
 
   // Create Supplier Order
   const createSupplierOrder = async (orderData) => {
     const orderNo = `SO-IMP-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const orderId = generateUUID();
+    const exchangeRate = Number(orderData.exchange_rate_snapshot) || 1;
+    const foreignTotal = (orderData.items || []).reduce((sum, item) =>
+      sum + ((Number(item.ordered_qty) || 0) * (Number(item.foreign_unit_cost) || 0)), 0);
     const newOrder = {
       ...orderData,
-      id: 'so-' + Date.now(),
+      id: orderId,
       order_no: orderNo,
       order_date: new Date().toISOString().slice(0, 10),
+      total_foreign_amount: foreignTotal,
+      estimated_lkr_total: foreignTotal * exchangeRate,
       status: 'ordered',
       created_at: new Date().toISOString()
     };
+
+    await runCloudWrite('Creating supplier order', () => supabase.from('supplier_orders').insert({
+      id: orderId,
+      order_no: orderNo,
+      supplier_id: orderData.supplier_id,
+      order_date: newOrder.order_date,
+      currency: orderData.currency || 'USD',
+      exchange_rate_estimate: exchangeRate,
+      incoterm: orderData.incoterm || 'FOB',
+      expected_shipment_date: orderData.expected_shipment_date || null,
+      expected_arrival_date: orderData.expected_arrival_date || null,
+      total_foreign_amount: foreignTotal,
+      estimated_lkr_total: foreignTotal * exchangeRate,
+      status: 'ordered',
+      notes: orderData.notes || null
+    }));
+
+    const orderItems = (orderData.items || []).map(item => ({
+      id: generateUUID(),
+      supplier_order_id: orderId,
+      product_id: item.product_id,
+      ordered_qty: Number(item.ordered_qty) || 0,
+      shipped_qty: 0,
+      foreign_unit_cost: Number(item.foreign_unit_cost) || 0,
+      foreign_total: (Number(item.ordered_qty) || 0) * (Number(item.foreign_unit_cost) || 0),
+      notes: item.notes || null
+    })).filter(item => isValidUUID(item.product_id) && item.ordered_qty > 0);
+
+    if (orderItems.length) {
+      await runCloudWrite('Saving supplier order items', () => supabase.from('supplier_order_items').insert(orderItems));
+    }
+
     setSupplierOrders(prev => [newOrder, ...prev]);
     return newOrder;
   };
@@ -1618,13 +1372,64 @@ export function BusinessProvider({ children }) {
 
     const newAdv = {
       ...advanceData,
-      id: 'adv-' + Date.now(),
+      id: generateUUID(),
       advance_no: advNo,
       payment_date: new Date().toISOString().slice(0, 10),
       lkr_amount: lkrAmount,
       unallocated_lkr_amount: lkrAmount,
       created_at: new Date().toISOString()
     };
+
+    const paymentId = generateUUID();
+    const paymentNo = `PAY-ADV-${Date.now().toString().slice(-6)}`;
+    const supplier = suppliers.find(item => item.id === advanceData.supplier_id);
+    const bankAccount = bankAccounts.find(item => item.id === advanceData.bank_account_id);
+
+    await runCloudWrite('Recording supplier advance', () => supabase.from('supplier_advances').insert({
+      id: newAdv.id,
+      advance_no: advNo,
+      supplier_id: advanceData.supplier_id,
+      supplier_order_id: isValidUUID(advanceData.supplier_order_id) ? advanceData.supplier_order_id : null,
+      payment_date: newAdv.payment_date,
+      currency: advanceData.currency || 'USD',
+      foreign_amount: Number(advanceData.foreign_amount) || 0,
+      exchange_rate: Number(advanceData.exchange_rate) || 1,
+      lkr_amount: lkrAmount,
+      payment_method: advanceData.payment_method || 'bank',
+      bank_account_id: isValidUUID(advanceData.bank_account_id) ? advanceData.bank_account_id : null,
+      bank_ref: advanceData.reference || null,
+      allocated_lkr_amount: 0,
+      unallocated_lkr_amount: lkrAmount,
+      notes: advanceData.notes || null
+    }));
+
+    await runCloudWrite('Recording supplier advance payment', () => supabase.from('payments').insert({
+      id: paymentId,
+      payment_no: paymentNo,
+      payment_date: newAdv.payment_date,
+      payment_type: 'supplier_advance',
+      party_type: 'supplier',
+      party_id: advanceData.supplier_id,
+      amount: lkrAmount,
+      payment_method: advanceData.payment_method || 'bank',
+      bank_account_id: isValidUUID(advanceData.bank_account_id) ? advanceData.bank_account_id : null,
+      reference: advanceData.reference || advNo,
+      notes: advanceData.notes || null
+    }));
+
+    if (supplier) {
+      await runCloudWrite('Updating supplier advance balance', () => supabase.from('suppliers').update({
+        current_advance_balance: (Number(supplier.current_advance_balance) || 0) + lkrAmount,
+        updated_at: new Date().toISOString()
+      }).eq('id', supplier.id));
+    }
+
+    if (bankAccount) {
+      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({
+        current_balance: (Number(bankAccount.current_balance) || 0) - lkrAmount,
+        updated_at: new Date().toISOString()
+      }).eq('id', bankAccount.id));
+    }
 
     setSupplierAdvances(prev => [newAdv, ...prev]);
 
@@ -1641,8 +1446,8 @@ export function BusinessProvider({ children }) {
     }
 
     setPayments(prev => [{
-      id: 'pay-' + Date.now(),
-      payment_no: `PAY-ADV-${Date.now().toString().slice(-4)}`,
+      id: paymentId,
+      payment_no: paymentNo,
       payment_date: new Date().toISOString().slice(0, 10),
       payment_type: 'supplier_advance',
       party_type: 'supplier',
@@ -1688,118 +1493,114 @@ export function BusinessProvider({ children }) {
       created_at: new Date().toISOString()
     };
 
-    setTransitShipments(prev => [newShp, ...prev]);
+    const suppId = isValidUUID(shipmentData.supplier_id) ? shipmentData.supplier_id : null;
+    if (!suppId) throw new Error('Select a valid supplier before saving the shipment.');
 
-    // Only affect stock balances and payments if NOT saved as draft
+    await runCloudWrite('Creating transit shipment', () => supabase.from('transit_shipments').upsert({
+      id: trnId,
+      shipment_no: shpNo,
+      supplier_id: suppId,
+      supplier_order_id: isValidUUID(shipmentData.supplier_order_id) ? shipmentData.supplier_order_id : null,
+      supplier_invoice_ref: shipmentData.supplier_invoice_ref || shipmentData.external_reference || null,
+      shipment_ref: shipmentData.shipment_ref || null,
+      tracking_or_bl_no: shipmentData.tracking_or_bl_no || shipmentData.bill_of_lading_no || null,
+      courier_freight_company: shipmentData.courier_freight_company || shipmentData.shipping_line_carrier || null,
+      origin_country: shipmentData.origin_country || 'China',
+      shipping_date: shipmentData.document_date || shipmentData.shipping_date || shipmentData.departure_date || new Date().toISOString().slice(0, 10),
+      expected_arrival_date: shipmentData.expected_arrival_date || shipmentData.estimated_arrival_date || null,
+      currency: shipmentData.currency || 'USD',
+      exchange_rate_snapshot: rate,
+      foreign_items_subtotal: foreignSubtotal,
+      total_landed_expenses_lkr: 0,
+      total_estimated_cost_lkr: lkrFob,
+      payment_type: shipmentData.payment_type || 'credit',
+      status: isDraft ? 'preparing' : 'in_transit',
+      notes: shipmentData.notes || null
+    }));
+
+    const transitItems = newShp.items.map(item => ({
+      id: generateUUID(),
+      transit_shipment_id: trnId,
+      product_id: item.product_id || item.id,
+      shipped_qty: Number(item.shipped_qty || item.qty) || 1,
+      foreign_unit_cost: Number(item.foreign_unit_cost || item.unit_cost) || 0,
+      weight_kg: Number(item.weight_kg) || 0,
+      volume_cbm: Number(item.volume_cbm) || 0
+    })).filter(item => isValidUUID(item.product_id));
+    if (transitItems.length) {
+      await runCloudWrite('Saving transit shipment items', () => supabase.from('transit_shipment_items').insert(transitItems));
+    }
+
     if (!isDraft) {
-      setStockBalances(prev => {
-        const updated = { ...prev };
-        (shipmentData.items || []).forEach(it => {
-          const pId = it.product_id;
-          const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          updated[pId] = {
-            ...cur,
-            qty_in_transit: (cur.qty_in_transit || 0) + (Number(it.shipped_qty || it.qty) || 1)
-          };
+      const stockWrites = transitItems.map(item => {
+        const current = stockBalances[item.product_id] || {};
+        return supabase.from('stock_balances').upsert({
+          product_id: item.product_id,
+          qty_on_hand: Number(current.qty_on_hand) || 0,
+          qty_reserved: Number(current.qty_reserved) || 0,
+          qty_available: Number(current.qty_available) || 0,
+          qty_in_transit: (Number(current.qty_in_transit) || 0) + item.shipped_qty,
+          qty_damaged: Number(current.qty_damaged) || 0,
+          updated_at: new Date().toISOString()
         });
-        return updated;
       });
+      if (stockWrites.length) await runCloudBatch('Updating in-transit stock', stockWrites);
 
-      if (shipmentData.supplier_order_id) {
-        setSupplierOrders(prev => prev.map(o => o.id === shipmentData.supplier_order_id ? { ...o, status: 'dispatched' } : o));
+      if (isValidUUID(shipmentData.supplier_order_id)) {
+        await runCloudWrite('Updating supplier order status', () => supabase.from('supplier_orders').update({
+          status: 'shipped',
+          updated_at: new Date().toISOString()
+        }).eq('id', shipmentData.supplier_order_id));
       }
 
       const payType = shipmentData.payment_type || 'credit';
-      const totalOrderVal = lkrFob;
-
       if (payType !== 'credit') {
-        // Record payment for Cashflow
-        setPayments(prev => [{
-          id: 'pay-' + Date.now(),
-          payment_no: `PAY-TRN-${Date.now().toString().slice(-4)}`,
+        const paymentId = generateUUID();
+        const paymentNo = `PAY-TRN-${Date.now().toString().slice(-6)}`;
+        const bankAccount = bankAccounts[0];
+        await runCloudWrite('Recording transit payment', () => supabase.from('payments').insert({
+          id: paymentId,
+          payment_no: paymentNo,
           payment_date: shipmentData.document_date || new Date().toISOString().slice(0, 10),
           payment_type: 'transit_purchase_payment',
           party_type: 'supplier',
-          party_id: shipmentData.supplier_id,
-          transit_shipment_id: trnId,
-          amount: totalOrderVal,
-          currency: 'LKR',
-          payment_method: payType, // 'cash' | 'bank' | 'cheque'
+          party_id: suppId,
+          amount: lkrFob,
+          payment_method: payType,
+          bank_account_id: isValidUUID(bankAccount?.id) && (payType === 'cash' || payType === 'bank') ? bankAccount.id : null,
           reference: shpNo,
-          created_at: new Date().toISOString()
-        }, ...prev]);
-
-        if (payType === 'cash' || payType === 'bank') {
-          setBankAccounts(prev => {
-            if (!prev.length) return prev;
-            return prev.map((b, idx) => idx === 0 ? { ...b, current_balance: (b.current_balance || 0) - totalOrderVal } : b);
-          });
+          notes: `Payment for transit shipment ${shpNo}`
+        }));
+        setPayments(prev => [{ id: paymentId, payment_no: paymentNo, payment_date: newShp.shipping_date, payment_type: 'transit_purchase_payment', party_type: 'supplier', party_id: suppId, amount: lkrFob, payment_method: payType, bank_account_id: bankAccount?.id || null, reference: shpNo, created_at: new Date().toISOString() }, ...prev]);
+        if (bankAccount && (payType === 'cash' || payType === 'bank')) {
+          const nextBalance = (Number(bankAccount.current_balance) || 0) - lkrFob;
+          await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
+          setBankAccounts(prev => prev.map((account, index) => index === 0 ? { ...account, current_balance: nextBalance } : account));
         }
-      } else if (shipmentData.supplier_id) {
-        // Record Accounts Payable to supplier
-        setSuppliers(prev => prev.map(s => s.id === shipmentData.supplier_id ? {
-          ...s,
-          current_payable: (s.current_payable || 0) + totalOrderVal
-        } : s));
+      } else {
+        const supplier = suppliers.find(item => item.id === suppId);
+        if (supplier) {
+          const nextPayable = (Number(supplier.current_payable) || 0) + lkrFob;
+          await runCloudWrite('Updating supplier payable', () => supabase.from('suppliers').update({ current_payable: nextPayable, updated_at: new Date().toISOString() }).eq('id', suppId));
+          setSuppliers(prev => prev.map(item => item.id === suppId ? { ...item, current_payable: nextPayable } : item));
+        }
       }
     }
 
-    try {
-      if (supabase) {
-        const suppId = isValidUUID(shipmentData.supplier_id) ? shipmentData.supplier_id : (suppliers[0]?.id || null);
-        supabase.from('transit_shipments').upsert({
-          id: trnId,
-          shipment_no: shpNo,
-          supplier_id: suppId,
-          supplier_invoice_ref: shipmentData.supplier_invoice_ref || shipmentData.external_reference || null,
-          shipment_ref: shipmentData.shipment_ref || null,
-          tracking_or_bl_no: shipmentData.tracking_or_bl_no || null,
-          courier_freight_company: shipmentData.courier_freight_company || null,
-          origin_country: shipmentData.origin_country || 'China',
-          shipping_date: shipmentData.document_date || shipmentData.shipping_date || new Date().toISOString().slice(0, 10),
-          currency: shipmentData.currency || 'USD',
-          exchange_rate_snapshot: rate,
-          foreign_items_subtotal: foreignSubtotal,
-          total_landed_expenses_lkr: 0,
-          total_estimated_cost_lkr: lkrFob,
-          payment_type: shipmentData.payment_type || 'credit',
-          status: isDraft ? 'preparing' : 'in_transit',
-          notes: shipmentData.notes || null
-        }).then(() => {
-          if (newShp.items && newShp.items.length > 0) {
-            const trnItems = newShp.items.map(it => {
-              const pId = it.product_id || it.id;
-              if (!isValidUUID(pId)) return null;
-              return {
-                id: generateUUID(),
-                transit_shipment_id: trnId,
-                product_id: pId,
-                shipped_qty: Number(it.shipped_qty || it.qty) || 1,
-                foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
-              };
-            }).filter(Boolean);
-
-            if (trnItems.length > 0) {
-              supabase.from('transit_shipment_items').upsert(trnItems).then(() => {}).catch(() => {});
-            }
-          }
-
-          if (!isDraft) {
-            for (const it of (newShp.items || [])) {
-              const pId = it.product_id || it.id;
-              if (isValidUUID(pId)) {
-                const cur = stockBalances[pId] || { qty_on_hand: 0, qty_in_transit: 0 };
-                const qty = Number(it.shipped_qty || it.qty) || 1;
-                supabase.from('stock_balances').upsert({
-                  product_id: pId,
-                  qty_in_transit: (cur.qty_in_transit || 0) + qty
-                }).then(() => {}).catch(() => {});
-              }
-            }
-          }
-        }).catch(err => console.warn('Supabase transit shipment sync notice:', err));
+    setTransitShipments(prev => [newShp, ...prev]);
+    if (!isDraft) {
+      setStockBalances(prev => {
+        const updated = { ...prev };
+        transitItems.forEach(item => {
+          const current = updated[item.product_id] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          updated[item.product_id] = { ...current, qty_in_transit: (Number(current.qty_in_transit) || 0) + item.shipped_qty };
+        });
+        return updated;
+      });
+      if (shipmentData.supplier_order_id) {
+        setSupplierOrders(prev => prev.map(order => order.id === shipmentData.supplier_order_id ? { ...order, status: 'shipped' } : order));
       }
-    } catch (e) {}
+    }
 
     return newShp;
   };
@@ -1935,77 +1736,153 @@ export function BusinessProvider({ children }) {
       }
     }
 
-    try {
-      if (supabase && isValidUUID(shipmentId)) {
-        const dbStatus = newStatus === 'draft' ? 'preparing' : (newStatus === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(newStatus) ? newStatus : 'in_transit'));
-        supabase.from('transit_shipments').update({
-          status: dbStatus,
-          shipping_date: updatedData.document_date || updatedData.shipping_date || existingShp.shipping_date,
-          currency: updatedData.currency || existingShp.currency,
-          exchange_rate_snapshot: rate,
-          foreign_items_subtotal: foreignSubtotal,
-          total_estimated_cost_lkr: totalCostLkr,
-          payment_type: updatedShipment.payment_type || existingShp.payment_type || 'credit',
-          notes: updatedData.notes || existingShp.notes
-        }).eq('id', shipmentId).then(() => {}).catch(() => {});
-      }
-    } catch (e) {}
+    if (!isValidUUID(shipmentId)) throw new Error('This shipment has an invalid cloud identifier.');
+    const dbStatus = newStatus === 'draft' ? 'preparing' : (newStatus === 'arrived' ? 'received' : (['preparing', 'in_transit', 'partially_received', 'received', 'cancelled'].includes(newStatus) ? newStatus : 'in_transit'));
+    await runCloudWrite('Updating transit shipment', () => supabase.from('transit_shipments').update({
+      status: dbStatus,
+      shipping_date: updatedData.document_date || updatedData.shipping_date || existingShp.shipping_date,
+      expected_arrival_date: updatedData.expected_arrival_date || updatedData.estimated_arrival_date || existingShp.expected_arrival_date || null,
+      currency: updatedData.currency || existingShp.currency,
+      exchange_rate_snapshot: rate,
+      foreign_items_subtotal: foreignSubtotal,
+      total_estimated_cost_lkr: totalCostLkr,
+      payment_type: updatedShipment.payment_type || existingShp.payment_type || 'credit',
+      notes: updatedData.notes || existingShp.notes,
+      updated_at: new Date().toISOString()
+    }).eq('id', shipmentId));
+
+    await runCloudWrite('Replacing transit shipment items', () => supabase.from('transit_shipment_items').delete().eq('transit_shipment_id', shipmentId));
+    const cloudItems = formattedItems.map(item => ({
+      id: generateUUID(),
+      transit_shipment_id: shipmentId,
+      product_id: item.product_id,
+      shipped_qty: Number(item.shipped_qty) || 0,
+      foreign_unit_cost: Number(item.foreign_unit_cost) || 0,
+      weight_kg: Number(item.weight_kg) || 0,
+      volume_cbm: Number(item.volume_cbm) || 0
+    })).filter(item => isValidUUID(item.product_id) && item.shipped_qty > 0);
+    if (cloudItems.length) {
+      await runCloudWrite('Saving updated transit items', () => supabase.from('transit_shipment_items').insert(cloudItems));
+    }
+
+    const affectedProductIds = Array.from(new Set([...oldItems, ...formattedItems].map(item => item.product_id).filter(Boolean)));
+    const oldWasActive = existingShp.status === 'in_transit';
+    const newIsActive = newStatus === 'in_transit';
+    const stockWrites = affectedProductIds.map(productId => {
+      const oldQty = oldWasActive ? Number(oldItems.find(item => item.product_id === productId)?.shipped_qty || oldItems.find(item => item.product_id === productId)?.qty) || 0 : 0;
+      const nextQty = newIsActive ? Number(formattedItems.find(item => item.product_id === productId)?.shipped_qty || formattedItems.find(item => item.product_id === productId)?.qty) || 0 : 0;
+      const current = stockBalances[productId] || {};
+      return supabase.from('stock_balances').upsert({
+        product_id: productId,
+        qty_on_hand: Number(current.qty_on_hand) || 0,
+        qty_reserved: Number(current.qty_reserved) || 0,
+        qty_available: Number(current.qty_available) || 0,
+        qty_in_transit: Math.max(0, (Number(current.qty_in_transit) || 0) + nextQty - oldQty),
+        qty_damaged: Number(current.qty_damaged) || 0,
+        updated_at: new Date().toISOString()
+      });
+    });
+    if (stockWrites.length) await runCloudBatch('Updating transit inventory', stockWrites);
+
+    const supplier = suppliers.find(item => item.id === updatedShipment.supplier_id);
+    if (supplier && (updatedShipment.payment_type || 'credit') === 'credit') {
+      const oldPayable = oldWasActive ? Number(existingShp.total_estimated_cost_lkr) || 0 : 0;
+      const nextPayable = newIsActive ? totalCostLkr : 0;
+      await runCloudWrite('Updating supplier payable', () => supabase.from('suppliers').update({
+        current_payable: Math.max(0, (Number(supplier.current_payable) || 0) + nextPayable - oldPayable),
+        updated_at: new Date().toISOString()
+      }).eq('id', supplier.id));
+    }
 
     return updatedShipment;
   };
 
   // Add Landed Cost Expense
-  const addLandedCostExpense = (shipmentId, expenseData) => {
+  const addLandedCostExpense = async (shipmentId, expenseData) => {
     const expenseLkr = (Number(expenseData.amount) || 0) * (Number(expenseData.exchange_rate) || 1.0);
+    if (expenseLkr <= 0) throw new Error('Landed expense amount must be greater than zero.');
+    const shipment = transitShipments.find(item => item.id === shipmentId);
+    if (!shipment || !isValidUUID(shipmentId)) throw new Error('Shipment not found in the cloud.');
 
-    setTransitShipments(prev => prev.map(shp => {
-      if (shp.id !== shipmentId) return shp;
-
-      const newExpense = {
-        ...expenseData,
-        id: 'exp-' + Date.now(),
-        amount_lkr: expenseLkr,
-        created_at: new Date().toISOString()
-      };
-
-      const updatedExpenses = [...(shp.landed_expenses || []), newExpense];
-      const totalLandedExpenses = updatedExpenses.reduce((s, e) => s + (e.amount_lkr || 0), 0);
-      const totalCostLkr = (shp.foreign_items_subtotal * (shp.exchange_rate_snapshot || 305.5)) + totalLandedExpenses;
-
-      const totalForeignValue = (shp.items || []).reduce((s, it) => s + (it.shipped_qty * it.foreign_unit_cost), 0) || 1;
-
-      const updatedItems = (shp.items || []).map(it => {
-        const itemVal = it.shipped_qty * it.foreign_unit_cost;
-        const valueRatio = itemVal / totalForeignValue;
-        const itemAllocatedLandedLkr = totalLandedExpenses * valueRatio;
-        const itemAllocatedPerUnit = itemAllocatedLandedLkr / (it.shipped_qty || 1);
-        const itemFobLkrPerUnit = it.foreign_unit_cost * (shp.exchange_rate_snapshot || 305.5);
-        const finalLandedUnitCost = itemFobLkrPerUnit + itemAllocatedPerUnit;
-
-        return {
-          ...it,
-          allocated_landed_lkr_per_unit: itemAllocatedPerUnit,
-          final_landed_unit_cost_lkr: finalLandedUnitCost
-        };
-      });
-
+    const expenseTypeMap = {
+      sea_freight: 'freight',
+      air_freight: 'freight',
+      port_demurrage: 'clearing',
+      clearing_agent: 'clearing',
+      local_transport: 'local_delivery',
+      other_landed: 'other'
+    };
+    const expenseId = generateUUID();
+    const newExpense = {
+      ...expenseData,
+      id: expenseId,
+      cost_no: `LC-${Date.now().toString().slice(-8)}`,
+      lkr_amount: expenseLkr,
+      amount_lkr: expenseLkr,
+      created_at: new Date().toISOString()
+    };
+    const updatedExpenses = [...(shipment.landed_expenses || []), newExpense];
+    const totalLandedExpenses = updatedExpenses.reduce((sum, expense) => sum + (Number(expense.lkr_amount ?? expense.amount_lkr) || 0), 0);
+    const totalCostLkr = (Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1) + totalLandedExpenses;
+    const totalForeignValue = (shipment.items || []).reduce((sum, item) => sum + ((Number(item.shipped_qty) || 0) * (Number(item.foreign_unit_cost) || 0)), 0) || 1;
+    const updatedItems = (shipment.items || []).map(item => {
+      const ratio = ((Number(item.shipped_qty) || 0) * (Number(item.foreign_unit_cost) || 0)) / totalForeignValue;
+      const allocatedPerUnit = (totalLandedExpenses * ratio) / (Number(item.shipped_qty) || 1);
       return {
-        ...shp,
-        landed_expenses: updatedExpenses,
-        total_landed_expenses_lkr: totalLandedExpenses,
-        total_estimated_cost_lkr: totalCostLkr,
-        items: updatedItems
+        ...item,
+        allocated_landed_lkr_per_unit: allocatedPerUnit,
+        final_landed_unit_cost_lkr: ((Number(item.foreign_unit_cost) || 0) * (Number(shipment.exchange_rate_snapshot) || 1)) + allocatedPerUnit
       };
-    }));
+    });
 
-    if (expenseData.bank_account_id) {
-      setBankAccounts(prev => prev.map(b => b.id === expenseData.bank_account_id ? {
-        ...b,
-        current_balance: (b.current_balance || 0) - expenseLkr
-      } : b));
+    await runCloudWrite('Recording landed expense', () => supabase.from('landed_costs').insert({
+      id: expenseId,
+      cost_no: newExpense.cost_no,
+      transit_shipment_id: shipmentId,
+      expense_type: expenseTypeMap[expenseData.expense_type] || expenseData.expense_type || 'other',
+      payee: expenseData.payee || null,
+      currency: expenseData.currency || 'LKR',
+      foreign_amount: Number(expenseData.amount) || 0,
+      exchange_rate: Number(expenseData.exchange_rate) || 1,
+      lkr_amount: expenseLkr,
+      payment_date: expenseData.payment_date || new Date().toISOString().slice(0, 10),
+      payment_method: expenseData.paid_by || expenseData.payment_method || 'bank',
+      bank_account_id: isValidUUID(expenseData.bank_account_id) ? expenseData.bank_account_id : null,
+      reference: expenseData.reference || null,
+      allocation_method: 'value',
+      notes: [expenseData.expense_type, expenseData.notes].filter(Boolean).join(' | ') || null
+    }));
+    await runCloudWrite('Updating landed shipment totals', () => supabase.from('transit_shipments').update({
+      total_landed_expenses_lkr: totalLandedExpenses,
+      total_estimated_cost_lkr: totalCostLkr,
+      updated_at: new Date().toISOString()
+    }).eq('id', shipmentId));
+
+    const itemWrites = updatedItems
+      .filter(item => isValidUUID(item.id))
+      .map(item => supabase.from('transit_shipment_items').update({
+        allocated_landed_lkr_per_unit: item.allocated_landed_lkr_per_unit,
+        final_landed_unit_cost_lkr: item.final_landed_unit_cost_lkr
+      }).eq('id', item.id));
+    if (itemWrites.length) await runCloudBatch('Allocating landed costs', itemWrites);
+
+    const bankAccount = bankAccounts.find(account => account.id === expenseData.bank_account_id);
+    if (bankAccount) {
+      const nextBalance = (Number(bankAccount.current_balance) || 0) - expenseLkr;
+      await runCloudWrite('Updating bank balance', () => supabase.from('bank_accounts').update({ current_balance: nextBalance, updated_at: new Date().toISOString() }).eq('id', bankAccount.id));
+      setBankAccounts(prev => prev.map(account => account.id === bankAccount.id ? { ...account, current_balance: nextBalance } : account));
     }
 
+    setTransitShipments(prev => prev.map(item => item.id === shipmentId ? {
+      ...item,
+      landed_expenses: updatedExpenses,
+      total_landed_expenses_lkr: totalLandedExpenses,
+      total_estimated_cost_lkr: totalCostLkr,
+      items: updatedItems
+    } : item));
+
     notifySuccess('Landed expense recorded & item unit costs updated!');
+    return newExpense;
   };
 
   // Delete Stock in Transit Shipment
@@ -2056,7 +1933,7 @@ export function BusinessProvider({ children }) {
   };
 
   // Receive Purchase Shipment (GRN / Arrived / Direct Purchase) & Re-average WAC
-  const receivePurchaseShipment = (param) => {
+  const receivePurchaseShipment = async (param) => {
     let receiptData = typeof param === 'string' ? { transit_shipment_id: param } : (param || {});
     const isDirect = !receiptData.transit_shipment_id || receiptData.transit_shipment_id === 'direct' || String(receiptData.transit_shipment_id).startsWith('direct-');
     const shp = isDirect ? null : transitShipments.find(s => String(s.id) === String(receiptData.transit_shipment_id) || s.shipment_no === receiptData.transit_shipment_id || (receiptData.shipment_no && s.shipment_no === receiptData.shipment_no));
@@ -2230,16 +2107,15 @@ export function BusinessProvider({ children }) {
       }, ...prev]);
     }
 
-    try {
-      if (supabase) {
-        const suppId = isValidUUID(newPurchaseDoc.supplier_id) ? newPurchaseDoc.supplier_id : (suppliers[0]?.id || null);
-        let linkTransitId = isValidUUID(newPurchaseDoc.transit_shipment_id) ? newPurchaseDoc.transit_shipment_id : (shp && isValidUUID(shp.id) ? shp.id : null);
+    const suppId = isValidUUID(newPurchaseDoc.supplier_id) ? newPurchaseDoc.supplier_id : (suppliers[0]?.id || null);
+    if (!suppId) throw new Error('Select a valid supplier before saving the purchase.');
+    let linkTransitId = isValidUUID(newPurchaseDoc.transit_shipment_id) ? newPurchaseDoc.transit_shipment_id : (shp && isValidUUID(shp.id) ? shp.id : null);
 
         // If direct purchase without an existing transit shipment, create companion transit shipment
         const performSupabaseSync = async () => {
           if (!linkTransitId) {
             linkTransitId = generateUUID();
-            await supabase.from('transit_shipments').upsert({
+            await runCloudWrite('Creating direct purchase link', () => supabase.from('transit_shipments').upsert({
               id: linkTransitId,
               shipment_no: `DIR-TRN-${newPurchaseDoc.doc_no}`,
               supplier_id: suppId,
@@ -2249,18 +2125,20 @@ export function BusinessProvider({ children }) {
               foreign_items_subtotal: totalLandedLkr,
               total_landed_expenses_lkr: 0,
               total_estimated_cost_lkr: totalLandedLkr,
+              payment_type: newPurchaseDoc.payment_type || 'credit',
               status: 'received',
               notes: 'Direct purchase companion shipment'
-            });
+            }));
           } else {
             // Update existing transit shipment to received in cloud so all devices immediately reflect arrival
-            await supabase.from('transit_shipments').update({
+            await runCloudWrite('Marking shipment received', () => supabase.from('transit_shipments').update({
               status: 'received',
-              actual_arrival_date: receiptDate
-            }).eq('id', linkTransitId);
+              actual_arrival_date: receiptDate,
+              updated_at: new Date().toISOString()
+            }).eq('id', linkTransitId));
           }
 
-          await supabase.from('purchase_receipts').upsert({
+          await runCloudWrite('Saving purchase receipt', () => supabase.from('purchase_receipts').upsert({
             id: purchaseId,
             grn_no: grnNo,
             transit_shipment_id: linkTransitId,
@@ -2276,7 +2154,7 @@ export function BusinessProvider({ children }) {
             payment_type: newPurchaseDoc.payment_type || 'credit',
             is_fully_received: !isDraft,
             notes: newPurchaseDoc.notes || null
-          });
+          }));
 
           if (items && items.length > 0) {
             const grnItems = items.map(it => {
@@ -2286,12 +2164,16 @@ export function BusinessProvider({ children }) {
                 purchase_receipt_id: purchaseId,
                 product_id: it.product_id,
                 received_sellable_qty: Number(it.received_sellable_qty) || 0,
-                damaged_qty: Number(it.damaged_qty) || 0
+                damaged_qty: Number(it.damaged_qty) || 0,
+                missing_qty: Number(it.missing_qty) || 0,
+                foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost_lkr || it.final_landed_unit_cost_lkr) || 0,
+                allocated_landed_lkr_per_unit: Number(it.allocated_landed_lkr_per_unit) || 0,
+                final_landed_unit_cost_lkr: Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost) || 0
               };
             }).filter(Boolean);
 
             if (grnItems.length > 0) {
-              await supabase.from('purchase_receipt_items').upsert(grnItems);
+              await runCloudWrite('Saving purchase receipt items', () => supabase.from('purchase_receipt_items').upsert(grnItems));
             }
           }
 
@@ -2301,19 +2183,17 @@ export function BusinessProvider({ children }) {
                 const cur = stockBalances[it.product_id] || { qty_on_hand: 0, qty_available: 0, qty_in_transit: 0 };
                 const sellable = Number(it.received_sellable_qty) || 0;
                 const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
-                await supabase.from('stock_balances').upsert({
+                await runCloudWrite('Updating received inventory', () => supabase.from('stock_balances').upsert({
                   product_id: it.product_id,
                   qty_on_hand: (cur.qty_on_hand || 0) + sellable,
                   qty_available: (cur.qty_available || 0) + sellable,
                   qty_in_transit: Math.max(0, (cur.qty_in_transit || 0) - shipped)
-                });
+                }));
               }
             }
           }
         };
-        performSupabaseSync().catch(e => console.warn('Supabase receivePurchaseShipment sync notice:', e));
-      }
-    } catch (e) {}
+    await performSupabaseSync();
 
     return newPurchaseDoc;
   };
@@ -3290,7 +3170,6 @@ export function BusinessProvider({ children }) {
       }, ...prev]);
 
       notifySuccess(`Stock reserved successfully (${docNo})! ${paidAmount > 0 ? `Advance payment of Rs. ${paidAmount.toLocaleString()} recorded.` : ''}`);
-      return newDoc;
     }
 
     // 2. If SALES INVOICE (Physical sale):
@@ -3421,110 +3300,149 @@ export function BusinessProvider({ children }) {
       }, ...prev]);
     }
 
-    try {
-      if (supabase) {
-        const custId = isValidUUID(docData.customer_id) ? docData.customer_id : null;
-        const performDocSync = async () => {
-          await supabase.from('sales_documents').upsert({
-            id: docId,
-            doc_type: isQuotation ? 'quotation' : isReservation ? 'sales_order' : 'sales_invoice',
-            doc_no: docNo,
-            customer_id: custId,
-            doc_date: newDoc.doc_date,
-            subtotal: itemsSubtotal,
-            grand_total: grandTotal,
-            paid_amount: paidAmount,
-            balance_due: balanceDue,
-            status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'completed' : 'confirmed'),
-            payment_status: isReservation
-              ? (paidAmount >= grandTotal ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid')
-              : isQuotation
-                ? 'unpaid'
-                : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : isCredit ? 'credit' : 'unpaid'),
-            notes: docData.notes || (isCredit ? 'Customer Account Credit Sale' : isCod ? 'Cash on Delivery (COD)' : null)
-          });
+    const custId = isValidUUID(docData.customer_id) ? docData.customer_id : null;
+    await runCloudWrite('Saving sales document', () => supabase.from('sales_documents').upsert({
+      id: docId,
+      doc_type: isQuotation ? 'quotation' : isReservation ? 'sales_order' : 'sales_invoice',
+      doc_no: docNo,
+      customer_id: custId,
+      doc_date: newDoc.doc_date,
+      subtotal: itemsSubtotal,
+      grand_total: grandTotal,
+      paid_amount: paidAmount,
+      balance_due: balanceDue,
+      status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'completed' : 'confirmed'),
+      payment_status: isReservation
+        ? (paidAmount >= grandTotal ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid')
+        : isQuotation
+          ? 'unpaid'
+          : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : isCredit ? 'credit' : 'unpaid'),
+      notes: docData.notes || (isCredit ? 'Customer Account Credit Sale' : isCod ? 'Cash on Delivery (COD)' : null),
+      updated_at: new Date().toISOString()
+    }));
 
-          if (docData.items && docData.items.length > 0) {
-            const itemsToInsert = docData.items.map(it => {
-              const pId = it.product?.id || it.product_id;
-              if (!isValidUUID(pId)) return null;
-              const unitPrice = it.is_warranty_replacement ? 0 : (Number(it.unit_price) || 0);
-              const qty = Number(it.qty) || 1;
-              return {
-                id: generateUUID(),
-                sales_document_id: docId,
-                product_id: pId,
-                qty: qty,
-                unit_type: it.unit_type || 'unit',
-                conversion_factor: 1,
-                base_qty: qty,
-                unit_price: unitPrice,
-                line_total: Math.max(0, qty * unitPrice - (Number(it.discount_amount) || 0)),
-                notes: it.notes || (it.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
-              };
-            }).filter(Boolean);
+    const itemsToInsert = (docData.items || []).map(item => {
+      const productId = item.product?.id || item.product_id;
+      const unitPrice = item.is_warranty_replacement ? 0 : (Number(item.unit_price) || 0);
+      const qty = Number(item.qty) || 1;
+      return {
+        id: generateUUID(),
+        sales_document_id: docId,
+        product_id: productId,
+        qty,
+        unit_type: item.unit_type || 'unit',
+        conversion_factor: 1,
+        base_qty: qty,
+        unit_price: unitPrice,
+        line_total: Math.max(0, qty * unitPrice - (Number(item.discount_amount) || 0)),
+        notes: item.notes || (item.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
+      };
+    }).filter(item => isValidUUID(item.product_id));
+    if (itemsToInsert.length) {
+      await runCloudWrite('Saving sales document items', () => supabase.from('sales_document_items').insert(itemsToInsert));
+    }
 
-            if (itemsToInsert.length > 0) {
-              await supabase.from('sales_document_items').upsert(itemsToInsert);
-            }
-          }
+    if (docData.doc_type === 'sales_invoice' || isReservation) {
+      const stockWrites = (docData.items || []).map(item => {
+        const productId = item.product?.id || item.product_id;
+        if (!isValidUUID(productId)) return null;
+        const current = stockBalances[productId] || {};
+        const qty = Number(item.qty) || 1;
+        return supabase.from('stock_balances').upsert({
+          product_id: productId,
+          qty_on_hand: isReservation ? Number(current.qty_on_hand) || 0 : Math.max(0, (Number(current.qty_on_hand) || 0) - qty),
+          qty_reserved: isReservation ? (Number(current.qty_reserved) || 0) + qty : (releasedFromReservation ? Math.max(0, (Number(current.qty_reserved) || 0) - qty) : Number(current.qty_reserved) || 0),
+          qty_available: isReservation ? Math.max(0, (Number(current.qty_available) || 0) - qty) : (releasedFromReservation ? Number(current.qty_available) || 0 : Math.max(0, (Number(current.qty_available) || 0) - qty)),
+          qty_in_transit: Number(current.qty_in_transit) || 0,
+          qty_damaged: (Number(current.qty_damaged) || 0) + (item.is_warranty_replacement ? qty : 0),
+          updated_at: new Date().toISOString()
+        });
+      }).filter(Boolean);
+      if (stockWrites.length) await runCloudBatch('Updating inventory', stockWrites);
+    }
 
-          if (docData.doc_type === 'sales_invoice' || isReservation) {
-            for (const it of (docData.items || [])) {
-              const pId = it.product?.id || it.product_id;
-              if (isValidUUID(pId)) {
-                const cur = stockBalances[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0 };
-                const qty = Number(it.qty) || 1;
-                const newOnHand = isReservation ? (cur.qty_on_hand || 0) : Math.max(0, (cur.qty_on_hand || 0) - qty);
-                const newReserved = isReservation ? (cur.qty_reserved || 0) + qty : (releasedFromReservation ? Math.max(0, (cur.qty_reserved || 0) - qty) : (cur.qty_reserved || 0));
-                const newAvail = isReservation ? Math.max(0, (cur.qty_available || 0) - qty) : (releasedFromReservation ? (cur.qty_available || 0) : Math.max(0, (cur.qty_available || 0) - qty));
-
-                await supabase.from('stock_balances').upsert({
-                  product_id: pId,
-                  qty_on_hand: newOnHand,
-                  qty_reserved: newReserved,
-                  qty_available: newAvail
-                });
-              }
-            }
-          }
-
-          if (custId && balanceDue > 0) {
-            const foundCust = customers.find(c => c.id === custId);
-            if (foundCust) {
-              await supabase.from('customers').update({
-                current_receivable: (Number(foundCust.current_receivable) || 0) + balanceDue
-              }).eq('id', custId);
-            }
-          }
-
-          if (paidAmount > 0 && !isQuotation) {
-            await supabase.from('payments').insert({
-              id: generateUUID(),
-              payment_no: `PAY-${docNo}`,
-              payment_type: 'customer_payment',
-              party_type: 'customer',
-              party_id: custId,
-              payment_date: new Date().toISOString().slice(0, 10),
-              amount: paidAmount,
-              payment_method: isCod ? 'cash' : (docData.payment_lines?.[0]?.method || 'cash'),
-              reference: docNo,
-              notes: `Payment for ${docNo}`
-            });
-          }
-        };
-
-        performDocSync().catch(err => console.warn('Supabase postSalesDocument sync notice:', err));
+    if (custId && balanceDue > 0) {
+      const foundCustomer = customers.find(customer => customer.id === custId);
+      if (foundCustomer) {
+        await runCloudWrite('Updating customer receivable', () => supabase.from('customers').update({
+          current_receivable: (Number(foundCustomer.current_receivable) || 0) + balanceDue,
+          updated_at: new Date().toISOString()
+        }).eq('id', custId));
       }
-    } catch (e) {}
+    }
+
+    if (paidAmount > 0 && !isQuotation) {
+      await runCloudWrite('Recording sales payment', () => supabase.from('payments').insert({
+        id: generateUUID(),
+        payment_no: `PAY-${docNo}`,
+        payment_type: isReservation ? 'customer_advance' : 'sales_receipt',
+        party_type: 'customer',
+        party_id: custId,
+        payment_date: new Date().toISOString().slice(0, 10),
+        amount: paidAmount,
+        payment_method: isCod ? 'cash' : (docData.payment_lines?.[0]?.method || 'cash'),
+        bank_account_id: isValidUUID(docData.payment_lines?.[0]?.bank_account_id) ? docData.payment_lines[0].bank_account_id : null,
+        reference: docNo,
+        notes: `Payment for ${docNo}`
+      }));
+    }
+
+    const chequeLine = docData.payment_lines?.find(payment => payment.method === 'cheque' && Number(payment.amount) > 0);
+    if (chequeLine && docData.cheque_details) {
+      await runCloudWrite('Recording sales cheque', () => supabase.from('cheque_register').insert({
+        id: generateUUID(),
+        cheque_no: docData.cheque_details.cheque_no,
+        direction: 'received',
+        party_type: 'customer',
+        party_id: custId,
+        sales_document_id: docId,
+        bank_name: docData.cheque_details.bank_name || 'Bank',
+        branch: docData.cheque_details.branch || null,
+        cheque_date: docData.cheque_details.cheque_date || new Date().toISOString().slice(0, 10),
+        received_or_issued_date: new Date().toISOString().slice(0, 10),
+        amount: Number(chequeLine.amount),
+        status: 'received',
+        notes: `${isReservation ? 'Advance for reservation' : 'Payment for invoice'} ${docNo}`
+      }));
+    }
+
+    if (sourceDoc && isValidUUID(sourceDoc.id)) {
+      await runCloudWrite('Closing converted document', () => supabase.from('sales_documents').update({
+        status: 'completed',
+        notes: [sourceDoc.notes, `Converted to ${docNo}`].filter(Boolean).join(' | '),
+        updated_at: new Date().toISOString()
+      }).eq('id', sourceDoc.id));
+    }
 
     return newDoc;
   };
 
   // Cancel Customer Reservation & Release Stock back to available
-  const cancelReservation = (docId) => {
+  const cancelReservation = async (docId) => {
     const doc = salesDocuments.find(d => d.id === docId);
     if (!doc) return;
+
+    await runCloudWrite('Cancelling reservation', () => supabase.from('sales_documents').update({
+      status: 'cancelled',
+      payment_status: 'unpaid',
+      updated_at: new Date().toISOString()
+    }).eq('id', docId));
+
+    const stockWrites = (doc.items || []).map(item => {
+      const productId = item.product?.id || item.product_id;
+      const current = stockBalances[productId] || {};
+      const qty = Number(item.qty) || 0;
+      return supabase.from('stock_balances').upsert({
+        product_id: productId,
+        qty_on_hand: Number(current.qty_on_hand) || 0,
+        qty_reserved: Math.max(0, (Number(current.qty_reserved) || 0) - qty),
+        qty_available: (Number(current.qty_available) || 0) + qty,
+        qty_in_transit: Number(current.qty_in_transit) || 0,
+        qty_damaged: Number(current.qty_damaged) || 0,
+        updated_at: new Date().toISOString()
+      });
+    });
+    if (stockWrites.length) await runCloudBatch('Releasing reserved stock', stockWrites);
 
     setStockBalances(prev => {
       const updated = { ...prev };
@@ -3731,17 +3649,64 @@ export function BusinessProvider({ children }) {
     });
   };
 
-  const updateChequeStatus = (chequeId, newStatus, extraData = {}) => {
+  const updateChequeStatus = async (chequeId, newStatus, extraData = {}) => {
     const chq = cheques.find(c => c.id === chequeId);
     if (!chq) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    await runCloudWrite('Updating cheque status', () => supabase.from('cheque_register').update({
+      status: newStatus,
+      deposit_bank_account_id: isValidUUID(extraData.deposit_bank_account_id) ? extraData.deposit_bank_account_id : chq.deposit_bank_account_id || null,
+      return_reason: extraData.return_reason || chq.return_reason || null,
+      cleared_date: newStatus === 'cleared' ? today : chq.cleared_date || null,
+      return_date: newStatus === 'returned' ? today : chq.return_date || null,
+      updated_at: new Date().toISOString()
+    }).eq('id', chequeId));
+
+    if (newStatus === 'cleared' && isValidUUID(extraData.deposit_bank_account_id)) {
+      const account = bankAccounts.find(item => item.id === extraData.deposit_bank_account_id);
+      if (account) {
+        await runCloudWrite('Updating deposited cheque balance', () => supabase.from('bank_accounts').update({
+          current_balance: (Number(account.current_balance) || 0) + (Number(chq.amount) || 0),
+          updated_at: new Date().toISOString()
+        }).eq('id', account.id));
+      }
+    }
+
+    if (newStatus === 'returned') {
+      if (isValidUUID(chq.party_id)) {
+        const customer = customers.find(item => item.id === chq.party_id);
+        if (customer) {
+          await runCloudWrite('Reopening customer receivable', () => supabase.from('customers').update({
+            current_receivable: (Number(customer.current_receivable) || 0) + (Number(chq.amount) || 0),
+            updated_at: new Date().toISOString()
+          }).eq('id', customer.id));
+        }
+      }
+      const salesDocumentId = chq.sales_document_id || chq.sales_doc_id;
+      if (isValidUUID(salesDocumentId)) {
+        const salesDocument = salesDocuments.find(item => item.id === salesDocumentId);
+        if (salesDocument) {
+          const nextPaid = Math.max(0, (Number(salesDocument.paid_amount) || 0) - (Number(chq.amount) || 0));
+          const nextDue = (Number(salesDocument.balance_due) || 0) + (Number(chq.amount) || 0);
+          await runCloudWrite('Reopening invoice balance', () => supabase.from('sales_documents').update({
+            paid_amount: nextPaid,
+            balance_due: nextDue,
+            payment_status: nextPaid > 0 ? 'partially_paid' : 'unpaid',
+            status: nextPaid > 0 ? 'partially_paid' : 'confirmed',
+            updated_at: new Date().toISOString()
+          }).eq('id', salesDocumentId));
+        }
+      }
+    }
 
     setCheques(prev => prev.map(c => c.id === chequeId ? {
       ...c,
       status: newStatus,
       deposit_bank_account_id: extraData.deposit_bank_account_id || c.deposit_bank_account_id,
       return_reason: extraData.return_reason || c.return_reason,
-      cleared_at: newStatus === 'cleared' ? new Date().toISOString() : c.cleared_at,
-      returned_at: newStatus === 'returned' ? new Date().toISOString() : c.returned_at
+      cleared_date: newStatus === 'cleared' ? today : c.cleared_date,
+      return_date: newStatus === 'returned' ? today : c.return_date
     } : c));
 
     if (newStatus === 'cleared' && extraData.deposit_bank_account_id) {
@@ -3759,8 +3724,9 @@ export function BusinessProvider({ children }) {
         } : c));
       }
 
-      if (chq.sales_doc_id) {
-        setSalesDocuments(prev => prev.map(d => d.id === chq.sales_doc_id ? {
+      const salesDocumentId = chq.sales_document_id || chq.sales_doc_id;
+      if (salesDocumentId) {
+        setSalesDocuments(prev => prev.map(d => d.id === salesDocumentId ? {
           ...d,
           paid_amount: Math.max(0, (d.paid_amount || 0) - chq.amount),
           balance_due: (d.balance_due || 0) + chq.amount,
@@ -3790,7 +3756,7 @@ export function BusinessProvider({ children }) {
       cheques, setCheques, updateChequeStatus,
       payments, setPayments, recordDirectExpense, recordDirectIncome, deletePayment,
       resetAllData, resetTransactionsOnly, exportAllData, importAllData, syncLocalDataToCloud,
-      dataLoading, refreshData: fetchSupabaseData
+      dataLoading, syncState, refreshData: fetchSupabaseData
     }}>
       {children}
     </BusinessContext.Provider>

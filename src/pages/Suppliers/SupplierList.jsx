@@ -41,14 +41,18 @@ export default function SupplierList() {
     setAdvanceSupplier(sup);
   };
 
-  const handleSaveAdvance = (e) => {
+  const handleSaveAdvance = async (e) => {
     e.preventDefault();
-    recordSupplierAdvance({
-      ...advanceForm,
-      supplier_id: advanceSupplier.id
-    });
-    notifySuccess('Supplier Advance payment recorded successfully');
-    setAdvanceSupplier(null);
+    try {
+      await recordSupplierAdvance({
+        ...advanceForm,
+        supplier_id: advanceSupplier.id
+      });
+      notifySuccess('Supplier Advance payment recorded successfully');
+      setAdvanceSupplier(null);
+    } catch {
+      // Keep the dialog open; the shared sync layer displays the cloud error.
+    }
   };
 
   return (

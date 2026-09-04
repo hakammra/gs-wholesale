@@ -56,18 +56,21 @@ export default function CategoryManagerModal({ isOpen, onClose }) {
     setIsEditing(true);
   };
 
-  const handleSave = (e) => {
+  const handleSave = async (e) => {
     e.preventDefault();
     if (!editingCat.name.trim()) return;
 
-    saveCategory({
-      id: editingCat.id,
-      name: editingCat.name.trim(),
-      parent_id: editingCat.parent_id || null
-    });
-
-    setIsEditing(false);
-    setEditingCat({ id: null, name: '', parent_id: '' });
+    try {
+      await saveCategory({
+        id: editingCat.id,
+        name: editingCat.name.trim(),
+        parent_id: editingCat.parent_id || null
+      });
+      setIsEditing(false);
+      setEditingCat({ id: null, name: '', parent_id: '' });
+    } catch {
+      // Keep the editor open; the shared sync layer displays the cloud error.
+    }
   };
 
   const handleDelete = (cat) => {

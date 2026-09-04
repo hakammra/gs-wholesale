@@ -16,18 +16,21 @@ export default function ChequeRegister() {
   const filteredCheques = cheques.filter(c => c.direction === directionFilter);
   const totalPendingAmount = cheques.filter(c => c.direction === 'received' && (c.status === 'received' || c.status === 'held')).reduce((s, c) => s + (c.amount || 0), 0);
 
-  const handleExecuteAction = () => {
+  const handleExecuteAction = async () => {
     if (!actionCheque) return;
 
-    if (actionType === 'clear') {
-      updateChequeStatus(actionCheque.id, 'cleared', { deposit_bank_account_id: selectedBankId });
-      notifySuccess(`Cheque #${actionCheque.cheque_no} cleared into bank!`);
-    } else {
-      updateChequeStatus(actionCheque.id, 'returned', { return_reason: returnReason });
-      notifySuccess(`Cheque #${actionCheque.cheque_no} bounced & customer receivable reopened!`);
+    try {
+      if (actionType === 'clear') {
+        await updateChequeStatus(actionCheque.id, 'cleared', { deposit_bank_account_id: selectedBankId });
+        notifySuccess(`Cheque #${actionCheque.cheque_no} cleared into bank!`);
+      } else {
+        await updateChequeStatus(actionCheque.id, 'returned', { return_reason: returnReason });
+        notifySuccess(`Cheque #${actionCheque.cheque_no} bounced & customer receivable reopened!`);
+      }
+      setActionCheque(null);
+    } catch {
+      // Shared sync handling shows the cloud error and keeps this dialog open.
     }
-
-    setActionCheque(null);
   };
 
   return (

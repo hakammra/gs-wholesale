@@ -265,19 +265,23 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     setItems(prev => prev.filter((_, i) => i !== idx));
   };
 
-  const handleSaveSupplier = (e) => {
+  const handleSaveSupplier = async (e) => {
     e.preventDefault();
     if (!newSupplierName.trim()) return;
-    const newSup = saveSupplier({
-      name: newSupplierName,
-      phone: newSupplierPhone,
-      country: 'Sri Lanka'
-    });
-    if (newSup?.id) setSupplierId(newSup.id);
-    setNewSupplierName('');
-    setNewSupplierPhone('');
-    setIsAddSupplierOpen(false);
-    notifySuccess('Supplier added successfully');
+    try {
+      const newSup = await saveSupplier({
+        name: newSupplierName,
+        phone: newSupplierPhone,
+        country: 'Sri Lanka'
+      });
+      if (newSup?.id) setSupplierId(newSup.id);
+      setNewSupplierName('');
+      setNewSupplierPhone('');
+      setIsAddSupplierOpen(false);
+      notifySuccess('Supplier added successfully');
+    } catch {
+      // Keep the dialog open; the shared sync layer displays the cloud error.
+    }
   };
 
   const handleSaveQuickProduct = async (e) => {
@@ -322,7 +326,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     setIsAddProductOpen(false);
   };
 
-  const handleSaveDirectPurchase = (e, asDraft = false) => {
+  const handleSaveDirectPurchase = async (e, asDraft = false) => {
     if (e) e.preventDefault();
     
     // Auto-resolve supplier
@@ -333,7 +337,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
         resolvedSupplierId = suppliers[0].id;
         resolvedSupplierName = suppliers[0].name;
       } else {
-        const autoSup = saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
+        const autoSup = await saveSupplier({ name: 'General Supplier', country: 'Sri Lanka' });
         resolvedSupplierId = autoSup?.id || 'sup-general';
       }
     } else {
@@ -367,18 +371,22 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
       }))
     };
 
-    if (editingPurchaseId) {
-      updatePurchaseDocument(editingPurchaseId, directShipmentMock);
-      notifySuccess(asDraft ? 'Draft Purchase Document updated!' : 'Purchase Document updated! Stock quantities and Weighted Average Cost (WAC) recalculated.');
-    } else {
-      receivePurchaseShipment(directShipmentMock);
-      notifySuccess(asDraft ? 'Purchase Document saved as Draft! (No stock or WAC impact until received)' : 'Direct Purchase Document created and inventory balances + WAC updated!');
-    }
+    try {
+      if (editingPurchaseId) {
+        await updatePurchaseDocument(editingPurchaseId, directShipmentMock);
+        notifySuccess(asDraft ? 'Draft Purchase Document updated!' : 'Purchase Document updated! Stock quantities and Weighted Average Cost (WAC) recalculated.');
+      } else {
+        await receivePurchaseShipment(directShipmentMock);
+        notifySuccess(asDraft ? 'Purchase Document saved as Draft! (No stock or WAC impact until received)' : 'Direct Purchase Document created and inventory balances + WAC updated!');
+      }
 
-    localStorage.removeItem('gs_purchase_form_draft');
-    setHasDraftBanner(false);
-    setEditingPurchaseId(null);
-    setIsDirectPurchaseOpen(false);
+      localStorage.removeItem('gs_purchase_form_draft');
+      setHasDraftBanner(false);
+      setEditingPurchaseId(null);
+      setIsDirectPurchaseOpen(false);
+    } catch {
+      // Keep the form open; the shared sync layer displays the cloud error.
+    }
   };
 
   const handleDownloadPDF = (doc) => {
@@ -1238,4 +1246,3 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     </div>
   );
 }
-

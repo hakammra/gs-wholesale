@@ -30,10 +30,14 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
     }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    addLandedCostExpense(shipmentId, form);
-    onClose();
+    try {
+      await addLandedCostExpense(shipmentId, form);
+      onClose();
+    } catch {
+      // The shared sync layer keeps the dialog open and displays the cloud error.
+    }
   };
 
   return (
