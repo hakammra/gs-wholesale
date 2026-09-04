@@ -16,6 +16,25 @@ export default function Layout({ currentTab, onSelectTab, children }) {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Lock background scroll when mobile drawer is open
+  useEffect(() => {
+    if (isMobileOpen) {
+      const prevBodyOverflow = document.body.style.overflow;
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      const prevTouchAction = document.body.style.touchAction;
+
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+
+      return () => {
+        document.body.style.overflow = prevBodyOverflow;
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        document.body.style.touchAction = prevTouchAction;
+      };
+    }
+  }, [isMobileOpen]);
+
   const handleSelectTab = (tab) => {
     setIsMobileOpen(false);
     onSelectTab(tab);
@@ -28,6 +47,7 @@ export default function Layout({ currentTab, onSelectTab, children }) {
         <div
           className="sidebar-backdrop"
           onClick={() => setIsMobileOpen(false)}
+          onTouchMove={(e) => e.preventDefault()}
           aria-hidden="true"
         />
       )}

@@ -55,6 +55,7 @@ label input, label select, label textarea { margin-top: 6px; }
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  overscroll-behavior: contain;
 }
 
 .brand-block {
@@ -63,6 +64,7 @@ label input, label select, label textarea { margin-top: 6px; }
   gap: 12px;
   padding: 16px 24px;
   border-bottom: 1px solid #444;
+  flex-shrink: 0;
 }
 
 .brand-logo {
@@ -96,7 +98,13 @@ label input, label select, label textarea { margin-top: 6px; }
   letter-spacing: 1px;
 }
 
-.nav-list { padding-top: 4px; flex: 1; overflow-y: auto; }
+.nav-list {
+  padding-top: 4px;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
 .nav-item {
   width: 100%;
   display: flex;
@@ -1099,11 +1107,28 @@ tr:hover td { background: #303030; }
    MOBILE RESPONSIVE BREAKPOINT (Only active on screens <= 768px)
    ================================================================ */
 @media (max-width: 768px) {
+  /* Prevent background page scroll when mobile drawer is open */
+  body:has(.mobile-nav-open),
+  html:has(.mobile-nav-open) {
+    overflow: hidden !important;
+    touch-action: none;
+  }
+
   /* App Shell & Mobile Off-Canvas Drawer */
   .app-shell {
     display: block;
     position: relative;
     min-height: 100vh;
+  }
+
+  .app-shell.mobile-nav-open {
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  .app-shell.mobile-nav-open .main-panel {
+    pointer-events: none;
+    user-select: none;
   }
 
   .sidebar {
@@ -1119,11 +1144,14 @@ tr:hover td { background: #303030; }
     transform: translateX(-100%);
     transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     box-shadow: 6px 0 30px rgba(0, 0, 0, 0.7);
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .sidebar.mobile-open,
   .app-shell.mobile-nav-open .sidebar {
     transform: translateX(0);
+    pointer-events: auto;
   }
 
   /* Dark Backdrop Overlay for Mobile Drawer */
@@ -1137,6 +1165,8 @@ tr:hover td { background: #303030; }
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.22s ease;
+    touch-action: none;
+    overscroll-behavior: contain;
   }
 
   .sidebar-backdrop.active,
