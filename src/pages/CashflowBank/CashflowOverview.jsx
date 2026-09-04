@@ -120,7 +120,9 @@ export default function CashflowOverview() {
           amount: total,
           paid_amount: paid,
           balance_due: balDue,
-          payment_status: isPureCredit ? 'credit' : doc.payment_status
+          payment_status: isPureCredit ? 'credit' : doc.payment_status,
+          is_direct_cashflow: false,
+          is_document_entry: true
         });
       }
     });
@@ -148,7 +150,9 @@ export default function CashflowOverview() {
           reference: `${docNo}${pur.shipment_no && pur.shipment_no !== 'DIRECT' ? ` (Transit: ${pur.shipment_no})` : ''}`,
           is_outflow: true,
           amount: total,
-          status: pur.status
+          status: pur.status,
+          is_direct_cashflow: false,
+          is_document_entry: true
         });
       }
     });
@@ -182,7 +186,9 @@ export default function CashflowOverview() {
           method: payType,
           reference: `${refNo} (${shp.status === 'in_transit' ? 'In Transit' : 'Draft'})`,
           is_outflow: true,
-          amount: total
+          amount: total,
+          is_direct_cashflow: false,
+          is_document_entry: true
         });
       }
     });
@@ -226,6 +232,17 @@ export default function CashflowOverview() {
                             p.payment_type?.replace(/_/g, ' ') ||
                             'Payment';
 
+      // An entry is ONLY a direct cashflow expense/income if it was recorded inside Cash Flow without a document
+      const isDirectCashflow = (
+        p.payment_type === 'operational_expense' ||
+        p.payment_type === 'expense' ||
+        p.payment_type === 'direct_income' ||
+        String(p.id).startsWith('pay-exp-') ||
+        String(p.id).startsWith('pay-inc-') ||
+        p.payment_no?.startsWith('EXP-') ||
+        p.payment_no?.startsWith('CAP-')
+      ) && !p.sales_doc_id && !p.purchase_doc_id && !p.purchase_id && !p.transit_shipment_id && !p.order_id;
+
       list.push({
         id: p.id,
         voucher_no: p.payment_no || `PAY-${p.id?.slice(-4)}`,
@@ -235,7 +252,9 @@ export default function CashflowOverview() {
         method: p.payment_method || 'cash',
         reference: p.reference || p.notes || '-',
         is_outflow: isOutflow,
-        amount: Number(p.amount) || 0
+        amount: Number(p.amount) || 0,
+        is_direct_cashflow: isDirectCashflow,
+        is_document_entry: !isDirectCashflow
       });
     });
 
@@ -386,54 +405,29 @@ export default function CashflowOverview() {
   };
 
   const handleDeleteTransaction = async (t) => {
-    if (!window.confirm(`Are you sure you want to delete this cashflow entry (${t.voucher_no} - Rs. ${Number(t.amount || 0).toLocaleString()})?`)) {
+    if (!t.is_direct_cashflow) {
+      notifyError('Document-linked transactions cannot be deleted directly from Cash Flow. Please delete the source document in Sales Documents, Purchase Documents, or Stock in Transit.');
+      return;
+    }
+
+    if (!window.confirm(`Are you sure you want to delete this recorded cashflow entry (${t.voucher_no} - Rs. ${Number(t.amount || 0).toLocaleString()})?`)) {
       return;
     }
 
     try {
-      // 1. If it's linked to a sales document
-      if (t.doc_type === 'sales' || (t.id && String(t.id).startsWith('sales-doc-'))) {
-        const docId = t.doc_id || String(t.id).replace('sales-doc-', '');
-        if (docId) {
-          await deleteSalesDocument(docId);
-          notifySuccess(`Sales document ${t.voucher_no} and cashflow entry removed`);
-          return;
-        }
-      }
-
-      // 2. If it's linked to a purchase document
-      if (t.doc_type === 'purchase' || (t.id && String(t.id).startsWith('pur-doc-'))) {
-        const docId = t.doc_id || String(t.id).replace('pur-doc-', '');
-        if (docId) {
-          await deletePurchaseDocument(docId);
-          notifySuccess(`Purchase document ${t.voucher_no} and cashflow entry removed`);
-          return;
-        }
-      }
-
-      // 3. If it's linked to a transit shipment
-      if (t.doc_type === 'transit' || (t.id && String(t.id).startsWith('trn-shp-'))) {
-        const docId = t.doc_id || String(t.id).replace('trn-shp-', '');
-        if (docId) {
-          await deleteTransitShipment(docId);
-          notifySuccess(`Transit shipment ${t.voucher_no} removed`);
-          return;
-        }
-      }
-
-      // 4. If it exists in payments list, delete it
+      // 1. Delete direct payment if found by id
       const foundPayment = payments.find(p => p.id === t.id);
       if (foundPayment) {
         await deletePayment(t.id);
-        notifySuccess('Payment transaction removed');
+        notifySuccess('Cashflow entry removed');
         return;
       }
 
-      // 5. Fallback: match payment by voucher_no or reference
+      // 2. Fallback: match payment by voucher_no or reference
       const byVoucher = payments.find(p => p.payment_no === t.voucher_no || (p.reference && t.reference && p.reference === t.reference));
       if (byVoucher) {
         await deletePayment(byVoucher.id);
-        notifySuccess('Payment transaction removed');
+        notifySuccess('Cashflow entry removed');
         return;
       }
 
@@ -666,10 +660,26 @@ export default function CashflowOverview() {
                 <td style={{ textAlign: 'center' }}>
                   <button
                     type="button"
-                    onClick={() => handleDeleteTransaction(t)}
+                    disabled={!t.is_direct_cashflow}
+                    onClick={() => {
+                      if (t.is_direct_cashflow) {
+                        handleDeleteTransaction(t);
+                      }
+                    }}
                     className="secondary-button small-button"
-                    style={{ color: '#ff8e8e', padding: '3px 8px', fontSize: 12 }}
-                    title="Delete this transaction from Cash Flow"
+                    style={{
+                      color: t.is_direct_cashflow ? '#ff8e8e' : '#666666',
+                      opacity: t.is_direct_cashflow ? 1 : 0.3,
+                      cursor: t.is_direct_cashflow ? 'pointer' : 'not-allowed',
+                      padding: '3px 8px',
+                      fontSize: 12,
+                      border: t.is_direct_cashflow ? '1px solid rgba(255,142,142,0.4)' : '1px solid rgba(255,255,255,0.06)'
+                    }}
+                    title={
+                      t.is_direct_cashflow
+                        ? "Delete this recorded expense/income entry"
+                        : "Document-linked entry. To remove, delete the source document in Sales, Purchases, or Transit."
+                    }
                   >
                     🗑
                   </button>
