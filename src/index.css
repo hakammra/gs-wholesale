@@ -89,45 +89,115 @@ label input, label select, label textarea { margin-top: 6px; }
   display: none;
 }
 
-.nav-group-title {
-  padding: 14px 24px 6px;
-  font-size: 11px;
+.nav-group-section {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.nav-group-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 20px;
+  background: #1f1f1f;
+  border: 0;
+  border-radius: 0;
+  color: #a3a3a3;
+  cursor: pointer;
+  font-size: 11.5px;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--muted);
-  letter-spacing: 1px;
+  letter-spacing: 0.8px;
+  transition: all 0.15s ease;
+  user-select: none;
+  text-align: left;
+}
+
+.nav-group-btn:hover {
+  background: #2a2a2a;
+  color: #ffffff;
+}
+
+.nav-group-btn.has-active {
+  color: #38bdf8;
+  background: #1a2228;
+  border-left: 3px solid var(--primary);
+  padding-left: 17px;
+}
+
+.nav-group-btn-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nav-group-icon {
+  font-size: 14px;
+}
+
+.nav-group-btn-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  color: #737373;
+  transition: transform 0.2s ease;
+}
+
+.nav-group-btn:hover .nav-group-chevron {
+  color: #ffffff;
+}
+
+.nav-group-content {
+  background: #181818;
 }
 
 .nav-list {
-  padding-top: 4px;
+  padding-top: 0;
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y !important;
 }
+
 .nav-item {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: #ffffff;
+  color: #d4d4d4;
   text-align: left;
-  padding: 12px 24px;
-  font-size: 17px;
+  padding: 10px 20px 10px 26px;
+  font-size: 14.5px;
   font-weight: 500;
-  transition: background 0.1s ease;
+  transition: background 0.1s ease, color 0.1s ease;
 }
-.nav-item:hover { background: #303030; }
-.nav-item.active { background: var(--primary); color: #fff; font-weight: 700; }
+
+.nav-item:hover {
+  background: #262626;
+  color: #ffffff;
+}
+
+.nav-item.active {
+  background: var(--primary);
+  color: #ffffff;
+  font-weight: 700;
+}
+
 .nav-icon {
   display: inline-grid;
   place-items: center;
-  width: 26px;
-  flex: 0 0 26px;
-  font-size: 20px;
+  width: 22px;
+  flex: 0 0 22px;
+  font-size: 17px;
   font-weight: 700;
 }
 .nav-badge {
@@ -1111,7 +1181,6 @@ tr:hover td { background: #303030; }
   body:has(.mobile-nav-open),
   html:has(.mobile-nav-open) {
     overflow: hidden !important;
-    touch-action: none;
   }
 
   /* App Shell & Mobile Off-Canvas Drawer */
@@ -1138,20 +1207,35 @@ tr:hover td { background: #303030; }
     bottom: 0;
     width: 290px;
     max-width: 82vw;
-    min-height: 100vh;
     height: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
     z-index: 1200;
     transform: translateX(-100%);
     transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     box-shadow: 6px 0 30px rgba(0, 0, 0, 0.7);
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
+    touch-action: pan-y !important;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .sidebar.mobile-open,
   .app-shell.mobile-nav-open .sidebar {
     transform: translateX(0);
     pointer-events: auto;
+  }
+
+  .nav-group-btn {
+    padding: 12px 18px;
+    font-size: 12px;
+  }
+
+  .nav-item {
+    padding: 11px 18px 11px 22px;
+    font-size: 15px;
   }
 
   /* Dark Backdrop Overlay for Mobile Drawer */
