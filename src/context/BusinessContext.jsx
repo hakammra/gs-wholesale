@@ -454,31 +454,13 @@ export function BusinessProvider({ children }) {
         setSalesDocuments(enrichedSales);
       }
 
-      // 9. Transit Shipments
-      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
-      if (!trnErr && trnData && trnData.length > 0) {
-        const enrichedTransit = trnData
-          .filter(t => !t.shipment_no?.startsWith('DIR-TRN-') && !t.notes?.includes('Direct purchase companion'))
-          .map(t => ({
-            ...t,
-            status: t.status === 'preparing' ? 'draft' : (t.status === 'received' ? 'arrived' : t.status),
-            supplier_name: t.supplier?.name || 'Supplier',
-            items: (t.items || []).map(it => ({
-              ...it,
-              qty: Number(it.shipped_qty) || 0,
-              shipped_qty: Number(it.shipped_qty) || 0,
-              foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
-              unit_cost: Number(it.foreign_unit_cost) || 0,
-              final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
-            }))
-          }));
-        setTransitShipments(enrichedTransit);
-      }
-
-      // 10. Purchase Receipts (Enriched with product details and supplier info)
+      // 9. Purchase Receipts (Enriched with product details and supplier info)
       const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts')
         .select('*, items:purchase_receipt_items(*, product:products(name, item_code, sku)), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)')
         .order('created_at', { ascending: false });
+
+      const receivedTransitIds = new Set((grnData || []).map(g => g.transit_shipment_id).filter(Boolean));
+
       if (!grnErr && grnData && grnData.length > 0) {
         const enrichedPurchases = grnData.map(g => ({
           ...g,
@@ -510,16 +492,28 @@ export function BusinessProvider({ children }) {
         setPurchases(enrichedPurchases);
       }
 
-      // Auto-migrate local documents to cloud if cloud has no purchase/transit records yet
-      const localPurchases = safeGet('gs_wholesale_purchases', []);
-      const localTransit = safeGet('gs_wholesale_transit', []);
-      if (((!grnData || grnData.length === 0) && localPurchases.length > 0) ||
-          ((!trnData || trnData.length === 0) && localTransit.length > 0)) {
-        setTimeout(() => {
-          if (typeof syncLocalDataToCloud === 'function') {
-            syncLocalDataToCloud().catch(() => {});
-          }
-        }, 1500);
+      // 10. Transit Shipments (Cross-checked against arrived purchase receipts)
+      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
+      if (!trnErr && trnData && trnData.length > 0) {
+        const enrichedTransit = trnData
+          .filter(t => !t.shipment_no?.startsWith('DIR-TRN-') && !t.notes?.includes('Direct purchase companion'))
+          .map(t => {
+            const isArrived = t.status === 'received' || receivedTransitIds.has(t.id);
+            return {
+              ...t,
+              status: t.status === 'preparing' ? 'draft' : (isArrived ? 'arrived' : t.status),
+              supplier_name: t.supplier?.name || 'Supplier',
+              items: (t.items || []).map(it => ({
+                ...it,
+                qty: Number(it.shipped_qty) || 0,
+                shipped_qty: Number(it.shipped_qty) || 0,
+                foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
+                unit_cost: Number(it.foreign_unit_cost) || 0,
+                final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
+              }))
+            };
+          });
+        setTransitShipments(enrichedTransit);
       }
 
       // 11. Cheques
@@ -1997,6 +1991,10 @@ export function BusinessProvider({ children }) {
       if (supabase) {
         await supabase.from('transit_shipment_items').delete().eq('transit_shipment_id', shipmentId);
         await supabase.from('transit_shipments').delete().eq('id', shipmentId);
+        await supabase.from('payments').delete().eq('transit_shipment_id', shipmentId);
+        if (shp.shipment_no) {
+          await supabase.from('payments').delete().or(`reference.eq.${shp.shipment_no},payment_no.ilike.%${shp.shipment_no}%`);
+        }
       }
     } catch (e) {}
 
@@ -2200,6 +2198,12 @@ export function BusinessProvider({ children }) {
               status: 'received',
               notes: 'Direct purchase companion shipment'
             });
+          } else {
+            // Update existing transit shipment to received in cloud so all devices immediately reflect arrival
+            await supabase.from('transit_shipments').update({
+              status: 'received',
+              actual_arrival_date: receiptDate
+            }).eq('id', linkTransitId);
           }
 
           await supabase.from('purchase_receipts').upsert({
@@ -2563,9 +2567,13 @@ export function BusinessProvider({ children }) {
       if (supabase) {
         await supabase.from('purchase_receipt_items').delete().eq('purchase_receipt_id', purchaseId);
         await supabase.from('purchase_receipts').delete().eq('id', purchaseId);
+        await supabase.from('payments').delete().eq('purchase_id', purchaseId);
         const refNo = pur.doc_no || pur.grn_no;
         if (refNo) {
           await supabase.from('payments').delete().or(`reference.eq.${refNo},payment_no.eq.PAY-${refNo},payment_no.eq.PAY-PUR-${refNo}`);
+        }
+        if (pur.transit_shipment_id) {
+          await supabase.from('transit_shipments').delete().eq('id', pur.transit_shipment_id).ilike('shipment_no', 'DIR-TRN-%');
         }
       }
     } catch (e) {}
@@ -3027,6 +3035,34 @@ export function BusinessProvider({ children }) {
       'gs_wholesale_pos_tabs'
     ];
     keysToRemove.forEach(k => localStorage.removeItem(k));
+
+    try {
+      if (supabase) {
+        await supabase.from('sales_document_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('sales_documents').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('purchase_receipt_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('purchase_receipts').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('transit_shipment_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('transit_shipments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('payments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('cheque_register').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('stock_balances').update({
+          qty_on_hand: 0,
+          qty_reserved: 0,
+          qty_available: 0,
+          qty_in_transit: 0,
+          qty_damaged: 0
+        }).neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('customers').update({
+          current_receivable: 0
+        }).neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('suppliers').update({
+          current_payable: 0
+        }).neq('id', '00000000-0000-0000-0000-000000000000');
+      }
+    } catch (e) {
+      console.warn('Supabase resetTransactionsOnly notice:', e);
+    }
 
     notifySuccess('All transactions, orders, and documents cleared. Master products and customers retained.');
   };
@@ -3557,6 +3593,7 @@ export function BusinessProvider({ children }) {
       if (supabase) {
         await supabase.from('sales_document_items').delete().eq('sales_document_id', docId);
         await supabase.from('sales_documents').delete().eq('id', docId);
+        await supabase.from('payments').delete().eq('sales_doc_id', docId);
         if (docNo) {
           await supabase.from('payments').delete().or(`reference.eq.${docNo},payment_no.eq.PAY-${docNo},payment_no.eq.PAY-INV-${docNo},notes.ilike.%${docNo}%`);
           await supabase.from('cheque_register').delete().or(`sales_document_id.eq.${docId},notes.ilike.%${docNo}%`);

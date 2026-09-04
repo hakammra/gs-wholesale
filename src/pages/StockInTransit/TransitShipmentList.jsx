@@ -7,6 +7,7 @@ import DocumentProductTree from '../../components/common/DocumentProductTree';
 export default function TransitShipmentList({ onNavigateTab }) {
   const {
     transitShipments = [],
+    purchases = [],
     suppliers = [],
     products = [],
     categories = [],
@@ -163,9 +164,16 @@ export default function TransitShipmentList({ onNavigateTab }) {
     !s.notes?.includes('Direct purchase companion')
   );
 
+  // Helper to determine if shipment has arrived or converted to purchase
+  const checkIsArrived = (s) => {
+    if (s.status === 'arrived' || s.status === 'received') return true;
+    if (s.purchase_doc_id || s.purchase_doc_no) return true;
+    return purchases.some(p => p.transit_shipment_id === s.id || (s.shipment_no && p.shipment_no === s.shipment_no));
+  };
+
   // Filtered Shipments
   const filteredShipments = validTransitShipments.filter(s => {
-    const isArrived = s.status === 'arrived' || s.status === 'received';
+    const isArrived = checkIsArrived(s);
     const isDraft = s.status === 'draft';
     if (statusFilter === 'drafts' && !isDraft) return false;
     if (statusFilter === 'in_transit' && (isArrived || isDraft)) return false;
@@ -182,10 +190,10 @@ export default function TransitShipmentList({ onNavigateTab }) {
   });
 
   const draftCount = validTransitShipments.filter(s => s.status === 'draft').length;
-  const inTransitCount = validTransitShipments.filter(s => s.status === 'in_transit').length;
-  const arrivedCount = validTransitShipments.filter(s => s.status === 'arrived' || s.status === 'received').length;
+  const inTransitCount = validTransitShipments.filter(s => s.status === 'in_transit' && !checkIsArrived(s)).length;
+  const arrivedCount = validTransitShipments.filter(s => checkIsArrived(s)).length;
   const inTransitValue = validTransitShipments
-    .filter(s => s.status === 'in_transit')
+    .filter(s => s.status === 'in_transit' && !checkIsArrived(s))
     .reduce((sum, s) => sum + (Number(s.total_estimated_cost_lkr || s.foreign_items_subtotal) || 0), 0);
 
   const handlePromoteDraftToTransit = (shipment) => {
@@ -1141,7 +1149,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
               const sup = suppliers.find(s => s.id === shp.supplier_id);
               const itemCount = (shp.items || []).length;
               const isSelected = selectedTransit?.id === shp.id;
-              const isArrived = shp.status === 'arrived' || shp.status === 'received';
+              const isArrived = checkIsArrived(shp);
               const isDraft = shp.status === 'draft';
 
               return (
@@ -1277,7 +1285,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
               </small>
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              {selectedTransit.status === 'in_transit' && (
+              {selectedTransit.status === 'in_transit' && !checkIsArrived(selectedTransit) && (
                 <button
                   type="button"
                   onClick={() => handleOpenReceiveModal(selectedTransit)}

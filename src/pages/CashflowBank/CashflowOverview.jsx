@@ -13,6 +13,7 @@ export default function CashflowOverview() {
     deleteSalesDocument,
     deletePurchaseDocument,
     deleteTransitShipment,
+    resetTransactionsOnly,
     transitShipments = [],
     purchases = [],
     salesDocuments = [],
@@ -70,14 +71,17 @@ export default function CashflowOverview() {
         const isUnpaid = doc.payment_status === 'unpaid' || balDue >= total;
         const isPartial = doc.payment_status === 'partial' || (paid > 0 && balDue > 0);
 
-        // Determine method
-        let method = 'cash';
-        if (doc.payment_lines && doc.payment_lines.length > 0) {
-          method = doc.payment_lines.map(p => p.method).join(', ');
-        } else if (doc.is_cod) {
-          method = 'cod';
-        } else if (isUnpaid) {
+        // Determine payment method accurately
+        let method = 'credit';
+        if (doc.notes?.toLowerCase().includes('credit') || isUnpaid) {
           method = 'credit';
+        } else if (doc.is_cod || doc.notes?.toLowerCase().includes('cod')) {
+          method = 'cod';
+        } else if (doc.payment_lines && doc.payment_lines.length > 0) {
+          method = doc.payment_lines.map(p => p.method).join(', ');
+        } else if (paid > 0) {
+          const linkedPay = payments.find(p => p.sales_doc_id === doc.id || (doc.doc_no && p.reference?.includes(doc.doc_no)));
+          method = linkedPay?.payment_method || 'cash';
         }
 
         const statusLabel = doc.status === 'reserved'
@@ -116,7 +120,7 @@ export default function CashflowOverview() {
         if (docNo) seenPurchaseDocIds.add(docNo);
 
         const total = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
-        const payType = pur.payment_type || 'bank';
+        const payType = pur.payment_type || (pur.notes?.toLowerCase().includes('cash') ? 'cash' : pur.notes?.toLowerCase().includes('bank') ? 'bank' : 'credit');
 
         list.push({
           id: `pur-doc-${pur.id}`,
@@ -151,6 +155,7 @@ export default function CashflowOverview() {
         const total = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
         const sup = suppliers.find(s => s.id === shp.supplier_id);
         const refNo = shp.shipment_no || shp.bill_of_lading_no;
+        const payType = shp.payment_type || (shp.notes?.toLowerCase().includes('cash') ? 'cash' : shp.notes?.toLowerCase().includes('bank') ? 'bank' : 'credit');
 
         list.push({
           id: `trn-shp-${shp.id}`,
@@ -160,7 +165,7 @@ export default function CashflowOverview() {
           date: shp.departure_date || shp.shipping_date || shp.created_at,
           category: 'Stock in Transit Order',
           party: shp.supplier_name || sup?.name || 'Import Supplier',
-          method: shp.payment_type || 'bank',
+          method: payType,
           reference: `${refNo} (${shp.status === 'in_transit' ? 'In Transit' : 'Draft'})`,
           is_outflow: true,
           amount: total
@@ -258,9 +263,11 @@ export default function CashflowOverview() {
         );
         if (!isCapital) return false;
       }
-      if (filterType === 'cash' && t.method !== 'cash') return false;
-      if (filterType === 'bank' && t.method !== 'bank') return false;
-      if (filterType === 'cheque' && t.method !== 'cheque') return false;
+      if (filterType === 'cash' && !String(t.method || '').toLowerCase().includes('cash')) return false;
+      if (filterType === 'bank' && !String(t.method || '').toLowerCase().includes('bank')) return false;
+      if (filterType === 'cheque' && !String(t.method || '').toLowerCase().includes('cheque')) return false;
+      if (filterType === 'credit' && !String(t.method || '').toLowerCase().includes('credit')) return false;
+      if (filterType === 'cod' && !String(t.method || '').toLowerCase().includes('cod')) return false;
 
       if (!searchTerm) return true;
       const term = searchTerm.toLowerCase();
@@ -476,6 +483,19 @@ export default function CashflowOverview() {
           >
             + Record Expense / Outflow
           </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={async () => {
+              if (window.confirm("WARNING: Are you sure you want to delete all transactions and documents across all devices?\n\nThis will permanently wipe all sales invoices, purchases, in-transit shipments, and payments from Supabase Cloud and local cache, resetting stock to 0 while keeping your products and customer list.")) {
+                await resetTransactionsOnly();
+              }
+            }}
+            style={{ borderColor: 'rgba(239, 68, 68, 0.4)', color: '#ef4444', fontWeight: 600 }}
+            title="Reset and clear all transactions and documents across all devices"
+          >
+            🗑️ Wipe Transactions
+          </button>
         </div>
       </div>
 
@@ -533,6 +553,22 @@ export default function CashflowOverview() {
             onClick={() => setFilterType('cheque')}
           >
             📝 Cheques
+          </button>
+          <button
+            type="button"
+            className={`secondary-button small-button ${filterType === 'credit' ? 'active' : ''}`}
+            onClick={() => setFilterType('credit')}
+            style={{ color: '#ffca58' }}
+          >
+            ⏳ Credit / Due
+          </button>
+          <button
+            type="button"
+            className={`secondary-button small-button ${filterType === 'cod' ? 'active' : ''}`}
+            onClick={() => setFilterType('cod')}
+            style={{ color: '#f59e0b' }}
+          >
+            📦 COD
           </button>
         </div>
       </div>
