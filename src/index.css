@@ -89,115 +89,45 @@ label input, label select, label textarea { margin-top: 6px; }
   display: none;
 }
 
-.nav-group-section {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.nav-group-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 11px 20px;
-  background: #1f1f1f;
-  border: 0;
-  border-radius: 0;
-  color: #a3a3a3;
-  cursor: pointer;
-  font-size: 11.5px;
+.nav-group-title {
+  padding: 14px 24px 6px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
-  transition: all 0.15s ease;
-  user-select: none;
-  text-align: left;
-}
-
-.nav-group-btn:hover {
-  background: #2a2a2a;
-  color: #ffffff;
-}
-
-.nav-group-btn.has-active {
-  color: #38bdf8;
-  background: #1a2228;
-  border-left: 3px solid var(--primary);
-  padding-left: 17px;
-}
-
-.nav-group-btn-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.nav-group-icon {
-  font-size: 14px;
-}
-
-.nav-group-btn-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.nav-group-chevron {
-  display: inline-flex;
-  align-items: center;
-  color: #737373;
-  transition: transform 0.2s ease;
-}
-
-.nav-group-btn:hover .nav-group-chevron {
-  color: #ffffff;
-}
-
-.nav-group-content {
-  background: #181818;
+  color: var(--muted);
+  letter-spacing: 1px;
 }
 
 .nav-list {
-  padding-top: 0;
+  padding-top: 4px;
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  touch-action: pan-y !important;
 }
-
 .nav-item {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: #d4d4d4;
+  color: #ffffff;
   text-align: left;
-  padding: 10px 20px 10px 26px;
-  font-size: 14.5px;
+  padding: 12px 24px;
+  font-size: 17px;
   font-weight: 500;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background 0.1s ease;
 }
-
-.nav-item:hover {
-  background: #262626;
-  color: #ffffff;
-}
-
-.nav-item.active {
-  background: var(--primary);
-  color: #ffffff;
-  font-weight: 700;
-}
-
+.nav-item:hover { background: #303030; }
+.nav-item.active { background: var(--primary); color: #fff; font-weight: 700; }
 .nav-icon {
   display: inline-grid;
   place-items: center;
-  width: 22px;
-  flex: 0 0 22px;
-  font-size: 17px;
+  width: 26px;
+  flex: 0 0 26px;
+  font-size: 20px;
   font-weight: 700;
 }
 .nav-badge {
@@ -1193,49 +1123,157 @@ tr:hover td { background: #303030; }
   .app-shell.mobile-nav-open {
     overflow: hidden;
     height: 100vh;
+    height: 100dvh;
   }
 
   .app-shell.mobile-nav-open .main-panel {
-    pointer-events: none;
+    pointer-events: none !important;
     user-select: none;
+    touch-action: none !important;
+    overflow: hidden;
   }
 
+  /* Mobile Sidebar Container: strictly bounded to viewport height */
   .sidebar {
     position: fixed;
     top: 0;
     left: 0;
     bottom: 0;
-    width: 290px;
+    width: 270px;
     max-width: 82vw;
-    height: 100%;
+    height: 100vh;
     height: 100dvh;
     max-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     z-index: 1200;
     transform: translateX(-100%);
     transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     box-shadow: 6px 0 30px rgba(0, 0, 0, 0.7);
+    pointer-events: none;
     overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-y !important;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
   }
 
   .sidebar.mobile-open,
   .app-shell.mobile-nav-open .sidebar {
     transform: translateX(0);
-    pointer-events: auto;
+    pointer-events: auto !important;
   }
 
-  .nav-group-btn {
-    padding: 12px 18px;
-    font-size: 12px;
+  /* Compact Brand Block for mobile to save vertical space */
+  .brand-block {
+    padding: 10px 16px;
+    gap: 10px;
+    flex-shrink: 0;
+    border-bottom: 1px solid #383838;
   }
 
-  .nav-item {
-    padding: 11px 18px 11px 22px;
+  .brand-logo {
+    width: 32px;
+    height: 32px;
+    font-size: 13px;
+    border-radius: 4px;
+  }
+
+  .brand-block h1 {
     font-size: 15px;
+    letter-spacing: 0.5px;
+    line-height: 1.2;
+  }
+
+  .brand-block p {
+    font-size: 10px;
+    margin-top: 1px;
+    color: #a0a0a0;
+  }
+
+  .mobile-drawer-close {
+    width: 28px;
+    height: 28px;
+    font-size: 20px;
+    border-radius: 4px;
+  }
+
+  /* Mobile Nav List: Fits screen height cleanly + strictly handles its own scroll */
+  .nav-list {
+    flex: 1 1 0%;
+    min-height: 0;
+    max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y !important;
+    pointer-events: auto !important;
+    padding: 2px 0 10px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Mobile Group Titles: Compact */
+  .nav-group-title {
+    padding: 5px 16px 2px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: #8e8e8e;
+  }
+
+  /* Mobile Nav Items: Scaled down so all 13 items + Settings fit on screen */
+  .nav-item {
+    padding: 5px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    gap: 10px;
+    min-height: 30px;
+    line-height: 1.2;
+  }
+
+  .nav-icon {
+    width: 20px;
+    flex: 0 0 20px;
+    font-size: 15px;
+  }
+
+  .nav-badge {
+    font-size: 9px;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 8px;
+  }
+
+  /* Ultra-compact adjustment for short screen heights (<= 650px) or landscape */
+  @media (max-height: 650px) {
+    .brand-block {
+      padding: 6px 12px;
+      gap: 8px;
+    }
+    .brand-logo {
+      width: 26px;
+      height: 26px;
+      font-size: 11px;
+    }
+    .brand-block h1 {
+      font-size: 13px;
+    }
+    .brand-block p {
+      display: none;
+    }
+    .nav-group-title {
+      padding: 3px 12px 1px;
+      font-size: 8px;
+    }
+    .nav-item {
+      padding: 3px 12px;
+      font-size: 12px;
+      min-height: 25px;
+      gap: 8px;
+    }
+    .nav-icon {
+      font-size: 13px;
+      width: 16px;
+      flex: 0 0 16px;
+    }
   }
 
   /* Dark Backdrop Overlay for Mobile Drawer */
