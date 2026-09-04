@@ -11,6 +11,8 @@ export default function CashflowOverview() {
     recordDirectIncome,
     deletePayment,
     deleteSalesDocument,
+    deletePurchaseDocument,
+    deleteTransitShipment,
     transitShipments = [],
     purchases = [],
     salesDocuments = [],
@@ -51,36 +53,134 @@ export default function CashflowOverview() {
   // Aggregate All Cashflow Transactions into a unified ledger
   const allTransactions = useMemo(() => {
     const list = [];
+    const seenSalesDocIds = new Set();
+    const seenPurchaseDocIds = new Set();
     const seenPaymentIds = new Set();
 
-    // 1. Explicit Payments (Recorded via Settlement, Expenses, Advances, Sales Receipts)
-    payments.forEach(p => {
-      // If this payment belongs to a sales document, ensure the sales document is still active and not deleted
-      const isSalesDocPayment = p.payment_type === 'sales_receipt' ||
-                                p.payment_type === 'customer_advance' ||
-                                (p.payment_type === 'customer_payment' && (
-                                  (p.reference && (p.reference.startsWith('INV-') || p.reference.startsWith('RES-') || p.reference.startsWith('QT-'))) ||
-                                  (p.payment_no && (p.payment_no.includes('INV-') || p.payment_no.includes('RES-'))) ||
-                                  (p.notes && (p.notes.includes('INV-') || p.notes.includes('RES-')))
-                                ));
+    // 1. Sales Documents (Wholesale Sales Invoices & Customer Reservations)
+    // Every active sales document is a business sales inflow transaction!
+    salesDocuments.forEach(doc => {
+      if (doc.status !== 'cancelled' && doc.doc_type !== 'quotation') {
+        seenSalesDocIds.add(String(doc.id));
+        if (doc.doc_no) seenSalesDocIds.add(doc.doc_no);
 
-      if (isSalesDocPayment) {
-        const isDocStillActive = salesDocuments.some(d =>
-          d.status !== 'cancelled' &&
-          (
-            (p.sales_doc_id && String(d.id) === String(p.sales_doc_id)) ||
-            (d.doc_no && (
-              p.reference === d.doc_no ||
-              p.reference?.includes(d.doc_no) ||
-              p.notes?.includes(d.doc_no) ||
-              p.payment_no?.includes(d.doc_no)
-            ))
-          )
-        );
-        if (!isDocStillActive) {
-          // Linked sales document was deleted or cancelled - do not show in cash flow ledger
-          return;
+        const total = Number(doc.grand_total) || 0;
+        const paid = Number(doc.paid_amount) || 0;
+        const balDue = Number(doc.balance_due) || 0;
+        const isUnpaid = doc.payment_status === 'unpaid' || balDue >= total;
+        const isPartial = doc.payment_status === 'partial' || (paid > 0 && balDue > 0);
+
+        // Determine method
+        let method = 'cash';
+        if (doc.payment_lines && doc.payment_lines.length > 0) {
+          method = doc.payment_lines.map(p => p.method).join(', ');
+        } else if (doc.is_cod) {
+          method = 'cod';
+        } else if (isUnpaid) {
+          method = 'credit';
         }
+
+        const statusLabel = doc.status === 'reserved'
+          ? 'Reserved'
+          : isUnpaid
+            ? 'Credit / Unpaid'
+            : isPartial
+              ? `Partial (Paid Rs. ${paid.toLocaleString()})`
+              : 'Fully Paid';
+
+        list.push({
+          id: `sales-doc-${doc.id}`,
+          doc_id: doc.id,
+          doc_type: 'sales',
+          voucher_no: `REC-${doc.doc_no}`,
+          date: doc.doc_date || doc.created_at,
+          category: doc.doc_type === 'reserved_order' ? 'Reservation Sales' : 'Wholesale Sales Invoice',
+          party: doc.customer_name || 'Walk-in Customer',
+          method: method,
+          reference: `${doc.doc_no} [${statusLabel}]`,
+          is_outflow: false,
+          amount: total,
+          paid_amount: paid,
+          balance_due: balDue,
+          payment_status: doc.payment_status
+        });
+      }
+    });
+
+    // 2. Purchase Documents (Goods Receipts / Direct Purchases)
+    // Every active purchase document represents an inventory purchase outflow!
+    purchases.forEach(pur => {
+      if (pur.status !== 'cancelled') {
+        seenPurchaseDocIds.add(String(pur.id));
+        const docNo = pur.doc_no || pur.grn_no;
+        if (docNo) seenPurchaseDocIds.add(docNo);
+
+        const total = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
+        const payType = pur.payment_type || 'bank';
+
+        list.push({
+          id: `pur-doc-${pur.id}`,
+          doc_id: pur.id,
+          doc_type: 'purchase',
+          voucher_no: `PAY-${docNo}`,
+          date: pur.receipt_date || pur.created_at,
+          category: 'Purchase Document (Inventory)',
+          party: pur.supplier_name || 'Supplier',
+          method: payType,
+          reference: `${docNo}${pur.shipment_no && pur.shipment_no !== 'DIRECT' ? ` (Transit: ${pur.shipment_no})` : ''}`,
+          is_outflow: true,
+          amount: total,
+          status: pur.status
+        });
+      }
+    });
+
+    // 3. Stock in Transit Shipments (Only active shipments that have NOT arrived / converted to purchases yet)
+    transitShipments.forEach(shp => {
+      // Exclude companion shipments, cancelled, arrived/received
+      if (
+        shp.status !== 'cancelled' &&
+        shp.status !== 'arrived' &&
+        shp.status !== 'received' &&
+        !shp.shipment_no?.startsWith('DIR-TRN-') &&
+        !shp.notes?.includes('Direct purchase companion')
+      ) {
+        // Also check if already covered by an arrived purchase
+        if (shp.purchase_doc_id || (shp.shipment_no && seenPurchaseDocIds.has(shp.shipment_no))) return;
+
+        const total = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
+        const sup = suppliers.find(s => s.id === shp.supplier_id);
+        const refNo = shp.shipment_no || shp.bill_of_lading_no;
+
+        list.push({
+          id: `trn-shp-${shp.id}`,
+          doc_id: shp.id,
+          doc_type: 'transit',
+          voucher_no: `TRN-${shp.shipment_no}`,
+          date: shp.departure_date || shp.shipping_date || shp.created_at,
+          category: 'Stock in Transit Order',
+          party: shp.supplier_name || sup?.name || 'Import Supplier',
+          method: shp.payment_type || 'bank',
+          reference: `${refNo} (${shp.status === 'in_transit' ? 'In Transit' : 'Draft'})`,
+          is_outflow: true,
+          amount: total
+        });
+      }
+    });
+
+    // 4. Standalone Payments (Capital Inflows, Owner Investments, Direct Expenses, Customer Account Settlements)
+    payments.forEach(p => {
+      // Skip if this payment is already represented by a sales document or purchase document in the list
+      const matchesSalesDoc = (p.sales_doc_id && seenSalesDocIds.has(String(p.sales_doc_id))) ||
+                              (p.reference && seenSalesDocIds.has(p.reference)) ||
+                              (p.payment_no && (seenSalesDocIds.has(p.payment_no) || p.payment_no.includes('INV-')));
+
+      const matchesPurDoc = (p.purchase_doc_id && seenPurchaseDocIds.has(String(p.purchase_doc_id))) ||
+                            (p.reference && seenPurchaseDocIds.has(p.reference)) ||
+                            (p.payment_no && (seenPurchaseDocIds.has(p.payment_no) || p.payment_no.includes('PUR-')));
+
+      if (matchesSalesDoc || matchesPurDoc) {
+        return; // Already represented cleanly by the sales/purchase document above
       }
 
       seenPaymentIds.add(p.id);
@@ -120,100 +220,9 @@ export default function CashflowOverview() {
       });
     });
 
-    // 2. Sales Documents (POS Invoices & Customer Reservations) - ensure every cash/bank/cheque receipt is reflected
-    salesDocuments.forEach(doc => {
-      if (doc.status !== 'cancelled' && doc.status !== 'draft') {
-        const paid = Number(doc.paid_amount) || 0;
-        const isAlreadyInList = list.some(t => t.reference?.includes(doc.doc_no) || t.voucher_no?.includes(doc.doc_no) || t.id?.includes(doc.id));
-        
-        if (!isAlreadyInList && paid > 0) {
-          if (doc.payment_lines && doc.payment_lines.length > 0) {
-            doc.payment_lines.forEach((pl, pIdx) => {
-              const lineAmt = Number(pl.amount) || 0;
-              if (pl.method !== 'credit' && lineAmt > 0) {
-                list.push({
-                  id: `sales-pay-${doc.id}-${pIdx}`,
-                  voucher_no: `REC-${doc.doc_no}`,
-                  date: doc.doc_date || doc.created_at,
-                  category: doc.doc_type === 'reserved_order' ? 'Reservation Advance Receipt' : 'POS Sales Receipt',
-                  party: doc.customer_name || 'Walk-in Customer',
-                  method: pl.method || 'cash',
-                  reference: `${doc.doc_no} (${doc.doc_type === 'reserved_order' ? 'Reservation' : 'POS Bill'})`,
-                  is_outflow: false,
-                  amount: lineAmt
-                });
-              }
-            });
-          } else {
-            list.push({
-              id: `sales-pay-${doc.id}`,
-              voucher_no: `REC-${doc.doc_no}`,
-              date: doc.doc_date || doc.created_at,
-              category: doc.doc_type === 'reserved_order' ? 'Reservation Advance Receipt' : 'POS Sales Receipt',
-              party: doc.customer_name || 'Walk-in Customer',
-              method: 'cash',
-              reference: `${doc.doc_no} (Sales Bill)`,
-              is_outflow: false,
-              amount: paid
-            });
-          }
-        }
-      }
-    });
-
-    // 3. Stock in Transit Cash / Bank Payments (if not already recorded in payments)
-    transitShipments.forEach(shp => {
-      const payType = shp.payment_type || 'credit';
-      if (payType !== 'credit') {
-        const total = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
-        const sup = suppliers.find(s => s.id === shp.supplier_id);
-        const refNo = shp.shipment_no || shp.bill_of_lading_no;
-        const exists = list.some(t => t.reference?.includes(refNo) || t.voucher_no?.includes(refNo));
-        if (!exists && total > 0) {
-          list.push({
-            id: 'trn-pay-' + shp.id,
-            voucher_no: `PAY-${shp.shipment_no}`,
-            date: shp.departure_date || shp.created_at,
-            category: 'Stock in Transit Order Payment',
-            party: sup?.name || 'Import Supplier',
-            method: payType,
-            reference: `${shp.shipping_line_carrier || 'Cargo'} - ${shp.bill_of_lading_no || shp.shipment_no}`,
-            is_outflow: true,
-            amount: total
-          });
-        }
-      }
-    });
-
-    // 4. Direct Purchase Receipts Cash / Bank Payments (EXCLUDE arrivals from transit to avoid double counting)
-    purchases.forEach(pur => {
-      const isFromTransit = Boolean(pur.transit_shipment_id || (pur.shipment_no && pur.shipment_no !== 'DIRECT'));
-      if (isFromTransit) return;
-
-      const payType = pur.payment_type || 'credit';
-      if (payType !== 'credit') {
-        const total = Number(pur.total_amount_lkr || pur.total_landed_lkr) || 0;
-        const docNo = pur.doc_no || pur.grn_no;
-        const exists = list.some(t => t.reference?.includes(docNo) || t.voucher_no?.includes(docNo));
-        if (!exists && total > 0) {
-          list.push({
-            id: 'pur-pay-' + pur.id,
-            voucher_no: `PAY-${docNo}`,
-            date: pur.receipt_date || pur.created_at,
-            category: 'Direct Purchase Document Payment',
-            party: pur.supplier_name || 'Supplier',
-            method: payType,
-            reference: `Direct Purchase - ${docNo}`,
-            is_outflow: true,
-            amount: total
-          });
-        }
-      }
-    });
-
     // Sort descending by date
     return list.sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [payments, salesDocuments, transitShipments, purchases, suppliers, customers]);
+  }, [salesDocuments, purchases, transitShipments, payments, suppliers, customers]);
 
   // Financial Calculations
   const totalInflow = allTransactions.filter(t => !t.is_outflow).reduce((s, t) => s + t.amount, 0);
@@ -341,27 +350,49 @@ export default function CashflowOverview() {
     }
 
     try {
-      // 1. If it exists in payments list, delete it
-      const foundPayment = payments.find(p => p.id === t.id);
-      if (foundPayment) {
-        await deletePayment(t.id);
-        return;
-      }
-
-      // 2. If it's a virtual sales receipt from a sales doc (id: `sales-pay-${doc.id}` or `sales-pay-${doc.id}-${pIdx}`)
-      if (t.id && String(t.id).startsWith('sales-pay-')) {
-        const parts = String(t.id).split('-');
-        const docId = parts.length > 3 ? parts.slice(2, -1).join('-') : parts[2];
+      // 1. If it's linked to a sales document
+      if (t.doc_type === 'sales' || (t.id && String(t.id).startsWith('sales-doc-'))) {
+        const docId = t.doc_id || String(t.id).replace('sales-doc-', '');
         if (docId) {
           await deleteSalesDocument(docId);
+          notifySuccess(`Sales document ${t.voucher_no} and cashflow entry removed`);
           return;
         }
       }
 
-      // 3. Fallback: match payment by voucher_no or reference
+      // 2. If it's linked to a purchase document
+      if (t.doc_type === 'purchase' || (t.id && String(t.id).startsWith('pur-doc-'))) {
+        const docId = t.doc_id || String(t.id).replace('pur-doc-', '');
+        if (docId) {
+          await deletePurchaseDocument(docId);
+          notifySuccess(`Purchase document ${t.voucher_no} and cashflow entry removed`);
+          return;
+        }
+      }
+
+      // 3. If it's linked to a transit shipment
+      if (t.doc_type === 'transit' || (t.id && String(t.id).startsWith('trn-shp-'))) {
+        const docId = t.doc_id || String(t.id).replace('trn-shp-', '');
+        if (docId) {
+          await deleteTransitShipment(docId);
+          notifySuccess(`Transit shipment ${t.voucher_no} removed`);
+          return;
+        }
+      }
+
+      // 4. If it exists in payments list, delete it
+      const foundPayment = payments.find(p => p.id === t.id);
+      if (foundPayment) {
+        await deletePayment(t.id);
+        notifySuccess('Payment transaction removed');
+        return;
+      }
+
+      // 5. Fallback: match payment by voucher_no or reference
       const byVoucher = payments.find(p => p.payment_no === t.voucher_no || (p.reference && t.reference && p.reference === t.reference));
       if (byVoucher) {
         await deletePayment(byVoucher.id);
+        notifySuccess('Payment transaction removed');
         return;
       }
 
@@ -545,7 +576,17 @@ export default function CashflowOverview() {
                 <td style={{ fontWeight: 700 }}>{t.party}</td>
                 <td>
                   <span style={{ fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                    {t.method === 'cash' ? '💵 Cash' : t.method === 'bank' ? '🏦 Bank Transfer' : '📝 Cheque'}
+                    {String(t.method || '').toLowerCase().includes('cash')
+                      ? '💵 Cash'
+                      : String(t.method || '').toLowerCase().includes('bank')
+                        ? '🏦 Bank'
+                        : String(t.method || '').toLowerCase().includes('cheque')
+                          ? '📝 Cheque'
+                          : String(t.method || '').toLowerCase().includes('cod')
+                            ? '📦 COD'
+                            : String(t.method || '').toLowerCase().includes('credit')
+                              ? '⏳ Credit / Due'
+                              : `💳 ${t.method || 'Standard'}`}
                   </span>
                 </td>
                 <td style={{ color: 'var(--muted)', fontSize: 12 }}>{t.reference}</td>

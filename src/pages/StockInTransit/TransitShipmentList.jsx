@@ -157,8 +157,14 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setEditingShipmentId(null);
   };
 
+  // Filter out any internal companion shipments created for direct purchases
+  const validTransitShipments = transitShipments.filter(s =>
+    !s.shipment_no?.startsWith('DIR-TRN-') &&
+    !s.notes?.includes('Direct purchase companion')
+  );
+
   // Filtered Shipments
-  const filteredShipments = transitShipments.filter(s => {
+  const filteredShipments = validTransitShipments.filter(s => {
     const isArrived = s.status === 'arrived' || s.status === 'received';
     const isDraft = s.status === 'draft';
     if (statusFilter === 'drafts' && !isDraft) return false;
@@ -175,10 +181,10 @@ export default function TransitShipmentList({ onNavigateTab }) {
     );
   });
 
-  const draftCount = transitShipments.filter(s => s.status === 'draft').length;
-  const inTransitCount = transitShipments.filter(s => s.status === 'in_transit').length;
-  const arrivedCount = transitShipments.filter(s => s.status === 'arrived' || s.status === 'received').length;
-  const inTransitValue = transitShipments
+  const draftCount = validTransitShipments.filter(s => s.status === 'draft').length;
+  const inTransitCount = validTransitShipments.filter(s => s.status === 'in_transit').length;
+  const arrivedCount = validTransitShipments.filter(s => s.status === 'arrived' || s.status === 'received').length;
+  const inTransitValue = validTransitShipments
     .filter(s => s.status === 'in_transit')
     .reduce((sum, s) => sum + (Number(s.total_estimated_cost_lkr || s.foreign_items_subtotal) || 0), 0);
 
@@ -1090,7 +1096,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
             className={`secondary-button ${statusFilter === 'all' ? 'active' : ''}`}
             onClick={() => setStatusFilter('all')}
           >
-            All ({transitShipments.length})
+            All ({validTransitShipments.length})
           </button>
           <button
             className={`secondary-button ${statusFilter === 'drafts' ? 'active' : ''}`}

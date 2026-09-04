@@ -289,41 +289,6 @@ export function BusinessProvider({ children }) {
     });
   }, [salesDocuments, payments]);
 
-  // AUTO-CLEAN ORPHANED PAYMENTS FROM DELETED SALES DOCUMENTS
-  // If a payment was created for a sales document (sales_receipt / customer_advance)
-  // and that sales document was deleted from salesDocuments, remove the payment record.
-  useEffect(() => {
-    if (!payments.length) return;
-    const activeDocIds = new Set((salesDocuments || []).filter(d => d.status !== 'cancelled').map(d => String(d.id)));
-    const activeDocNos = (salesDocuments || []).filter(d => d.status !== 'cancelled').map(d => d.doc_no).filter(Boolean);
-
-    const isOrphanedSalesPayment = (p) => {
-      if (p.payment_type !== 'sales_receipt' && p.payment_type !== 'customer_advance') return false;
-
-      const hasValidDocId = p.sales_doc_id && activeDocIds.has(String(p.sales_doc_id));
-      const hasValidDocNo = activeDocNos.some(no =>
-        p.reference === no ||
-        p.reference?.includes(no) ||
-        p.notes?.includes(no) ||
-        p.payment_no?.includes(no)
-      );
-
-      // If it doesn't match any active sales document, it's an orphan!
-      return !hasValidDocId && !hasValidDocNo;
-    };
-
-    const orphans = payments.filter(isOrphanedSalesPayment);
-    if (orphans.length > 0) {
-      setPayments(prev => prev.filter(p => !isOrphanedSalesPayment(p)));
-
-      // Also clean up from Supabase
-      if (supabase) {
-        const orphanIds = orphans.map(o => o.id);
-        supabase.from('payments').delete().in('id', orphanIds).catch(() => {});
-      }
-    }
-  }, [salesDocuments, payments.length]);
-
   // LOAD REAL DATA FROM SUPABASE
   const fetchSupabaseData = useCallback(async () => {
     if (!supabase) return;
@@ -492,19 +457,21 @@ export function BusinessProvider({ children }) {
       // 9. Transit Shipments
       const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
       if (!trnErr && trnData && trnData.length > 0) {
-        const enrichedTransit = trnData.map(t => ({
-          ...t,
-          status: t.status === 'preparing' ? 'draft' : (t.status === 'received' ? 'arrived' : t.status),
-          supplier_name: t.supplier?.name || 'Supplier',
-          items: (t.items || []).map(it => ({
-            ...it,
-            qty: Number(it.shipped_qty) || 0,
-            shipped_qty: Number(it.shipped_qty) || 0,
-            foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
-            unit_cost: Number(it.foreign_unit_cost) || 0,
-            final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
-          }))
-        }));
+        const enrichedTransit = trnData
+          .filter(t => !t.shipment_no?.startsWith('DIR-TRN-') && !t.notes?.includes('Direct purchase companion'))
+          .map(t => ({
+            ...t,
+            status: t.status === 'preparing' ? 'draft' : (t.status === 'received' ? 'arrived' : t.status),
+            supplier_name: t.supplier?.name || 'Supplier',
+            items: (t.items || []).map(it => ({
+              ...it,
+              qty: Number(it.shipped_qty) || 0,
+              shipped_qty: Number(it.shipped_qty) || 0,
+              foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
+              unit_cost: Number(it.foreign_unit_cost) || 0,
+              final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost) || 0) * (Number(t.exchange_rate_snapshot) || 1)
+            }))
+          }));
         setTransitShipments(enrichedTransit);
       }
 
@@ -2040,7 +2007,7 @@ export function BusinessProvider({ children }) {
   const receivePurchaseShipment = (param) => {
     let receiptData = typeof param === 'string' ? { transit_shipment_id: param } : (param || {});
     const isDirect = !receiptData.transit_shipment_id || receiptData.transit_shipment_id === 'direct' || String(receiptData.transit_shipment_id).startsWith('direct-');
-    const shp = isDirect ? null : transitShipments.find(s => s.id === receiptData.transit_shipment_id);
+    const shp = isDirect ? null : transitShipments.find(s => String(s.id) === String(receiptData.transit_shipment_id) || s.shipment_no === receiptData.transit_shipment_id || (receiptData.shipment_no && s.shipment_no === receiptData.shipment_no));
 
     const receiptDate = receiptData.receipt_date || new Date().toISOString().slice(0, 10);
     const grnNo = `PUR-DOC-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -2083,8 +2050,8 @@ export function BusinessProvider({ children }) {
       doc_no: grnNo,
       grn_no: grnNo,
       status: isDraft ? 'draft' : (receiptData.status || 'received'),
-      transit_shipment_id: shp?.id || null,
-      shipment_no: shp?.shipment_no || (isDirect ? 'DIRECT' : ''),
+      transit_shipment_id: shp?.id || (isValidUUID(receiptData.transit_shipment_id) ? receiptData.transit_shipment_id : null),
+      shipment_no: shp?.shipment_no || receiptData.shipment_no || (isDirect ? 'DIRECT' : ''),
       bill_of_lading_no: shp?.bill_of_lading_no || receiptData.bill_of_lading_no || '',
       receipt_date: receiptDate,
       supplier_id: supId,
@@ -2214,7 +2181,7 @@ export function BusinessProvider({ children }) {
     try {
       if (supabase) {
         const suppId = isValidUUID(newPurchaseDoc.supplier_id) ? newPurchaseDoc.supplier_id : (suppliers[0]?.id || null);
-        let linkTransitId = isValidUUID(newPurchaseDoc.transit_shipment_id) ? newPurchaseDoc.transit_shipment_id : null;
+        let linkTransitId = isValidUUID(newPurchaseDoc.transit_shipment_id) ? newPurchaseDoc.transit_shipment_id : (shp && isValidUUID(shp.id) ? shp.id : null);
 
         // If direct purchase without an existing transit shipment, create companion transit shipment
         const performSupabaseSync = async () => {
