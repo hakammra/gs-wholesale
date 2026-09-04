@@ -112,6 +112,7 @@ export default function PaymentModal({
           <div className="modal-body">
             {/* Top Total Banner */}
             <div
+              className="payment-summary"
               style={{
                 background: '#242424',
                 padding: 14,
@@ -144,7 +145,7 @@ export default function PaymentModal({
 
             {/* Live Customer Account & Outstanding Balance Banner */}
             {liveCustomer && (
-              <div style={{
+              <div className="payment-customer-summary" style={{
                 background: '#182438',
                 border: '1px solid #3b82f6',
                 borderRadius: 6,
@@ -187,7 +188,7 @@ export default function PaymentModal({
             {/* Quick Tender Buttons */}
             <div style={{ marginTop: 14 }}>
               <label style={{ marginBottom: 6, display: 'block' }}>ADD PAYMENT TENDER</label>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div className="payment-tender-buttons" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button type="button" onClick={() => handleAddPaymentLine('cash')} className="secondary-button">
                   + Cash
                 </button>
@@ -212,7 +213,7 @@ export default function PaymentModal({
             </div>
 
             {/* Tender Lines Table */}
-            <div style={{ marginTop: 14 }}>
+            <div className="payment-lines-wrap" style={{ marginTop: 14 }}>
               <table>
                 <thead>
                   <tr>
@@ -225,7 +226,7 @@ export default function PaymentModal({
                 <tbody>
                   {paymentLines.map((line, idx) => (
                     <tr key={idx}>
-                      <td>
+                      <td data-label="Method">
                         <select
                           value={line.method}
                           onChange={(e) => handleUpdateLine(idx, 'method', e.target.value)}
@@ -238,7 +239,7 @@ export default function PaymentModal({
                           <option value="cod">📦 COD (Cash on Delivery)</option>
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Amount (Rs)">
                         <input
                           type="number"
                           step="0.01"
@@ -248,7 +249,7 @@ export default function PaymentModal({
                           onChange={(e) => handleUpdateLine(idx, 'amount', Number(e.target.value) || 0)}
                         />
                       </td>
-                      <td>
+                      <td data-label="Account / Details">
                         {line.method === 'bank' && (
                           <select
                             value={line.bank_account_id || ''}
@@ -279,7 +280,7 @@ export default function PaymentModal({
                           <span style={{ color: 'var(--muted)', fontSize: 12 }}>Cash Drawer</span>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Remove">
                         {paymentLines.length > 1 && (
                           <button
                             type="button"
@@ -301,7 +302,7 @@ export default function PaymentModal({
             {paymentLines.some(p => p.method === 'cheque') && (
               <div style={{ background: '#242424', padding: 12, border: '1px solid var(--line)', marginTop: 14, borderRadius: 4 }}>
                 <h4 style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--primary)' }}>Cheque Information</h4>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
+                <div className="payment-cheque-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
                   <div>
                     <label>Cheque No *</label>
                     <input

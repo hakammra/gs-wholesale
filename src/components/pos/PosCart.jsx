@@ -82,9 +82,10 @@ export default function PosCart({
   const isReserveDisabled = items.length === 0 || hasOverLimitItem;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--card-bg)' }}>
+    <div className="pos-cart-shell" style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--card-bg)' }}>
       {/* 1. TOP ACTION BAR */}
       <div
+        className="pos-cart-actionbar"
         style={{
           background: '#222',
           borderBottom: '2px solid var(--line)',
@@ -97,7 +98,7 @@ export default function PosCart({
         }}
       >
         {/* Left Actions: Clear & Items Count */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="pos-cart-summary-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button
             type="button"
             onClick={onClearCart}
@@ -131,7 +132,7 @@ export default function PosCart({
         </div>
 
         {/* Right Actions: Cash, Credit, Reserve, Checkout */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div className="pos-cart-payment-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {/* Quick Cash Checkout Action */}
           <button
             type="button"
@@ -260,6 +261,7 @@ export default function PosCart({
       {/* Brief Stock Warning Banners */}
       {hasOverLimitItem && (
         <div
+          className="pos-stock-warning"
           style={{
             background: 'rgba(239, 68, 68, 0.12)',
             borderBottom: '1px solid #ef4444',
@@ -277,6 +279,7 @@ export default function PosCart({
 
       {hasInTransitItem && (
         <div
+          className="pos-stock-warning pos-stock-warning-transit"
           style={{
             background: 'rgba(255, 202, 88, 0.12)',
             borderBottom: '1px solid #ffca58',
@@ -312,6 +315,7 @@ export default function PosCart({
       {/* Optional Top Bill Discount Bar */}
       {showDiscountBar && (
         <div
+          className="pos-discount-bar"
           style={{
             background: '#1a2b35',
             borderBottom: '1px solid var(--line)',
@@ -323,7 +327,7 @@ export default function PosCart({
             flexWrap: 'wrap'
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="pos-discount-controls" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: '#ffca58' }}>Cart Discount:</span>
             
             {/* Mode Switch: Rs vs % */}
@@ -373,7 +377,7 @@ export default function PosCart({
           </div>
 
           {/* Quick Presets */}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <div className="pos-discount-presets" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: 'var(--muted)' }}>Presets:</span>
             {[
               { label: '0%', type: 'percent', val: 0 },
@@ -422,7 +426,7 @@ export default function PosCart({
             <div key={idx} className={cardClass}>
               {/* Row 1: Item Header (Number, Name, Code, Warranty button, Stock status badge, Remove) */}
               <div className="pos-cart-card-row1">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                <div className="pos-cart-item-identity" style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
                   <span style={{ fontSize: 11.5, color: 'var(--muted)', fontWeight: 700, minWidth: 20 }}>
                     #{idx + 1}
                   </span>
@@ -481,7 +485,7 @@ export default function PosCart({
                 </div>
 
                 {/* Right badges & Remove */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="pos-cart-item-status" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   {/* Stock Availability Badge */}
                   {!isWarranty && (
                     <span
@@ -531,7 +535,7 @@ export default function PosCart({
               {/* Row 2: Controls (Qty, Unit Price, Item Disc, Line Total) */}
               <div className="pos-cart-card-row2">
                 {/* Quantity Control */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div className="pos-cart-control" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <label style={{ fontSize: 11, color: 'var(--muted)', margin: 0 }}>Qty:</label>
                   <button
                     type="button"
@@ -558,7 +562,7 @@ export default function PosCart({
                 </div>
 
                 {/* Unit Price */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div className="pos-cart-control" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <label style={{ fontSize: 11, color: 'var(--muted)', margin: 0 }}>Price (Rs):</label>
                   {isWarranty ? (
                     <span className="mono font-semibold" style={{ color: '#52e37e', fontSize: 12 }}>
@@ -577,7 +581,7 @@ export default function PosCart({
                 </div>
 
                 {/* Item Discount */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div className="pos-cart-control" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <label style={{ fontSize: 11, color: (item.discount_amount > 0) ? '#ffca58' : 'var(--muted)', margin: 0 }}>
                     Disc (Rs):
                   </label>
@@ -605,7 +609,7 @@ export default function PosCart({
                 </div>
 
                 {/* Line Total */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div className="pos-cart-control pos-cart-line-total" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <label style={{ fontSize: 11, color: 'var(--muted)', margin: 0 }}>Total:</label>
                   <strong className="mono font-semibold" style={{ fontSize: 14.5, color: isWarranty ? '#52e37e' : '#fff' }}>
                     {formatCurrency(lineTotal)}
@@ -626,6 +630,7 @@ export default function PosCart({
 
       {/* 3. CLEAN DOCUMENT TOTAL FOOTER */}
       <div
+        className="pos-cart-footer"
         style={{
           background: '#181818',
           borderTop: '2px solid var(--line)',
@@ -638,7 +643,7 @@ export default function PosCart({
         }}
       >
         {/* Left Breakdown */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+        <div className="pos-cart-footer-breakdown" style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
           <div>
             <span style={{ fontSize: 11, color: 'var(--muted)', display: 'block' }}>ITEMS / UNITS</span>
             <span style={{ fontSize: 13, fontWeight: 700 }}>
@@ -664,12 +669,12 @@ export default function PosCart({
         </div>
 
         {/* Right Grand Total Display */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="pos-cart-grand-total" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--muted)', letterSpacing: 0.5 }}>
             DOCUMENT TOTAL (LKR):
           </span>
           <span
-            className="mono"
+            className="mono pos-cart-grand-total-value"
             style={{
               fontSize: 26,
               fontWeight: 900,

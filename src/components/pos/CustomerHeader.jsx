@@ -26,9 +26,9 @@ export default function CustomerHeader({
 
   return (
     <div className="pos-customer-banner">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+      <div className="pos-customer-controls" style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         {/* Document Type Selector (Wholesale Invoice / Order / Quotation) */}
-        <div>
+        <div className="pos-customer-field pos-document-type-field">
           <label style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 2 }}>DOCUMENT TYPE</label>
           <select
             value={docType}
@@ -42,7 +42,7 @@ export default function CustomerHeader({
         </div>
 
         {/* Customer Selector */}
-        <div style={{ minWidth: 260 }}>
+        <div className="pos-customer-field pos-customer-select-field" style={{ minWidth: 260 }}>
           <label style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 2 }}>WHOLESALE CUSTOMER</label>
           <select
             value={liveCustomer?.id || ''}
@@ -59,7 +59,7 @@ export default function CustomerHeader({
         </div>
 
         {liveCustomer && (
-          <div style={{ display: 'flex', gap: 14, alignItems: 'center', borderLeft: '1px solid var(--line)', paddingLeft: 14 }}>
+          <div className="pos-customer-account-stats" style={{ display: 'flex', gap: 14, alignItems: 'center', borderLeft: '1px solid var(--line)', paddingLeft: 14 }}>
             <div>
               <span style={{ fontSize: 11, color: 'var(--muted)', display: 'block' }}>TIER</span>
               <span className="badge badge-primary">{liveCustomer.price_tier || 'Standard'}</span>
@@ -82,7 +82,7 @@ export default function CustomerHeader({
         )}
       </div>
 
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div className="pos-customer-actions" style={{ display: 'flex', gap: 6 }}>
         <button type="button" onClick={onOpenAddCustomer} className="secondary-button small-button" style={{ fontWeight: 700 }}>
           + Add Customer
         </button>

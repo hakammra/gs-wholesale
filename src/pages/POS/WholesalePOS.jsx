@@ -494,7 +494,7 @@ export default function WholesalePOS() {
     <div className="pos-workspace">
       {/* Top Multi-Bill Tabs & Reservation Bar */}
       <div className="bill-tabs-bar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center', overflowX: 'auto' }}>
+        <div className="bill-tabs-scroll" style={{ display: 'flex', gap: 4, alignItems: 'center', overflowX: 'auto' }}>
           {tabs.map(t => (
             <div
               key={t.id}
@@ -525,6 +525,7 @@ export default function WholesalePOS() {
         <button
           type="button"
           onClick={() => setIsReservationsModalOpen(true)}
+          className="reserved-bills-button"
           style={{
             background: openReservations.length > 0 ? '#ffca58' : '#2a2a2a',
             color: openReservations.length > 0 ? '#000' : '#fff',
@@ -569,6 +570,7 @@ export default function WholesalePOS() {
         <div className="pos-left-pane">
           {currentTab.source_reserved_doc_id && (
             <div
+              className="pos-conversion-banner"
               style={{
                 background: 'rgba(255, 202, 88, 0.12)',
                 border: '1px solid #ffca58',
