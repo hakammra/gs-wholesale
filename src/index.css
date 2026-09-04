@@ -52,9 +52,12 @@ label input, label select, label textarea { margin-top: 6px; }
   background: #242424;
   border-right: 1px solid #595959;
   color: #fff;
-  min-height: 100vh;
+  height: 100vh;
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   overscroll-behavior: contain;
 }
 
@@ -62,14 +65,14 @@ label input, label select, label textarea { margin-top: 6px; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px 24px;
-  border-bottom: 1px solid #444;
+  padding: 14px 20px;
+  border-bottom: 1px solid #3d3d3d;
   flex-shrink: 0;
 }
 
 .brand-logo {
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -78,66 +81,98 @@ label input, label select, label textarea { margin-top: 6px; }
   background: #000;
   color: var(--primary);
   font-weight: 900;
-  font-size: 18px;
+  font-size: 15px;
   letter-spacing: 1px;
 }
 
-.brand-block h1 { margin: 0; font-size: 19px; font-weight: 800; color: #fff; letter-spacing: 0.5px; }
-.brand-block p { margin: 3px 0 0; color: #cfcfcf; font-size: 12px; }
+.brand-block h1 { margin: 0; font-size: 16.5px; font-weight: 800; color: #fff; letter-spacing: 0.5px; }
+.brand-block p { margin: 2px 0 0; color: #cfcfcf; font-size: 11px; }
 
 .mobile-drawer-close {
   display: none;
 }
 
-.nav-group-title {
-  padding: 14px 24px 6px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--muted);
-  letter-spacing: 1px;
-}
-
 .nav-list {
-  padding-top: 4px;
+  padding: 4px 0;
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
 }
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-group-title {
+  padding: 6px 20px 3px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.8px;
+}
+
+.nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
 .nav-item {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: #ffffff;
   text-align: left;
-  padding: 12px 24px;
-  font-size: 17px;
+  padding: 8px 20px;
+  font-size: 14.5px;
   font-weight: 500;
   transition: background 0.1s ease;
+  line-height: 1.25;
 }
 .nav-item:hover { background: #303030; }
 .nav-item.active { background: var(--primary); color: #fff; font-weight: 700; }
 .nav-icon {
   display: inline-grid;
   place-items: center;
-  width: 26px;
-  flex: 0 0 26px;
-  font-size: 20px;
+  width: 22px;
+  flex: 0 0 22px;
+  font-size: 17px;
   font-weight: 700;
 }
 .nav-badge {
   margin-left: auto;
   background: #ef4444;
   color: #fff;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 800;
-  padding: 2px 7px;
-  border-radius: 10px;
+  padding: 1.5px 6px;
+  border-radius: 8px;
+}
+
+/* Pinned Bottom Section for Settings (Desktop) */
+.sidebar-footer {
+  flex-shrink: 0;
+  margin-top: auto;
+  border-top: 1px solid #3d3d3d;
+  background: #202020;
+  padding: 4px 0;
+}
+
+.sidebar-footer .nav-item {
+  padding: 10px 20px;
+  font-size: 14.5px;
+  font-weight: 600;
 }
 
 .sidebar-backdrop {
@@ -1139,8 +1174,8 @@ tr:hover td { background: #303030; }
     top: 0;
     left: 0;
     bottom: 0;
-    width: 270px;
-    max-width: 82vw;
+    width: 280px;
+    max-width: 84vw;
     height: 100vh;
     height: 100dvh;
     max-height: 100dvh;
@@ -1161,41 +1196,41 @@ tr:hover td { background: #303030; }
     pointer-events: auto !important;
   }
 
-  /* Compact Brand Block for mobile to save vertical space */
+  /* Brand Block on Mobile */
   .brand-block {
-    padding: 10px 16px;
-    gap: 10px;
+    padding: 12px 18px;
+    gap: 12px;
     flex-shrink: 0;
     border-bottom: 1px solid #383838;
   }
 
   .brand-logo {
-    width: 32px;
-    height: 32px;
-    font-size: 13px;
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
     border-radius: 4px;
   }
 
   .brand-block h1 {
-    font-size: 15px;
+    font-size: 16px;
     letter-spacing: 0.5px;
     line-height: 1.2;
   }
 
   .brand-block p {
-    font-size: 10px;
+    font-size: 11px;
     margin-top: 1px;
-    color: #a0a0a0;
+    color: #a8a8a8;
   }
 
   .mobile-drawer-close {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     font-size: 20px;
     border-radius: 4px;
   }
 
-  /* Mobile Nav List: Fits screen height cleanly + strictly handles its own scroll */
+  /* Mobile Nav List: Evenly distributed with equal line gaps */
   .nav-list {
     flex: 1 1 0%;
     min-height: 0;
@@ -1205,45 +1240,72 @@ tr:hover td { background: #303030; }
     -webkit-overflow-scrolling: touch;
     touch-action: pan-y !important;
     pointer-events: auto !important;
-    padding: 2px 0 10px;
+    padding: 6px 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-evenly;
+  }
+
+  .nav-group {
     display: flex;
     flex-direction: column;
   }
 
-  /* Mobile Group Titles: Compact */
   .nav-group-title {
-    padding: 5px 16px 2px;
-    font-size: 9px;
+    padding: 4px 18px 2px;
+    font-size: 10.5px;
     font-weight: 700;
     letter-spacing: 0.8px;
-    color: #8e8e8e;
+    color: #a0a0a0;
   }
 
-  /* Mobile Nav Items: Scaled down so all 13 items + Settings fit on screen */
+  .nav-group-items {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  /* Mobile Nav Items: Scaled based on available height, comfortable & legible */
   .nav-item {
-    padding: 5px 16px;
-    font-size: 13px;
+    padding: clamp(6px, 1.1vh, 9px) 18px;
+    font-size: clamp(14px, 1.8vh, 15px);
     font-weight: 500;
-    gap: 10px;
-    min-height: 30px;
+    gap: 12px;
+    min-height: clamp(32px, 4.2vh, 38px);
     line-height: 1.2;
   }
 
   .nav-icon {
-    width: 20px;
-    flex: 0 0 20px;
-    font-size: 15px;
+    width: 22px;
+    flex: 0 0 22px;
+    font-size: clamp(16px, 2vh, 18px);
   }
 
   .nav-badge {
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 800;
-    padding: 1px 5px;
+    padding: 1.5px 6px;
     border-radius: 8px;
   }
 
-  /* Ultra-compact adjustment for short screen heights (<= 650px) or landscape */
-  @media (max-height: 650px) {
+  /* Pinned Bottom Section for Settings (Mobile) */
+  .sidebar-footer {
+    flex-shrink: 0;
+    margin-top: auto;
+    border-top: 1px solid #383838;
+    background: #1c1c1c;
+    padding: 6px 0 env(safe-area-inset-bottom, 6px);
+  }
+
+  .sidebar-footer .nav-item {
+    padding: 10px 18px;
+    font-size: 15px;
+    font-weight: 600;
+    min-height: 42px;
+  }
+
+  /* Graceful adjustment for short landscape viewports (<= 550px) */
+  @media (max-height: 550px) {
     .brand-block {
       padding: 6px 12px;
       gap: 8px;
@@ -1260,19 +1322,24 @@ tr:hover td { background: #303030; }
       display: none;
     }
     .nav-group-title {
-      padding: 3px 12px 1px;
-      font-size: 8px;
+      padding: 2px 12px 1px;
+      font-size: 8.5px;
     }
     .nav-item {
       padding: 3px 12px;
-      font-size: 12px;
-      min-height: 25px;
+      font-size: 12.5px;
+      min-height: 24px;
       gap: 8px;
     }
     .nav-icon {
       font-size: 13px;
       width: 16px;
       flex: 0 0 16px;
+    }
+    .sidebar-footer .nav-item {
+      padding: 6px 12px;
+      font-size: 13px;
+      min-height: 32px;
     }
   }
 

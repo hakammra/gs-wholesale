@@ -27,12 +27,11 @@ const NAV_GROUPS = [
     ]
   },
   {
-    group: 'Finance & System',
+    group: 'Finance',
     items: [
       { key: 'cheques', label: 'Cheque Register', icon: '💳', showChequeBadge: true },
       { key: 'cashflow-bank', label: 'Cash Flow', icon: '💵' },
       { key: 'reporting', label: 'Reporting & P&L', icon: '▥' },
-      { key: 'settings', label: 'Settings', icon: '⚙' },
     ]
   }
 ];
@@ -49,7 +48,7 @@ export default function Sidebar({ currentTab, onSelectTab, isMobileOpen, onClose
       {/* Brand Block */}
       <div className="brand-block">
         <div className="brand-logo">GS</div>
-        <div>
+        <div className="brand-info">
           <h1>GS WHOLESALE</h1>
           <p>Direct Importers & POS</p>
         </div>
@@ -65,38 +64,55 @@ export default function Sidebar({ currentTab, onSelectTab, isMobileOpen, onClose
         )}
       </div>
 
-      {/* Grouped Nav List */}
+      {/* Grouped Nav List (Evenly distributed middle area) */}
       <div className="nav-list">
         {NAV_GROUPS.map((grp, gIdx) => (
-          <div key={gIdx}>
+          <div key={gIdx} className="nav-group">
             <div className="nav-group-title">{grp.group}</div>
-            {grp.items.map((item) => {
-              const isActive = currentTab === item.key;
-              return (
-                <button
-                  key={item.key}
-                  onClick={() => {
-                    onSelectTab(item.key);
-                    if (onCloseMobile) onCloseMobile();
-                  }}
-                  className={`nav-item ${isActive ? 'active' : ''}`}
-                >
-                  <span className="nav-icon">{item.icon}</span>
-                  <span>{item.label}</span>
-                  {item.showChequeBadge && pendingChequesCount > 0 && (
-                    <span className="nav-badge">{pendingChequesCount}</span>
-                  )}
-                  {item.showTransitBadge && inTransitCount > 0 && (
-                    <span className="nav-badge" style={{ background: '#0284c7' }}>{inTransitCount}</span>
-                  )}
-                  {item.showPurchaseBadge && purchasesCount > 0 && (
-                    <span className="nav-badge" style={{ background: '#52e37e', color: '#000' }}>{purchasesCount}</span>
-                  )}
-                </button>
-              );
-            })}
+            <div className="nav-group-items">
+              {grp.items.map((item) => {
+                const isActive = currentTab === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => {
+                      onSelectTab(item.key);
+                      if (onCloseMobile) onCloseMobile();
+                    }}
+                    className={`nav-item ${isActive ? 'active' : ''}`}
+                  >
+                    <span className="nav-icon">{item.icon}</span>
+                    <span>{item.label}</span>
+                    {item.showChequeBadge && pendingChequesCount > 0 && (
+                      <span className="nav-badge">{pendingChequesCount}</span>
+                    )}
+                    {item.showTransitBadge && inTransitCount > 0 && (
+                      <span className="nav-badge" style={{ background: '#0284c7' }}>{inTransitCount}</span>
+                    )}
+                    {item.showPurchaseBadge && purchasesCount > 0 && (
+                      <span className="nav-badge" style={{ background: '#52e37e', color: '#000' }}>{purchasesCount}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         ))}
+      </div>
+
+      {/* Pinned Bottom Section: Settings */}
+      <div className="sidebar-footer">
+        <button
+          type="button"
+          onClick={() => {
+            onSelectTab('settings');
+            if (onCloseMobile) onCloseMobile();
+          }}
+          className={`nav-item settings-item ${currentTab === 'settings' ? 'active' : ''}`}
+        >
+          <span className="nav-icon">⚙</span>
+          <span>Settings</span>
+        </button>
       </div>
     </aside>
   );
