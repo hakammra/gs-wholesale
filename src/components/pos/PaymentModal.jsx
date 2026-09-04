@@ -17,7 +17,12 @@ export default function PaymentModal({
     : null;
 
   const [paymentLines, setPaymentLines] = useState([
-    { method: customer ? 'credit' : 'cash', amount: grandTotal, bank_account_id: bankAccounts[0]?.id || '', reference: '' }
+    {
+      method: customer ? 'credit' : 'cash',
+      amount: grandTotal,
+      bank_account_id: (customer ? 'credit' : 'cash') === 'bank' ? (bankAccounts[0]?.id || '') : '',
+      reference: ''
+    }
   ]);
 
   const [chequeDetails, setChequeDetails] = useState({
@@ -37,10 +42,20 @@ export default function PaymentModal({
   const newTotalOutstanding = currentReceivable + creditOrCodAmount;
 
   const handleAddPaymentLine = (method) => {
+    // If only 1 line exists and its amount is full or 0, switch the payment method cleanly
+    if (paymentLines.length === 1 && (paymentLines[0].amount === grandTotal || paymentLines[0].amount === 0)) {
+      setPaymentLines([{
+        method,
+        amount: grandTotal,
+        bank_account_id: method === 'bank' ? (bankAccounts[0]?.id || '') : '',
+        reference: ''
+      }]);
+      return;
+    }
     setPaymentLines(prev => [...prev, {
       method,
       amount: remaining > 0 ? remaining : 0,
-      bank_account_id: bankAccounts[0]?.id || '',
+      bank_account_id: method === 'bank' ? (bankAccounts[0]?.id || '') : '',
       reference: ''
     }]);
   };
@@ -67,9 +82,10 @@ export default function PaymentModal({
       }
     }
 
+    const activeLines = paymentLines.filter(p => (Number(p.amount) || 0) > 0 || paymentLines.length === 1);
     onConfirmPayment({
-      payment_lines: paymentLines,
-      cheque_details: paymentLines.some(p => p.method === 'cheque') ? chequeDetails : null,
+      payment_lines: activeLines,
+      cheque_details: activeLines.some(p => p.method === 'cheque') ? chequeDetails : null,
       notes
     });
   };

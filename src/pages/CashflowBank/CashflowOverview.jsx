@@ -68,25 +68,39 @@ export default function CashflowOverview() {
         const total = Number(doc.grand_total) || 0;
         const paid = Number(doc.paid_amount) || 0;
         const balDue = Number(doc.balance_due) || 0;
-        const isUnpaid = doc.payment_status === 'unpaid' || balDue >= total;
-        const isPartial = doc.payment_status === 'partial' || (paid > 0 && balDue > 0);
+        const isPureCredit = doc.payment_status === 'credit' ||
+                             (doc.notes || '').toLowerCase().includes('credit') ||
+                             (balDue >= total && paid === 0) ||
+                             (doc.payment_status === 'unpaid' && paid === 0);
+        const isPartial = paid > 0 && balDue > 0;
+        const isFullyPaid = balDue <= 0.01 && paid > 0;
 
         // Determine payment method accurately
         let method = 'credit';
-        if (doc.notes?.toLowerCase().includes('credit') || isUnpaid) {
+        if (isPureCredit) {
           method = 'credit';
-        } else if (doc.is_cod || doc.notes?.toLowerCase().includes('cod')) {
+        } else if (doc.is_cod || (doc.notes || '').toLowerCase().includes('cod')) {
           method = 'cod';
+        } else if (isPartial) {
+          const activeLines = (doc.payment_lines || []).filter(p => p.method !== 'credit' && (Number(p.amount) || 0) > 0);
+          if (activeLines.length > 0) {
+            method = `${activeLines.map(p => p.method).join(', ')} + credit`;
+          } else {
+            method = 'partial (credit)';
+          }
         } else if (doc.payment_lines && doc.payment_lines.length > 0) {
-          method = doc.payment_lines.map(p => p.method).join(', ');
+          const activeLines = doc.payment_lines.filter(p => (Number(p.amount) || 0) > 0);
+          method = activeLines.length > 0 ? activeLines.map(p => p.method).join(', ') : (isFullyPaid ? 'cash' : 'credit');
         } else if (paid > 0) {
           const linkedPay = payments.find(p => p.sales_doc_id === doc.id || (doc.doc_no && p.reference?.includes(doc.doc_no)));
           method = linkedPay?.payment_method || 'cash';
+        } else {
+          method = 'credit';
         }
 
         const statusLabel = doc.status === 'reserved'
           ? 'Reserved'
-          : isUnpaid
+          : isPureCredit
             ? 'Credit / Unpaid'
             : isPartial
               ? `Partial (Paid Rs. ${paid.toLocaleString()})`
@@ -106,7 +120,7 @@ export default function CashflowOverview() {
           amount: total,
           paid_amount: paid,
           balance_due: balDue,
-          payment_status: doc.payment_status
+          payment_status: isPureCredit ? 'credit' : doc.payment_status
         });
       }
     });
@@ -229,8 +243,17 @@ export default function CashflowOverview() {
     return list.sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [salesDocuments, purchases, transitShipments, payments, suppliers, customers]);
 
-  // Financial Calculations
-  const totalInflow = allTransactions.filter(t => !t.is_outflow).reduce((s, t) => s + t.amount, 0);
+  // Financial Calculations (Realized Inflow)
+  const totalInflow = allTransactions
+    .filter(t => !t.is_outflow)
+    .reduce((s, t) => {
+      // If sales document, only real cash/bank/cheque paid amount counts towards realized cashflow!
+      if (t.doc_type === 'sales') {
+        return s + (Number(t.paid_amount) || 0);
+      }
+      return s + t.amount;
+    }, 0);
+
   const totalOutflow = allTransactions.filter(t => t.is_outflow).reduce((s, t) => s + t.amount, 0);
   const netCashflow = totalInflow - totalOutflow;
   const pendingChequesTotal = cheques.filter(c => c.direction === 'received' && (c.status === 'received' || c.status === 'held' || c.status === 'deposited')).reduce((s, c) => s + (Number(c.amount) || 0), 0);
@@ -263,10 +286,21 @@ export default function CashflowOverview() {
         );
         if (!isCapital) return false;
       }
-      if (filterType === 'cash' && !String(t.method || '').toLowerCase().includes('cash')) return false;
-      if (filterType === 'bank' && !String(t.method || '').toLowerCase().includes('bank')) return false;
+      if (filterType === 'cash') {
+        if (!String(t.method || '').toLowerCase().includes('cash')) return false;
+        if (t.payment_status === 'credit' || (String(t.method || '').toLowerCase().includes('credit') && (Number(t.paid_amount) || 0) === 0)) return false;
+      }
+      if (filterType === 'bank') {
+        if (!String(t.method || '').toLowerCase().includes('bank')) return false;
+        if (t.payment_status === 'credit' || (String(t.method || '').toLowerCase().includes('credit') && (Number(t.paid_amount) || 0) === 0)) return false;
+      }
       if (filterType === 'cheque' && !String(t.method || '').toLowerCase().includes('cheque')) return false;
-      if (filterType === 'credit' && !String(t.method || '').toLowerCase().includes('credit')) return false;
+      if (filterType === 'credit') {
+        const isCred = String(t.method || '').toLowerCase().includes('credit') ||
+                       String(t.reference || '').toLowerCase().includes('credit') ||
+                       t.payment_status === 'credit';
+        if (!isCred) return false;
+      }
       if (filterType === 'cod' && !String(t.method || '').toLowerCase().includes('cod')) return false;
 
       if (!searchTerm) return true;
@@ -612,16 +646,16 @@ export default function CashflowOverview() {
                 <td style={{ fontWeight: 700 }}>{t.party}</td>
                 <td>
                   <span style={{ fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                    {String(t.method || '').toLowerCase().includes('cash')
-                      ? '💵 Cash'
-                      : String(t.method || '').toLowerCase().includes('bank')
-                        ? '🏦 Bank'
+                    {String(t.method || '').toLowerCase().includes('credit') || t.payment_status === 'credit'
+                      ? '⏳ Credit / Due'
+                      : String(t.method || '').toLowerCase().includes('cod')
+                        ? '📦 COD'
                         : String(t.method || '').toLowerCase().includes('cheque')
                           ? '📝 Cheque'
-                          : String(t.method || '').toLowerCase().includes('cod')
-                            ? '📦 COD'
-                            : String(t.method || '').toLowerCase().includes('credit')
-                              ? '⏳ Credit / Due'
+                          : String(t.method || '').toLowerCase().includes('bank')
+                            ? '🏦 Bank'
+                            : String(t.method || '').toLowerCase().includes('cash')
+                              ? '💵 Cash'
                               : `💳 ${t.method || 'Standard'}`}
                   </span>
                 </td>

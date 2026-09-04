@@ -157,7 +157,8 @@ export function BusinessProvider({ children }) {
 
         const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
         const initialOnHand = Number(p.stock_quantity ?? p.qty_on_hand ?? 0);
-        const baseOnHand = Math.max(Number(cur.qty_on_hand) || 0, totalPurchasedOnHand, initialOnHand);
+        const hasTransactions = (purchases && purchases.length > 0) || (salesDocuments && salesDocuments.length > 0);
+        const baseOnHand = hasTransactions ? (totalPurchasedOnHand + initialOnHand) : initialOnHand;
         const finalOnHand = Math.max(0, baseOnHand - totalSold);
         const finalAvailable = Math.max(0, finalOnHand - totalReserved);
 
@@ -342,66 +343,64 @@ export function BusinessProvider({ children }) {
         });
       }
 
-      // 4. Stock Balances (Preserve local arrived purchases & in-transit shipments)
+      // 4. Stock Balances (Authoritative remote cloud inventory)
       const { data: stockData, error: stockErr } = await supabase.from('stock_balances').select('*');
-      if (!stockErr && stockData && stockData.length > 0) {
-        const localShipments = safeGet('gs_wholesale_transit', []);
-        const localPurchases = safeGet('gs_wholesale_purchases', []);
-        const localSales = safeGet('gs_wholesale_sales_docs', []);
-
+      if (!stockErr && stockData) {
         setStockBalances(prev => {
-          const updated = { ...prev };
+          const updated = {};
+          // Initialize every product with 0 stock
+          (prodData || []).forEach(p => {
+            updated[p.id] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          });
           stockData.forEach(sb => {
             const pId = sb.product_id;
-            const inTrn = localShipments
-              .filter(s => s.status === 'in_transit')
-              .reduce((sum, s) => {
-                const it = (s.items || []).find(x => x.product_id === pId);
-                return sum + (Number(it?.shipped_qty || it?.qty) || 0);
-              }, 0);
-
-            const purQty = localPurchases.reduce((sum, pur) => {
-              const it = (pur.items || []).find(x => x.product_id === pId);
-              return sum + (Number(it?.received_sellable_qty || it?.shipped_qty || it?.qty) || 0);
-            }, 0);
-
-            const soldQty = localSales
-              .filter(d => d.doc_type === 'sales_invoice' && d.status !== 'cancelled')
-              .reduce((sum, doc) => {
-                const it = (doc.items || []).find(x => (x.product?.id || x.product_id) === pId);
-                return sum + (Number(it?.qty) || 0);
-              }, 0);
-
-            const resQty = localSales
-              .filter(d => (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') && d.status === 'reserved')
-              .reduce((sum, doc) => {
-                const it = (doc.items || []).find(x => (x.product?.id || x.product_id) === pId);
-                return sum + (Number(it?.qty) || 0);
-              }, 0);
-
-            const existingCur = prev[pId] || {};
-            const remoteOnHand = Number(sb.qty_on_hand) || Number(sb.sellable_qty) || 0;
-            const effectiveOnHand = Math.max(0, Math.max(remoteOnHand, Number(existingCur.qty_on_hand) || 0, purQty) - soldQty);
-            const effectiveAvailable = Math.max(0, effectiveOnHand - resQty);
+            const remoteOnHand = Number(sb.qty_on_hand) || 0;
+            const remoteReserved = Number(sb.qty_reserved) || 0;
+            const remoteAvailable = Number(sb.qty_available) || Math.max(0, remoteOnHand - remoteReserved);
+            const remoteInTransit = Number(sb.qty_in_transit) || 0;
+            const remoteDamaged = Number(sb.qty_damaged) || 0;
 
             updated[pId] = {
-              qty_on_hand: effectiveOnHand,
-              qty_available: effectiveAvailable,
-              qty_reserved: resQty,
-              qty_in_transit: Math.max(Number(sb.qty_in_transit) || 0, inTrn),
-              qty_damaged: Number(sb.qty_damaged) || (existingCur.qty_damaged || 0)
+              qty_on_hand: remoteOnHand,
+              qty_available: remoteAvailable,
+              qty_reserved: remoteReserved,
+              qty_in_transit: remoteInTransit,
+              qty_damaged: remoteDamaged
             };
           });
           return updated;
         });
       }
 
-      // 5. Customers (Enriched with live invoice receivables)
+      // 5. Sales Documents (Enriched with product details and customer info)
+      const { data: docData, error: docErr } = await supabase.from('sales_documents')
+        .select('*, items:sales_document_items(*, product:products(name, item_code, sku)), customer:customers(business_name, billing_address, phone)')
+        .order('created_at', { ascending: false });
+      if (!docErr && docData) {
+        const enrichedSales = docData.map(d => ({
+          ...d,
+          customer_name: d.customer?.business_name || d.customer_name || 'Cash / Counter Customer',
+          customer_phone: d.customer?.phone || d.customer_phone || '',
+          items: (d.items || []).map(it => {
+            const pObj = it.product || products.find(p => p.id === it.product_id);
+            return {
+              ...it,
+              product_name: pObj?.name || it.product_name || 'Product Item',
+              item_code: pObj?.item_code || it.item_code || '',
+              product: pObj || it.product
+            };
+          })
+        }));
+        setSalesDocuments(enrichedSales);
+        localStorage.setItem('gs_wholesale_sales_docs', JSON.stringify(enrichedSales));
+      }
+
+      // 6. Customers (Enriched with live invoice receivables from fetched sales documents)
       const { data: custData, error: custErr } = await supabase.from('customers').select('*').order('business_name', { ascending: true });
-      if (!custErr && custData && custData.length > 0) {
-        const localSales = safeGet('gs_wholesale_sales_docs', []);
+      if (!custErr && custData) {
+        const liveSales = docData || [];
         const enrichedCustomers = custData.map(c => {
-          const custDocs = localSales.filter(d =>
+          const custDocs = liveSales.filter(d =>
             d.doc_type === 'sales_invoice' &&
             d.status !== 'cancelled' &&
             (
@@ -422,37 +421,19 @@ export function BusinessProvider({ children }) {
           };
         });
         setCustomers(enrichedCustomers);
+        localStorage.setItem('gs_wholesale_customers', JSON.stringify(enrichedCustomers));
       }
 
-      // 6. Suppliers
+      // 7. Suppliers
       const { data: suppData, error: suppErr } = await supabase.from('suppliers').select('*').order('name', { ascending: true });
-      if (!suppErr && suppData && suppData.length > 0) setSuppliers(suppData);
+      if (!suppErr && suppData) {
+        setSuppliers(suppData);
+        localStorage.setItem('gs_wholesale_suppliers', JSON.stringify(suppData));
+      }
 
-      // 7. Bank Accounts
+      // 8. Bank Accounts
       const { data: bankData, error: bankErr } = await supabase.from('bank_accounts').select('*');
       if (!bankErr && bankData && bankData.length > 0) setBankAccounts(bankData);
-
-      // 8. Sales Documents (Enriched with product details and customer info)
-      const { data: docData, error: docErr } = await supabase.from('sales_documents')
-        .select('*, items:sales_document_items(*, product:products(name, item_code, sku)), customer:customers(business_name, billing_address, phone)')
-        .order('created_at', { ascending: false });
-      if (!docErr && docData && docData.length > 0) {
-        const enrichedSales = docData.map(d => ({
-          ...d,
-          customer_name: d.customer?.business_name || d.customer_name || 'Cash / Counter Customer',
-          customer_phone: d.customer?.phone || d.customer_phone || '',
-          items: (d.items || []).map(it => {
-            const pObj = it.product || products.find(p => p.id === it.product_id);
-            return {
-              ...it,
-              product_name: pObj?.name || it.product_name || 'Product Item',
-              item_code: pObj?.item_code || it.item_code || '',
-              product: pObj || it.product
-            };
-          })
-        }));
-        setSalesDocuments(enrichedSales);
-      }
 
       // 9. Purchase Receipts (Enriched with product details and supplier info)
       const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts')
@@ -461,7 +442,7 @@ export function BusinessProvider({ children }) {
 
       const receivedTransitIds = new Set((grnData || []).map(g => g.transit_shipment_id).filter(Boolean));
 
-      if (!grnErr && grnData && grnData.length > 0) {
+      if (!grnErr && grnData) {
         const enrichedPurchases = grnData.map(g => ({
           ...g,
           doc_no: g.grn_no || g.doc_no,
@@ -490,11 +471,12 @@ export function BusinessProvider({ children }) {
           })
         }));
         setPurchases(enrichedPurchases);
+        localStorage.setItem('gs_wholesale_purchases', JSON.stringify(enrichedPurchases));
       }
 
       // 10. Transit Shipments (Cross-checked against arrived purchase receipts)
       const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
-      if (!trnErr && trnData && trnData.length > 0) {
+      if (!trnErr && trnData) {
         const enrichedTransit = trnData
           .filter(t => !t.shipment_no?.startsWith('DIR-TRN-') && !t.notes?.includes('Direct purchase companion'))
           .map(t => {
@@ -514,15 +496,22 @@ export function BusinessProvider({ children }) {
             };
           });
         setTransitShipments(enrichedTransit);
+        localStorage.setItem('gs_wholesale_transit', JSON.stringify(enrichedTransit));
       }
 
       // 11. Cheques
       const { data: chqData, error: chqErr } = await supabase.from('cheque_register').select('*').order('created_at', { ascending: false });
-      if (!chqErr && chqData && chqData.length > 0) setCheques(chqData);
+      if (!chqErr && chqData) {
+        setCheques(chqData);
+        localStorage.setItem('gs_wholesale_cheques', JSON.stringify(chqData));
+      }
 
       // 12. Payments
       const { data: payData, error: payErr } = await supabase.from('payments').select('*').order('created_at', { ascending: false });
-      if (!payErr && payData && payData.length > 0) setPayments(payData);
+      if (!payErr && payData) {
+        setPayments(payData);
+        localStorage.setItem('gs_wholesale_payments', JSON.stringify(payData));
+      }
 
       // 13. Currencies & Company Settings
       const { data: currData, error: currErr } = await supabase.from('currencies').select('*');
@@ -574,9 +563,35 @@ export function BusinessProvider({ children }) {
     }
   }, []);
 
-  // Fetch from Supabase on mount
+  // Fetch from Supabase on mount, tab focus, visibility change, and auto-poll every 10s
   useEffect(() => {
     fetchSupabaseData();
+
+    const handleFocus = () => {
+      fetchSupabaseData();
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchSupabaseData();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Auto-poll every 10 seconds while tab/app is visible
+    const pollInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchSupabaseData();
+      }
+    }, 10000);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(pollInterval);
+    };
   }, [fetchSupabaseData]);
 
   // EXCEL PRODUCT IMPORT ENGINE (Direct Supabase Upsert)
@@ -3044,6 +3059,7 @@ export function BusinessProvider({ children }) {
         await supabase.from('purchase_receipts').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('transit_shipment_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('transit_shipments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('stock_movements').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('payments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('cheque_register').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('stock_balances').update({
@@ -3052,7 +3068,7 @@ export function BusinessProvider({ children }) {
           qty_available: 0,
           qty_in_transit: 0,
           qty_damaged: 0
-        }).neq('id', '00000000-0000-0000-0000-000000000000');
+        }).neq('product_id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('customers').update({
           current_receivable: 0
         }).neq('id', '00000000-0000-0000-0000-000000000000');
@@ -3082,6 +3098,9 @@ export function BusinessProvider({ children }) {
 
     let paidAmount = 0;
     const isCod = (docData.payment_lines || []).some(p => p.method === 'cod');
+    const isCredit = (docData.payment_lines || []).some(p => p.method === 'credit') ||
+                     (docData.notes || '').toLowerCase().includes('credit') ||
+                     (!isQuotation && !isReservation && grandTotal > 0 && !(docData.payment_lines || []).some(p => p.method === 'cash' || p.method === 'bank' || p.method === 'cheque'));
 
     if (docData.payment_lines && !isQuotation) {
       paidAmount = docData.payment_lines.reduce((s, p) => (p.method !== 'credit' && p.method !== 'cod') ? s + (Number(p.amount) || 0) : s, 0);
@@ -3107,7 +3126,7 @@ export function BusinessProvider({ children }) {
     const balanceDue = Math.max(0, grandTotal - paidAmount);
     const paymentStatus = isReservation
       ? (paidAmount >= grandTotal ? 'paid_advance' : paidAmount > 0 ? 'partial_advance' : 'reserved')
-      : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid');
+      : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partial' : isCredit ? 'credit' : 'unpaid');
 
     const docId = docData.id || generateUUID();
 
@@ -3376,9 +3395,13 @@ export function BusinessProvider({ children }) {
             grand_total: grandTotal,
             paid_amount: paidAmount,
             balance_due: balanceDue,
-            status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'paid' : 'partially_paid'),
-            payment_status: isReservation ? (paidAmount >= grandTotal ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid') : isQuotation ? 'unpaid' : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid'),
-            notes: docData.notes || (isCod ? 'Cash on Delivery (COD)' : null)
+            status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'completed' : 'confirmed'),
+            payment_status: isReservation
+              ? (paidAmount >= grandTotal ? 'paid' : paidAmount > 0 ? 'partially_paid' : 'unpaid')
+              : isQuotation
+                ? 'unpaid'
+                : (balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : isCredit ? 'credit' : 'unpaid'),
+            notes: docData.notes || (isCredit ? 'Customer Account Credit Sale' : isCod ? 'Cash on Delivery (COD)' : null)
           });
 
           if (docData.items && docData.items.length > 0) {
