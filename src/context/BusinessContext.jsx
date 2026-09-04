@@ -1373,56 +1373,63 @@ export function BusinessProvider({ children }) {
     if (amt <= 0) throw new Error('Expense amount must be greater than 0');
 
     const effectiveBankId = bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null);
-    const expNo = `EXP-${Date.now().toString().slice(-4)}`;
+    const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
+    const expNo = `EXP-${Date.now().toString().slice(-6)}`;
+    const paymentId = generateUUID();
+    const categoryLabel = expense_category || 'General Expense';
+    const payeeName = payee_name || categoryLabel;
+    // Pack all metadata into reference and notes so they survive Supabase round-trip
+    const combinedReference = reference ? `${categoryLabel} | ${reference}` : categoryLabel;
+    const combinedNotes = notes
+      ? `${payeeName} | ${notes}`
+      : payeeName;
+
     const newPayment = {
-      id: 'pay-exp-' + Date.now(),
+      id: paymentId,
       payment_no: expNo,
       payment_date: payment_date || new Date().toISOString().slice(0, 10),
       payment_type: 'operational_expense',
       party_type: 'payee',
       party_id: null,
-      payee_name: payee_name || expense_category || 'Operational Expense',
-      expense_category: expense_category || 'General Expense',
+      payee_name: payeeName,
+      expense_category: categoryLabel,
       amount: amt,
       currency: 'LKR',
       payment_method: payment_method || 'cash',
-      bank_account_id: effectiveBankId,
-      reference: reference || '',
-      notes: notes || '',
+      bank_account_id: validBankId,
+      reference: combinedReference,
+      notes: combinedNotes,
       created_at: new Date().toISOString()
     };
 
     setPayments(prev => [newPayment, ...prev]);
 
     // Reverse bank balance if paid from bank
-    if (effectiveBankId && amt > 0) {
-      setBankAccounts(prev => prev.map(b => b.id === effectiveBankId ? {
+    if (validBankId && amt > 0) {
+      setBankAccounts(prev => prev.map(b => b.id === validBankId ? {
         ...b,
         current_balance: Math.max(0, (Number(b.current_balance) || 0) - amt)
       } : b));
     }
 
-    try {
-      if (supabase) {
-        supabase.from('payments').upsert({
-          id: newPayment.id,
-          payment_no: newPayment.payment_no,
-          payment_date: newPayment.payment_date,
-          payment_type: newPayment.payment_type,
-          party_type: newPayment.party_type,
-          payee_name: newPayment.payee_name,
-          expense_category: newPayment.expense_category,
-          amount: newPayment.amount,
-          currency: newPayment.currency,
-          payment_method: newPayment.payment_method,
-          bank_account_id: newPayment.bank_account_id,
-          reference: newPayment.reference,
-          notes: newPayment.notes
-        }).catch(() => {});
-      }
-    } catch (e) {}
+    // Save to Supabase using only columns that exist in the payments table
+    if (supabase) {
+      supabase.from('payments').insert({
+        id: paymentId,
+        payment_no: expNo,
+        payment_date: newPayment.payment_date,
+        payment_type: 'operational_expense',
+        party_type: 'payee',
+        party_id: null,
+        amount: amt,
+        payment_method: payment_method || 'cash',
+        bank_account_id: validBankId,
+        reference: combinedReference,
+        notes: combinedNotes
+      }).then(() => {}).catch(e => console.warn('Supabase expense record notice:', e));
+    }
 
-    notifySuccess(`Expense payment of Rs. ${amt.toLocaleString()} recorded`);
+    notifySuccess(`Expense of Rs. ${amt.toLocaleString()} recorded`);
     return newPayment;
   };
 
@@ -1443,64 +1450,69 @@ export function BusinessProvider({ children }) {
     if (amt <= 0) throw new Error('Inflow amount must be greater than 0');
 
     const effectiveBankId = bank_account_id || (payment_method === 'bank' ? bankAccounts[0]?.id : null);
-    const incNo = `CAP-${Date.now().toString().slice(-4)}`;
+    const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
+    const incNo = `CAP-${Date.now().toString().slice(-6)}`;
+    const paymentId = generateUUID();
     const categoryName = income_category || "Owner's Capital Investment (Initial)";
+    const payerName = payer_name || categoryName;
+    // Pack all metadata into reference and notes so they survive Supabase round-trip
+    const combinedReference = reference ? `${categoryName} | ${reference}` : categoryName;
+    const combinedNotes = notes
+      ? `${payerName} | ${notes}`
+      : payerName;
 
     const newPayment = {
-      id: 'pay-inc-' + Date.now(),
+      id: paymentId,
       payment_no: incNo,
       payment_date: payment_date || new Date().toISOString().slice(0, 10),
       payment_type: 'direct_income',
       party_type: 'payer',
       party_id: null,
-      payee_name: payer_name || categoryName || 'Capital Investment',
-      payer_name: payer_name || categoryName || 'Capital Investment',
+      payee_name: payerName,
+      payer_name: payerName,
       income_category: categoryName,
       amount: amt,
       currency: 'LKR',
       payment_method: payment_method || 'cash',
-      bank_account_id: effectiveBankId,
-      reference: reference || '',
-      notes: notes || '',
+      bank_account_id: validBankId,
+      reference: combinedReference,
+      notes: combinedNotes,
       created_at: new Date().toISOString()
     };
 
     setPayments(prev => [newPayment, ...prev]);
 
     // Add to bank balance if deposited into bank
-    if (effectiveBankId && amt > 0) {
-      setBankAccounts(prev => prev.map(b => b.id === effectiveBankId ? {
+    if (validBankId && amt > 0) {
+      setBankAccounts(prev => prev.map(b => b.id === validBankId ? {
         ...b,
         current_balance: (Number(b.current_balance) || 0) + amt
       } : b));
     }
 
-    try {
-      if (supabase) {
-        supabase.from('payments').upsert({
-          id: newPayment.id,
-          payment_no: newPayment.payment_no,
-          payment_date: newPayment.payment_date,
-          payment_type: newPayment.payment_type,
-          party_type: newPayment.party_type,
-          payee_name: newPayment.payee_name,
-          payer_name: newPayment.payer_name,
-          income_category: newPayment.income_category,
-          amount: newPayment.amount,
-          currency: newPayment.currency,
-          payment_method: newPayment.payment_method,
-          bank_account_id: newPayment.bank_account_id,
-          reference: newPayment.reference,
-          notes: newPayment.notes
-        }).catch(() => {});
-      }
-    } catch (e) {}
+    // Save to Supabase using only columns that exist in the payments table
+    if (supabase) {
+      supabase.from('payments').insert({
+        id: paymentId,
+        payment_no: incNo,
+        payment_date: newPayment.payment_date,
+        payment_type: 'direct_income',
+        party_type: 'payer',
+        party_id: null,
+        amount: amt,
+        payment_method: payment_method || 'cash',
+        bank_account_id: validBankId,
+        reference: combinedReference,
+        notes: combinedNotes
+      }).then(() => {}).catch(e => console.warn('Supabase income record notice:', e));
+    }
 
-    notifySuccess(`${categoryName} of Rs. ${amt.toLocaleString()} recorded successfully`);
+    notifySuccess(`${categoryName} of Rs. ${amt.toLocaleString()} recorded`);
     return newPayment;
   };
 
   // Supplier CRUD
+
   const saveSupplier = async (supplierData) => {
     const targetId = supplierData.id || generateUUID();
     if (supplierData.id) {
