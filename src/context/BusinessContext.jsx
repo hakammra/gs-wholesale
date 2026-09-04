@@ -467,44 +467,30 @@ export function BusinessProvider({ children }) {
       const { data: bankData, error: bankErr } = await supabase.from('bank_accounts').select('*');
       if (!bankErr && bankData && bankData.length > 0) setBankAccounts(bankData);
 
-      // 8. Sales Documents
-      const { data: docData, error: docErr } = await supabase
-        .from('sales_documents')
-        .select('*, items:sales_document_items(*, product:products(*))')
+      // 8. Sales Documents (Enriched with product details and customer info)
+      const { data: docData, error: docErr } = await supabase.from('sales_documents')
+        .select('*, items:sales_document_items(*, product:products(name, item_code, sku)), customer:customers(business_name, billing_address, phone)')
         .order('created_at', { ascending: false });
-
       if (!docErr && docData && docData.length > 0) {
-        const localSalesDocs = safeGet('gs_wholesale_sales_docs', []);
-        const enrichedSales = docData.map(d => {
-          let items = (d.items && d.items.length > 0) ? d.items : [];
-          if (items.length === 0) {
-            const matchLocal = localSalesDocs.find(l => l.id === d.id || l.doc_no === d.doc_no);
-            if (matchLocal && matchLocal.items && matchLocal.items.length > 0) {
-              items = matchLocal.items;
-            }
-          }
-          return {
-            ...d,
-            items: items.map(it => ({
+        const enrichedSales = docData.map(d => ({
+          ...d,
+          customer_name: d.customer?.business_name || d.customer_name || 'Cash / Counter Customer',
+          customer_phone: d.customer?.phone || d.customer_phone || '',
+          items: (d.items || []).map(it => {
+            const pObj = it.product || products.find(p => p.id === it.product_id);
+            return {
               ...it,
-              product_name: it.product?.name || it.product_name || it.name || it.item_code || 'Product Item',
-              product: it.product || it,
-              name: it.product?.name || it.name || it.product_name || 'Product Item',
-              qty: Number(it.qty || 1),
-              unit_price: Number(it.unit_price || 0),
-              line_total: Number(it.line_total || ((Number(it.qty || 1) * Number(it.unit_price || 0)) - Number(it.discount_amount || 0)))
-            }))
-          };
-        });
+              product_name: pObj?.name || it.product_name || 'Product Item',
+              item_code: pObj?.item_code || it.item_code || '',
+              product: pObj || it.product
+            };
+          })
+        }));
         setSalesDocuments(enrichedSales);
       }
 
       // 9. Transit Shipments
-      const { data: trnData, error: trnErr } = await supabase
-        .from('transit_shipments')
-        .select('*, items:transit_shipment_items(*, product:products(*)), landed_expenses:landed_costs(*), supplier:suppliers(name)')
-        .order('created_at', { ascending: false });
-
+      const { data: trnData, error: trnErr } = await supabase.from('transit_shipments').select('*, items:transit_shipment_items(*), landed_expenses:landed_costs(*), supplier:suppliers(name)').order('created_at', { ascending: false });
       if (!trnErr && trnData && trnData.length > 0) {
         const enrichedTransit = trnData.map(t => ({
           ...t,
@@ -512,9 +498,6 @@ export function BusinessProvider({ children }) {
           supplier_name: t.supplier?.name || 'Supplier',
           items: (t.items || []).map(it => ({
             ...it,
-            product_name: it.product?.name || it.product_name || it.name || it.item_code || 'Product Item',
-            product: it.product || it,
-            name: it.product?.name || it.name || it.product_name || 'Product Item',
             qty: Number(it.shipped_qty) || 0,
             shipped_qty: Number(it.shipped_qty) || 0,
             foreign_unit_cost: Number(it.foreign_unit_cost) || 0,
@@ -525,50 +508,38 @@ export function BusinessProvider({ children }) {
         setTransitShipments(enrichedTransit);
       }
 
-      // 10. Purchase Receipts
-      const { data: grnData, error: grnErr } = await supabase
-        .from('purchase_receipts')
-        .select('*, items:purchase_receipt_items(*, product:products(*)), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)')
+      // 10. Purchase Receipts (Enriched with product details and supplier info)
+      const { data: grnData, error: grnErr } = await supabase.from('purchase_receipts')
+        .select('*, items:purchase_receipt_items(*, product:products(name, item_code, sku)), supplier:suppliers(name), transit_shipment:transit_shipments(shipment_no)')
         .order('created_at', { ascending: false });
-
       if (!grnErr && grnData && grnData.length > 0) {
-        const localPurchases = safeGet('gs_wholesale_purchases', []);
-        const enrichedPurchases = grnData.map(g => {
-          let items = (g.items && g.items.length > 0) ? g.items : [];
-          if (items.length === 0) {
-            const matchLocal = localPurchases.find(l => l.id === g.id || l.doc_no === g.grn_no || l.grn_no === g.grn_no);
-            if (matchLocal && matchLocal.items && matchLocal.items.length > 0) {
-              items = matchLocal.items;
-            }
-          }
-          return {
-            ...g,
-            doc_no: g.grn_no || g.doc_no,
-            grn_no: g.grn_no || g.doc_no,
-            total_amount_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
-            total_landed_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
-            supplier_name: g.supplier?.name || g.supplier_name || 'Supplier',
-            shipment_no: g.transit_shipment?.shipment_no || g.shipment_no || '',
-            status: g.is_fully_received ? 'received' : 'draft',
-            items: items.map(it => {
-              const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost || it.unit_cost || 0);
-              const qty = Number(it.received_sellable_qty || it.shipped_qty || it.qty || 0);
-              return {
-                ...it,
-                product_name: it.product?.name || it.product_name || it.name || it.item_code || 'Product Item',
-                product: it.product || it,
-                name: it.product?.name || it.name || it.product_name || 'Product Item',
-                qty: qty,
-                shipped_qty: qty,
-                received_sellable_qty: qty,
-                damaged_qty: Number(it.damaged_qty) || 0,
-                unit_cost_lkr: cost,
-                final_landed_unit_cost_lkr: cost,
-                line_total: Number(it.line_total || (qty * cost))
-              };
-            })
-          };
-        });
+        const enrichedPurchases = grnData.map(g => ({
+          ...g,
+          doc_no: g.grn_no || g.doc_no,
+          grn_no: g.grn_no || g.doc_no,
+          total_amount_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
+          total_landed_lkr: Number(g.total_landed_lkr) || Number(g.total_amount_lkr) || 0,
+          supplier_name: g.supplier?.name || 'Supplier',
+          shipment_no: g.transit_shipment?.shipment_no || '',
+          status: g.is_fully_received ? 'received' : 'draft',
+          items: (g.items || []).map(it => {
+            const pObj = it.product || products.find(p => p.id === it.product_id);
+            const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost) || 0;
+            const qty = Number(it.received_sellable_qty || it.qty || it.shipped_qty) || 0;
+            return {
+              ...it,
+              product_name: pObj?.name || it.product_name || 'Product Item',
+              item_code: pObj?.item_code || it.item_code || '',
+              product: pObj || it.product,
+              qty: qty,
+              shipped_qty: qty,
+              received_sellable_qty: qty,
+              damaged_qty: Number(it.damaged_qty) || 0,
+              unit_cost_lkr: cost,
+              final_landed_unit_cost_lkr: cost
+            };
+          })
+        }));
         setPurchases(enrichedPurchases);
       }
 
@@ -2076,15 +2047,21 @@ export function BusinessProvider({ children }) {
     const isDraft = receiptData.status === 'draft';
     const purchaseId = receiptData.id || generateUUID();
 
-    const items = receiptData.items || (shp?.items || []).map(it => {
-      const unitCost = Number(it.foreign_unit_cost || it.unit_cost || it.final_landed_unit_cost_lkr) || 0;
-      const shippedQty = Number(it.shipped_qty || it.qty) || 1;
+    const rawItems = receiptData.items || (shp?.items || []);
+    const items = rawItems.map(it => {
+      const unitCost = Number(it.foreign_unit_cost || it.unit_cost || it.final_landed_unit_cost_lkr || it.unit_cost_lkr) || 0;
+      const shippedQty = Number(it.shipped_qty || it.received_sellable_qty || it.qty) || 1;
+      const pObj = it.product || products.find(p => p.id === (it.product_id || it.id));
       return {
-        product_id: it.product_id,
+        ...it,
+        product_id: it.product_id || it.id,
+        product_name: pObj?.name || it.product_name || 'Product Item',
+        item_code: pObj?.item_code || it.item_code || '',
+        product: pObj || it.product,
         shipped_qty: shippedQty,
         received_sellable_qty: shippedQty,
-        damaged_qty: 0,
-        missing_qty: 0,
+        damaged_qty: Number(it.damaged_qty) || 0,
+        missing_qty: Number(it.missing_qty) || 0,
         unit_cost_lkr: unitCost,
         final_landed_unit_cost_lkr: unitCost,
         line_total_lkr: shippedQty * unitCost
@@ -2278,15 +2255,12 @@ export function BusinessProvider({ children }) {
           if (items && items.length > 0) {
             const grnItems = items.map(it => {
               if (!isValidUUID(it.product_id)) return null;
-              const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost || it.unit_cost || 0);
               return {
                 id: generateUUID(),
                 purchase_receipt_id: purchaseId,
                 product_id: it.product_id,
-                received_sellable_qty: Number(it.received_sellable_qty || it.qty || it.shipped_qty) || 0,
-                damaged_qty: Number(it.damaged_qty) || 0,
-                foreign_unit_cost: cost,
-                final_landed_unit_cost_lkr: cost
+                received_sellable_qty: Number(it.received_sellable_qty) || 0,
+                damaged_qty: Number(it.damaged_qty) || 0
               };
             }).filter(Boolean);
 
@@ -2329,8 +2303,13 @@ export function BusinessProvider({ children }) {
     const newItems = rawNewItems.map(it => {
       const unitCost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.unit_cost || it.foreign_unit_cost) || 0;
       const shippedQty = Number(it.received_sellable_qty || it.shipped_qty || it.qty) || 1;
+      const pObj = it.product || products.find(p => p.id === (it.product_id || it.id));
       return {
-        product_id: it.product_id,
+        ...it,
+        product_id: it.product_id || it.id,
+        product_name: pObj?.name || it.product_name || 'Product Item',
+        item_code: pObj?.item_code || it.item_code || '',
+        product: pObj || it.product,
         shipped_qty: shippedQty,
         received_sellable_qty: shippedQty,
         damaged_qty: Number(it.damaged_qty) || 0,
@@ -2914,15 +2893,12 @@ export function BusinessProvider({ children }) {
             const rawPId = it.product_id || it.id;
             const prodId = productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId);
             if (!isValidUUID(prodId)) return null;
-            const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.foreign_unit_cost || it.unit_cost || 0);
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
               purchase_receipt_id: purId,
               product_id: prodId,
               received_sellable_qty: Number(it.received_sellable_qty || it.qty || it.shipped_qty) || 0,
-              damaged_qty: Number(it.damaged_qty) || 0,
-              foreign_unit_cost: cost,
-              final_landed_unit_cost_lkr: cost
+              damaged_qty: Number(it.damaged_qty) || 0
             };
           }).filter(Boolean);
 
@@ -2953,21 +2929,15 @@ export function BusinessProvider({ children }) {
 
         if (doc.items && doc.items.length > 0) {
           const docItems = doc.items.map(it => {
-            const rawPId = it.product?.id || it.product_id;
-            const pId = productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId);
+            const pId = it.product?.id || it.product_id;
             if (!isValidUUID(pId)) return null;
-            const qty = Number(it.qty) || 1;
-            const price = Number(it.unit_price) || 0;
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
               sales_document_id: dId,
               product_id: pId,
-              qty: qty,
-              base_qty: qty,
-              unit_type: it.unit_type || 'unit',
-              conversion_factor: 1,
-              unit_price: price,
-              line_total: Number(it.line_total) || (qty * price)
+              qty: Number(it.qty) || 1,
+              unit_price: Number(it.unit_price) || 0,
+              line_total: Number(it.line_total) || (Number(it.qty || 1) * Number(it.unit_price || 0))
             };
           }).filter(Boolean);
           if (docItems.length > 0) {
@@ -3150,7 +3120,16 @@ export function BusinessProvider({ children }) {
       payment_status: paymentStatus,
       is_cod: isCod,
       status: isReservation ? 'reserved' : isQuotation ? 'draft' : 'posted',
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      items: (docData.items || []).map(it => {
+        const pObj = it.product || products.find(p => p.id === (it.product_id || it.id));
+        return {
+          ...it,
+          product_name: pObj?.name || it.product_name || 'Product Item',
+          item_code: pObj?.item_code || it.item_code || '',
+          product: pObj || it.product
+        };
+      })
     };
 
     setSalesDocuments(prev => [newDoc, ...prev]);

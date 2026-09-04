@@ -2,11 +2,11 @@ import React, { useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
-import { generateInvoicePDF, printInvoicePDF } from '../../lib/pdfGenerator';
+import { generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
 import { exportToExcel, generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
 
 export default function SalesDocumentsList() {
-  const { salesDocuments, customers = [], convertDocument, cancelReservation, deleteSalesDocument, companySettings } = useBusiness();
+  const { salesDocuments, customers = [], products = [], convertDocument, cancelReservation, deleteSalesDocument, companySettings } = useBusiness();
   const { notifySuccess } = useNotification();
 
   const [activeTab, setActiveTab] = useState('all'); // all, reserved, invoices, quotations
@@ -72,20 +72,22 @@ export default function SalesDocumentsList() {
               <button
                 onClick={() => {
                   const cust = customers.find(c => c.id === selectedDoc.customer_id) || selectedDoc.customer;
-                  generateInvoicePDF(selectedDoc, companySettings, cust);
+                  generateInvoicePDF(selectedDoc, companySettings, cust, 'A4', products);
                 }}
-                className="toolbar-button bright"
+                className="toolbar-button"
+                title="Download PDF Invoice"
               >
-                <span className="icon">📥</span>
+                <span className="icon">⤓</span>
                 <span>Download PDF</span>
               </button>
 
               <button
                 onClick={() => {
                   const cust = customers.find(c => c.id === selectedDoc.customer_id) || selectedDoc.customer;
-                  printInvoicePDF(selectedDoc, companySettings, cust);
+                  printInvoiceDocument(selectedDoc, companySettings, cust, 'A4', products);
                 }}
-                className="toolbar-button"
+                className="toolbar-button bright"
+                title="Open Native Print Catalog"
               >
                 <span className="icon">🖨</span>
                 <span>Print Document</span>

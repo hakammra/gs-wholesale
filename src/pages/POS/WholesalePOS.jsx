@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, calculateWholesaleItemPrice, calculateDocumentTotals, formatDate } from '../../lib/formatters';
-import { generateInvoicePDF, printInvoicePDF } from '../../lib/pdfGenerator';
+import { generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
 import { generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
 import CustomerHeader from '../../components/pos/CustomerHeader';
 import ProductSearchGrid from '../../components/pos/ProductSearchGrid';
@@ -20,6 +20,7 @@ export default function WholesalePOS() {
     salesDocuments,
     cancelReservation,
     customers,
+    products = [],
     stockBalances = {}
   } = useBusiness();
 
@@ -350,21 +351,25 @@ export default function WholesalePOS() {
       discount: resDoc.discount_amount || 0,
       discount_value: resDoc.discount_amount || 0,
       discount_type: 'amount',
-      source_reserved_doc_id: null
+      source_reserved_doc_id: resDoc.id
     }));
+
+    setIsReservationsModalOpen(false);
+    notifySuccess(`Reservation ${resDoc.doc_no} loaded into POS! Click Checkout [F4] to collect payment and generate invoice.`);
   };
 
-  const handleCheckout = () => {
-    if (!currentTab.items || currentTab.items.length === 0) {
-      notifyWarning('Cart is empty. Add products before proceeding.');
+  const handleTriggerCheckout = () => {
+    if (currentTab.items.length === 0) {
+      notifyWarning('Cannot checkout an empty bill');
       return;
     }
 
-    const minMarginPct = companySettings?.min_profit_pct || 5.0;
+    // Check minimum profit margin protection (5.0%)
     const lowMarginItems = [];
+    const minMarginPct = companySettings?.min_profit_pct || 5.0;
 
     currentTab.items.forEach(it => {
-      if (it.is_warranty_replacement) return;
+      if (it.is_warranty_replacement) return; // Skip intentional Rs. 0 warranty replacements
       const cost = it.unit_cost_snapshot || it.product.weighted_cost_lkr || 0;
       if (cost > 0 && it.unit_price > 0) {
         const marginPct = ((it.unit_price - cost) / it.unit_price) * 100;
@@ -404,6 +409,7 @@ export default function WholesalePOS() {
 
       const postedDoc = await postSalesDocument(docPayload);
 
+      // Look up live customer from context to get exact current balance
       const liveCust = currentTab.customer
         ? (customers.find(c => String(c.id) === String(currentTab.customer.id)) || currentTab.customer)
         : null;
@@ -417,12 +423,14 @@ export default function WholesalePOS() {
         current_receivable: outstanding
       } : null;
 
+      // Notify success with exact customer outstanding balance if credit was used
       if (postedDoc.balance_due > 0 && liveCust) {
         notifySuccess(`Invoice ${postedDoc.doc_no} posted! ${liveCust.business_name} Outstanding Balance: ${formatCurrency(outstanding)}`);
       } else {
         notifySuccess(`Invoice ${postedDoc.doc_no} posted successfully!`);
       }
 
+      // Open Sale Completed Modal displaying the invoice and outstanding balance with download/print options
       setCompletedSaleDoc({
         ...postedDoc,
         customer: updatedCust,
@@ -1089,18 +1097,18 @@ export default function WholesalePOS() {
               <div style={{ display: 'flex', gap: 10, justifyContent: 'space-between', flexWrap: 'wrap' }}>
                 <button
                   type="button"
-                  onClick={() => generateInvoicePDF(completedSaleDoc, companySettings, completedSaleDoc.customer)}
+                  onClick={() => generateInvoicePDF(completedSaleDoc, companySettings, completedSaleDoc.customer, 'A4', products)}
                   className="secondary-button"
-                  style={{ flex: 1, minWidth: 130, padding: '10px 14px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, color: 'var(--primary)' }}
+                  style={{ flex: 1, minWidth: 130, padding: '10px 14px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
                 >
-                  <span>📥</span> Download PDF
+                  <span>⤓</span> Download PDF
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => printInvoicePDF(completedSaleDoc, companySettings, completedSaleDoc.customer)}
-                  className="secondary-button"
-                  style={{ flex: 1, minWidth: 130, padding: '10px 14px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                  onClick={() => printInvoiceDocument(completedSaleDoc, companySettings, completedSaleDoc.customer, 'A4', products)}
+                  className="secondary-button bright"
+                  style={{ flex: 1, minWidth: 130, padding: '10px 14px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, borderColor: 'var(--primary)' }}
                 >
                   <span>🖨</span> Print Invoice
                 </button>
@@ -1121,7 +1129,7 @@ export default function WholesalePOS() {
                   type="button"
                   onClick={() => setCompletedSaleDoc(null)}
                   className="primary-button"
-                  style={{ flex: 1, minWidth: 130, padding: '10px 14px', fontWeight: 800 }}
+                  style={{ flex: 1, minWidth: 140, padding: '10px 14px', fontWeight: 800 }}
                 >
                   + Start Next Bill
                 </button>
