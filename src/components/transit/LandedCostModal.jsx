@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency } from '../../lib/formatters';
 
@@ -18,10 +18,30 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
     cheque_bank: '',
+    payment_date: new Date().toISOString().slice(0, 10),
     reference: '',
     notes: ''
   });
   const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setForm({
+      expense_type: 'customs_duty',
+      payee: '',
+      currency: 'LKR',
+      amount: '',
+      exchange_rate: 1,
+      paid_by: 'bank',
+      bank_account_id: bankAccounts[0]?.id || '',
+      cheque_no: '',
+      cheque_date: new Date().toISOString().slice(0, 10),
+      cheque_bank: '',
+      payment_date: new Date().toISOString().slice(0, 10),
+      reference: '',
+      notes: ''
+    });
+  }, [isOpen, shipmentId, bankAccounts]);
 
   if (!isOpen || !shipment) return null;
 
@@ -157,12 +177,33 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
               </div>
 
               <div>
+                <label>Payment Date *</label>
+                <input
+                  type="date"
+                  required
+                  value={form.payment_date}
+                  onChange={(e) => setForm(prev => ({ ...prev, payment_date: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
                 <label>Invoice / Receipt Reference</label>
                 <input
                   type="text"
                   placeholder="e.g. CUS-INV-998811"
                   value={form.reference}
                   onChange={(e) => setForm(prev => ({ ...prev, reference: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label>Notes</label>
+                <input
+                  type="text"
+                  placeholder="Optional cost details"
+                  value={form.notes}
+                  onChange={(e) => setForm(prev => ({ ...prev, notes: e.target.value }))}
                 />
               </div>
             </div>

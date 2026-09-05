@@ -180,6 +180,11 @@ export default function ProductList() {
     setEditingProduct(null);
   };
 
+  const editingHasCostHistory = Boolean(editingProduct?.id) && (
+    (Number(stockBalances[editingProduct.id]?.qty_on_hand) || 0) > 0 ||
+    purchases.some(purchase => purchase.status !== 'draft' && (purchase.items || []).some(item => item.product_id === editingProduct.id))
+  );
+
   return (
     <div>
       {/* Action Toolbar */}
@@ -474,13 +479,18 @@ export default function ProductList() {
                     />
                   </div>
                   <div>
-                    <label>Cost Price / WAC (Rs)</label>
+                    <label>{editingHasCostHistory ? 'Weighted Average Cost (system)' : 'Opening Cost / WAC (Rs)'}</label>
                     <input
                       type="number"
                       className="mono"
                       value={editingProduct.weighted_cost_lkr}
+                      readOnly={editingHasCostHistory}
+                      title={editingHasCostHistory ? 'Edit the originating purchase document or add landed costs to change WAC correctly.' : 'Initial cost used until the first purchase receipt.'}
                       onChange={(e) => setEditingProduct(prev => ({ ...prev, weighted_cost_lkr: Number(e.target.value) || 0 }))}
                     />
+                    {editingHasCostHistory && (
+                      <small style={{ color: 'var(--muted)' }}>Calculated from purchase receipts. Change the purchase or landed cost instead.</small>
+                    )}
                   </div>
                 </div>
 

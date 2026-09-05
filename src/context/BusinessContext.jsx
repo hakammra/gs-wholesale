@@ -39,6 +39,37 @@ const INITIAL_BRANDS = [];
 
 const INITIAL_BANK_ACCOUNTS = [];
 
+const calculateWacOnReceipt = (currentQty, currentWac, receivedQty, receivedUnitCost) => {
+  const oldQty = Math.max(0, Number(currentQty) || 0);
+  const oldCost = Math.max(0, Number(currentWac) || 0);
+  const newQty = Math.max(0, Number(receivedQty) || 0);
+  const newCost = Math.max(0, Number(receivedUnitCost) || 0);
+  const totalQty = oldQty + newQty;
+  if (totalQty <= 0) return oldCost || newCost;
+  return ((oldQty * oldCost) + (newQty * newCost)) / totalQty;
+};
+
+// Revalue only the portion of an edited purchase that can still be in stock.
+// Any units already sold keep their historical sale-cost snapshot.
+const calculateWacOnPurchaseEdit = (currentQty, currentWac, oldQty, oldCost, nextQty, nextCost) => {
+  const onHand = Math.max(0, Number(currentQty) || 0);
+  const oldPurchaseQty = Math.max(0, Number(oldQty) || 0);
+  const newPurchaseQty = Math.max(0, Number(nextQty) || 0);
+  const previousCost = Math.max(0, Number(oldCost) || 0);
+  const replacementCost = Math.max(0, Number(nextCost) || 0);
+  const quantityDelta = newPurchaseQty - oldPurchaseQty;
+  const resultingQty = onHand + quantityDelta;
+  if (resultingQty <= 0) return replacementCost || Number(currentWac) || 0;
+
+  const commonQtyStillOnHand = Math.min(onHand, oldPurchaseQty, newPurchaseQty);
+  const costCorrection = commonQtyStillOnHand * (replacementCost - previousCost);
+  const quantityValue = quantityDelta >= 0
+    ? quantityDelta * replacementCost
+    : quantityDelta * previousCost;
+  const resultingValue = Math.max(0, (onHand * (Number(currentWac) || 0)) + costCorrection + quantityValue);
+  return resultingValue / resultingQty;
+};
+
 export const generateUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     try { return crypto.randomUUID(); } catch (e) {}
@@ -193,9 +224,10 @@ export function BusinessProvider({ children }) {
                 ? { qty: acc.qty + qty, cost: acc.cost + (qty * cost), last: cost }
                 : acc;
             }, { qty: 0, cost: 0, last: Number(remoteProduct.last_landed_cost_lkr) || 0 });
-            const weightedCost = totals.qty > 0
-              ? totals.cost / totals.qty
-              : Number(remoteProduct.weighted_cost_lkr) || 0;
+            const storedWeightedCost = Number(remoteProduct.weighted_cost_lkr) || 0;
+            const weightedCost = storedWeightedCost > 0
+              ? storedWeightedCost
+              : totals.qty > 0 ? totals.cost / totals.qty : 0;
             return {
               ...remoteProduct,
               weighted_cost_lkr: Number(weightedCost.toFixed(2)),
@@ -297,6 +329,10 @@ export function BusinessProvider({ children }) {
             .filter(shipment => !shipment.shipment_no?.startsWith('DIR-TRN-') && !shipment.notes?.includes('Direct purchase companion'))
             .map(shipment => ({
               ...shipment,
+              estimated_landed_expenses_lkr: Math.max(0,
+                (Number(shipment.total_estimated_cost_lkr) || 0) -
+                ((Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1))
+              ),
               status: shipment.status === 'preparing'
                 ? 'draft'
                 : (shipment.status === 'received' || receivedTransitIds.has(shipment.id) ? 'arrived' : shipment.status),
@@ -1595,6 +1631,7 @@ export function BusinessProvider({ children }) {
     const foreignSubtotal = (shipmentData.items || []).reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
     const rate = Number(shipmentData.exchange_rate_snapshot) || 305.5;
     const lkrFob = foreignSubtotal * rate;
+    const estimatedLandedExpenses = Math.max(0, Number(shipmentData.estimated_landed_expenses_lkr) || 0);
     const isDraft = shipmentData.status === 'draft';
     const trnId = shipmentData.id || generateUUID();
 
@@ -1605,10 +1642,11 @@ export function BusinessProvider({ children }) {
       status: isDraft ? 'draft' : (shipmentData.status || 'in_transit'),
       foreign_items_subtotal: foreignSubtotal,
       total_landed_expenses_lkr: 0,
-      total_estimated_cost_lkr: lkrFob,
+      total_estimated_cost_lkr: lkrFob + estimatedLandedExpenses,
       landed_expenses: [],
       items: (shipmentData.items || []).map(it => ({
         ...it,
+        id: isValidUUID(it.id) ? it.id : generateUUID(),
         shipped_qty: Number(it.shipped_qty || it.qty) || 1,
         qty: Number(it.shipped_qty || it.qty) || 1,
         foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0,
@@ -1638,18 +1676,20 @@ export function BusinessProvider({ children }) {
       exchange_rate_snapshot: rate,
       foreign_items_subtotal: foreignSubtotal,
       total_landed_expenses_lkr: 0,
-      total_estimated_cost_lkr: lkrFob,
+      total_estimated_cost_lkr: lkrFob + estimatedLandedExpenses,
       payment_type: shipmentData.payment_type || 'credit',
       status: isDraft ? 'preparing' : 'in_transit',
       notes: shipmentData.notes || null
     }));
 
     const transitItems = newShp.items.map(item => ({
-      id: generateUUID(),
+      id: item.id,
       transit_shipment_id: trnId,
       product_id: item.product_id || item.id,
       shipped_qty: Number(item.shipped_qty || item.qty) || 1,
       foreign_unit_cost: Number(item.foreign_unit_cost || item.unit_cost) || 0,
+      allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
+      final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr) || 0,
       weight_kg: Number(item.weight_kg) || 0,
       volume_cbm: Number(item.volume_cbm) || 0
     })).filter(item => isValidUUID(item.product_id));
@@ -1766,19 +1806,27 @@ export function BusinessProvider({ children }) {
     const rate = Number(updatedData.exchange_rate_snapshot || existingShp.exchange_rate_snapshot) || 1.0;
     const foreignSubtotal = newItems.reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
     const lkrFob = foreignSubtotal * rate;
-    const totalExpenses = existingShp.total_landed_expenses_lkr || 0;
-    const totalCostLkr = lkrFob + totalExpenses;
+    const estimatedLandedExpenses = Math.max(0, Number(
+      updatedData.estimated_landed_expenses_lkr ?? existingShp.estimated_landed_expenses_lkr ??
+      ((Number(existingShp.total_estimated_cost_lkr) || 0) - ((Number(existingShp.foreign_items_subtotal) || 0) * (Number(existingShp.exchange_rate_snapshot) || 1)))
+    ) || 0);
+    const totalCostLkr = lkrFob + estimatedLandedExpenses;
+    const actualLandedExpenses = Math.max(0, Number(existingShp.total_landed_expenses_lkr) || 0);
 
     const formattedItems = newItems.map(it => {
       const shippedQty = Number(it.shipped_qty || it.qty) || 1;
       const unitCost = Number(it.foreign_unit_cost || it.unit_cost) || 0;
+      const valueRatio = foreignSubtotal > 0 ? (shippedQty * unitCost) / foreignSubtotal : 0;
+      const allocatedPerUnit = actualLandedExpenses > 0 ? (actualLandedExpenses * valueRatio) / shippedQty : 0;
       return {
         ...it,
+        id: isValidUUID(it.id) ? it.id : generateUUID(),
         shipped_qty: shippedQty,
         qty: shippedQty,
         foreign_unit_cost: unitCost,
         unit_cost: unitCost,
-        final_landed_unit_cost_lkr: (unitCost * rate) + (Number(it.allocated_landed_lkr_per_unit) || 0)
+        allocated_landed_lkr_per_unit: allocatedPerUnit,
+        final_landed_unit_cost_lkr: (unitCost * rate) + allocatedPerUnit
       };
     });
 
@@ -1793,6 +1841,7 @@ export function BusinessProvider({ children }) {
       shipment_no: existingShp.shipment_no,
       status: newStatus,
       foreign_items_subtotal: foreignSubtotal,
+      estimated_landed_expenses_lkr: estimatedLandedExpenses,
       total_estimated_cost_lkr: totalCostLkr,
       items: formattedItems,
       updated_at: new Date().toISOString()
@@ -1875,11 +1924,13 @@ export function BusinessProvider({ children }) {
 
     await runCloudWrite('Replacing transit shipment items', () => supabase.from('transit_shipment_items').delete().eq('transit_shipment_id', shipmentId));
     const cloudItems = formattedItems.map(item => ({
-      id: generateUUID(),
+      id: item.id,
       transit_shipment_id: shipmentId,
       product_id: item.product_id,
       shipped_qty: Number(item.shipped_qty) || 0,
       foreign_unit_cost: Number(item.foreign_unit_cost) || 0,
+      allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
+      final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr) || 0,
       weight_kg: Number(item.weight_kg) || 0,
       volume_cbm: Number(item.volume_cbm) || 0
     })).filter(item => isValidUUID(item.product_id) && item.shipped_qty > 0);
@@ -1906,10 +1957,10 @@ export function BusinessProvider({ children }) {
     const oldSupplierId = existingShp.supplier_id;
     const nextSupplierId = updatedShipment.supplier_id;
     const oldPayable = oldWasActive && (existingShp.payment_type || 'credit') === 'credit'
-      ? Number(existingShp.total_estimated_cost_lkr || existingShp.foreign_items_subtotal) || 0
+      ? (Number(existingShp.foreign_items_subtotal) || 0) * (Number(existingShp.exchange_rate_snapshot) || 1)
       : 0;
     const nextPayable = newIsActive && (updatedShipment.payment_type || 'credit') === 'credit'
-      ? totalCostLkr
+      ? lkrFob
       : 0;
     if (oldSupplierId === nextSupplierId) {
       await adjustSupplierBalance('Updating supplier payable', nextSupplierId, nextPayable - oldPayable, 0);
@@ -1947,7 +1998,6 @@ export function BusinessProvider({ children }) {
     };
     const updatedExpenses = [...(shipment.landed_expenses || []), newExpense];
     const totalLandedExpenses = updatedExpenses.reduce((sum, expense) => sum + (Number(expense.lkr_amount ?? expense.amount_lkr) || 0), 0);
-    const totalCostLkr = (Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1) + totalLandedExpenses;
     const totalForeignValue = (shipment.items || []).reduce((sum, item) => sum + ((Number(item.shipped_qty) || 0) * (Number(item.foreign_unit_cost) || 0)), 0) || 1;
     const updatedItems = (shipment.items || []).map(item => {
       const ratio = ((Number(item.shipped_qty) || 0) * (Number(item.foreign_unit_cost) || 0)) / totalForeignValue;
@@ -1978,7 +2028,6 @@ export function BusinessProvider({ children }) {
     }));
     await runCloudWrite('Updating landed shipment totals', () => supabase.from('transit_shipments').update({
       total_landed_expenses_lkr: totalLandedExpenses,
-      total_estimated_cost_lkr: totalCostLkr,
       updated_at: new Date().toISOString()
     }).eq('id', shipmentId));
 
@@ -2044,11 +2093,34 @@ export function BusinessProvider({ children }) {
       await adjustBankBalance('Updating bank balance', bankAccount.id, -expenseLkr);
     }
 
+    // Costs can arrive after the goods. Revalue the linked purchase and current
+    // on-hand inventory without adding the received quantities a second time.
+    const linkedPurchase = purchases.find(purchase => purchase.transit_shipment_id === shipmentId && purchase.status !== 'draft');
+    if (linkedPurchase) {
+      const adjustedPurchaseItems = (linkedPurchase.items || []).map(purchaseItem => {
+        const shipmentItem = updatedItems.find(item =>
+          item.id === purchaseItem.transit_shipment_item_id || item.product_id === purchaseItem.product_id
+        );
+        if (!shipmentItem) return purchaseItem;
+        return {
+          ...purchaseItem,
+          foreign_unit_cost: Number(shipmentItem.foreign_unit_cost) || 0,
+          allocated_landed_lkr_per_unit: Number(shipmentItem.allocated_landed_lkr_per_unit) || 0,
+          unit_cost_lkr: Number(shipmentItem.final_landed_unit_cost_lkr) || 0,
+          final_landed_unit_cost_lkr: Number(shipmentItem.final_landed_unit_cost_lkr) || 0
+        };
+      });
+      await updatePurchaseDocument(linkedPurchase.id, {
+        ...linkedPurchase,
+        items: adjustedPurchaseItems,
+        notes: linkedPurchase.notes
+      });
+    }
+
     setTransitShipments(prev => prev.map(item => item.id === shipmentId ? {
       ...item,
       landed_expenses: updatedExpenses,
       total_landed_expenses_lkr: totalLandedExpenses,
-      total_estimated_cost_lkr: totalCostLkr,
       items: updatedItems
     } : item));
 
@@ -2065,8 +2137,8 @@ export function BusinessProvider({ children }) {
     for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing transit payment');
 
     if (shp.status === 'in_transit' && shp.payment_type === 'credit' && shp.supplier_id) {
-      const totalCost = Number(shp.total_estimated_cost_lkr || shp.foreign_items_subtotal) || 0;
-      await adjustSupplierBalance('Reversing transit supplier payable', shp.supplier_id, -totalCost, 0);
+      const goodsPayable = (Number(shp.foreign_items_subtotal) || 0) * (Number(shp.exchange_rate_snapshot) || 1);
+      await adjustSupplierBalance('Reversing transit supplier payable', shp.supplier_id, -goodsPayable, 0);
     }
 
     if (shp.status === 'in_transit') {
@@ -2126,8 +2198,12 @@ export function BusinessProvider({ children }) {
 
     const rawItems = receiptData.items || (shp?.items || []);
     const items = rawItems.map(it => {
-      const unitCost = Number(it.foreign_unit_cost || it.unit_cost || it.final_landed_unit_cost_lkr || it.unit_cost_lkr) || 0;
-      const shippedQty = Number(it.shipped_qty || it.received_sellable_qty || it.qty) || 1;
+      const unitCost = Number(
+        it.final_landed_unit_cost_lkr || it.unit_cost_lkr ||
+        ((Number(it.foreign_unit_cost || it.unit_cost) || 0) * (Number(shp?.exchange_rate_snapshot) || 1))
+      ) || 0;
+      const shippedQty = Number(it.shipped_qty || it.qty || it.received_sellable_qty) || 1;
+      const receivedQty = it.received_sellable_qty == null ? shippedQty : Math.max(0, Number(it.received_sellable_qty) || 0);
       const pObj = it.product || products.find(p => p.id === (it.product_id || it.id));
       return {
         ...it,
@@ -2136,12 +2212,12 @@ export function BusinessProvider({ children }) {
         item_code: pObj?.item_code || it.item_code || '',
         product: pObj || it.product,
         shipped_qty: shippedQty,
-        received_sellable_qty: shippedQty,
+        received_sellable_qty: receivedQty,
         damaged_qty: Number(it.damaged_qty) || 0,
         missing_qty: Number(it.missing_qty) || 0,
         unit_cost_lkr: unitCost,
         final_landed_unit_cost_lkr: unitCost,
-        line_total_lkr: shippedQty * unitCost
+        line_total_lkr: receivedQty * unitCost
       };
     });
 
@@ -2150,6 +2226,11 @@ export function BusinessProvider({ children }) {
       const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr) || 0;
       return sum + (qty * cost);
     }, 0);
+    const receiptExchangeRate = Number(shp?.exchange_rate_snapshot || receiptData.exchange_rate_snapshot) || 1;
+    const goodsItemsLkr = items.reduce((sum, item) => (
+      sum + ((Number(item.received_sellable_qty) || 0) * (Number(item.foreign_unit_cost) || 0) * receiptExchangeRate)
+    ), 0);
+    const allocatedLandedLkr = Math.max(0, totalLandedLkr - goodsItemsLkr);
 
     const supId = receiptData.supplier_id || shp?.supplier_id;
     const supplier = suppliers.find(s => s.id === supId);
@@ -2169,12 +2250,30 @@ export function BusinessProvider({ children }) {
       currency: 'LKR',
       total_amount_lkr: totalLandedLkr,
       total_landed_lkr: totalLandedLkr,
+      items_lkr_total: goodsItemsLkr,
+      landed_expenses_lkr_total: allocatedLandedLkr,
       payment_type: receiptData.payment_type || shp?.payment_type || 'credit',
       payment_details: receiptData.payment_details || shp?.payment_details || null,
       notes: receiptData.notes || shp?.notes || (isDirect ? (isDraft ? 'Draft Purchase Document' : 'Direct Purchase Document') : 'Arrived from Stock in Transit and converted to Purchase Document'),
       items: items,
       created_at: new Date().toISOString()
     };
+
+    const receivedCostUpdates = isDraft ? [] : items.map(receivedItem => {
+      const product = products.find(item => item.id === receivedItem.product_id);
+      if (!product || !isValidUUID(product.id)) return null;
+      const receivedQty = Number(receivedItem.received_sellable_qty) || 0;
+      const receivedUnitCost = Number(receivedItem.final_landed_unit_cost_lkr || receivedItem.unit_cost_lkr) || 0;
+      const currentQty = Number(stockBalances[product.id]?.qty_on_hand) || 0;
+      const currentWac = Number(product.weighted_cost_lkr || product.cost_price || product.cost) || 0;
+      const nextWac = calculateWacOnReceipt(currentQty, currentWac, receivedQty, receivedUnitCost);
+      return {
+        productId: product.id,
+        weightedCost: Number(nextWac.toFixed(4)),
+        landedCost: Number(receivedUnitCost.toFixed(4)),
+        foreignCost: Number(receivedItem.foreign_unit_cost || receivedUnitCost) || 0
+      };
+    }).filter(Boolean);
 
     setPurchases(prev => [newPurchaseDoc, ...prev]);
 
@@ -2183,29 +2282,15 @@ export function BusinessProvider({ children }) {
       // Recalculate Weighted Average Cost (WAC) & Last Landed Cost for each product
       setProducts(prevProducts => {
         return prevProducts.map(p => {
-          const receivedItem = items.find(it => it.product_id === p.id);
-          if (!receivedItem) return p;
-
-          const currentStock = Number(stockBalances[p.id]?.qty_on_hand) || 0;
-          const currentWAC = Number(p.weighted_cost_lkr || p.cost_price || p.cost) || 0;
-          const receivedQty = Number(receivedItem.received_sellable_qty) || 0;
-          const receivedUnitCost = Number(receivedItem.final_landed_unit_cost_lkr || receivedItem.unit_cost_lkr || receivedItem.unit_cost) || 0;
-
-          let newWAC = receivedUnitCost;
-          if (currentStock > 0 && currentWAC > 0 && (currentStock + receivedQty > 0)) {
-            newWAC = ((currentStock * currentWAC) + (receivedQty * receivedUnitCost)) / (currentStock + receivedQty);
-          } else if (receivedUnitCost > 0) {
-            newWAC = receivedUnitCost;
-          } else if (currentWAC > 0) {
-            newWAC = currentWAC;
-          }
+          const costUpdate = receivedCostUpdates.find(item => item.productId === p.id);
+          if (!costUpdate) return p;
 
           return {
             ...p,
-            weighted_cost_lkr: Number(newWAC.toFixed(2)),
-            cost_price: Number(newWAC.toFixed(2)),
-            cost: Number(newWAC.toFixed(2)),
-            last_landed_cost_lkr: receivedUnitCost > 0 ? Number(receivedUnitCost.toFixed(2)) : (Number(p.last_landed_cost_lkr) || Number(newWAC.toFixed(2)))
+            weighted_cost_lkr: costUpdate.weightedCost,
+            cost_price: costUpdate.weightedCost,
+            cost: costUpdate.weightedCost,
+            last_landed_cost_lkr: costUpdate.landedCost || p.last_landed_cost_lkr
           };
         });
       });
@@ -2294,11 +2379,11 @@ export function BusinessProvider({ children }) {
             receipt_date: receiptDate,
             currency: 'LKR',
             exchange_rate_snapshot: 1,
-            foreign_subtotal: totalLandedLkr,
-            items_lkr_total: totalLandedLkr,
-            landed_expenses_lkr_total: 0,
+            foreign_subtotal: receiptExchangeRate === 1 ? goodsItemsLkr : (goodsItemsLkr / receiptExchangeRate),
+            items_lkr_total: goodsItemsLkr,
+            landed_expenses_lkr_total: allocatedLandedLkr,
             total_landed_lkr: totalLandedLkr,
-            supplier_goods_payable_lkr: totalLandedLkr,
+            supplier_goods_payable_lkr: goodsItemsLkr,
             payment_type: newPurchaseDoc.payment_type || 'credit',
             is_fully_received: !isDraft,
             notes: newPurchaseDoc.notes || null
@@ -2310,6 +2395,7 @@ export function BusinessProvider({ children }) {
               return {
                 id: generateUUID(),
                 purchase_receipt_id: purchaseId,
+                transit_shipment_item_id: isValidUUID(it.transit_shipment_item_id) ? it.transit_shipment_item_id : null,
                 product_id: it.product_id,
                 received_sellable_qty: Number(it.received_sellable_qty) || 0,
                 damaged_qty: Number(it.damaged_qty) || 0,
@@ -2342,6 +2428,18 @@ export function BusinessProvider({ children }) {
           }
         };
     await performSupabaseSync();
+
+    if (receivedCostUpdates.length) {
+      await runCloudBatch('Saving received weighted costs', receivedCostUpdates.map(update => (
+        supabase.from('products').update({
+          weighted_cost_lkr: update.weightedCost,
+          last_landed_cost_lkr: update.landedCost,
+          last_purchase_cost_foreign: update.foreignCost,
+          last_foreign_currency: newPurchaseDoc.currency || 'LKR',
+          updated_at: new Date().toISOString()
+        }).eq('id', update.productId)
+      )));
+    }
 
     // Transit credit was already recorded when the shipment was dispatched.
     // Only direct credit purchases create a new supplier payable at receiving.
@@ -2438,6 +2536,10 @@ export function BusinessProvider({ children }) {
     });
 
     const totalLandedLkr = newItems.reduce((sum, it) => sum + (it.received_sellable_qty * it.final_landed_unit_cost_lkr), 0);
+    const itemsLkrTotal = newItems.reduce((sum, item) => (
+      sum + ((Number(item.received_sellable_qty) || 0) * (Number(item.foreign_unit_cost) || 0))
+    ), 0);
+    const landedExpensesLkrTotal = Math.max(0, totalLandedLkr - itemsLkrTotal);
 
     const supId = updatedData.supplier_id || existingPur.supplier_id;
     const supplier = suppliers.find(s => s.id === supId);
@@ -2462,11 +2564,11 @@ export function BusinessProvider({ children }) {
       supplier_name: supplierName,
       total_amount_lkr: totalLandedLkr,
       total_landed_lkr: totalLandedLkr,
+      items_lkr_total: itemsLkrTotal,
+      landed_expenses_lkr_total: landedExpensesLkrTotal,
       items: newItems,
       updated_at: new Date().toISOString()
     };
-
-    setPurchases(prev => prev.map(p => p.id === purchaseId ? updatedPurchaseDoc : p));
 
     // Union of product IDs affected by this edit
     const allProductIds = Array.from(new Set([
@@ -2474,125 +2576,60 @@ export function BusinessProvider({ children }) {
       ...newItems.map(it => it.product_id)
     ]));
 
-    if (!wasDraft && !isNowDraft) {
-      // Step 1: Recalculate WAC & Product record for each affected product
-      setProducts(prevProducts => {
-        return prevProducts.map(p => {
-          if (!allProductIds.includes(p.id)) return p;
+    const purchaseCostUpdates = allProductIds.map(productId => {
+      const product = products.find(item => item.id === productId);
+      if (!product || !isValidUUID(productId)) return null;
+      const oldItem = oldItems.find(item => item.product_id === productId);
+      const nextItem = newItems.find(item => item.product_id === productId);
+      const oldQty = wasDraft ? 0 : Number(oldItem?.received_sellable_qty || oldItem?.shipped_qty || oldItem?.qty) || 0;
+      const nextQty = isNowDraft ? 0 : Number(nextItem?.received_sellable_qty || nextItem?.shipped_qty || nextItem?.qty) || 0;
+      const oldCost = Number(oldItem?.final_landed_unit_cost_lkr || oldItem?.unit_cost_lkr || oldItem?.unit_cost) || 0;
+      const nextCost = Number(nextItem?.final_landed_unit_cost_lkr || nextItem?.unit_cost_lkr || nextItem?.unit_cost) || 0;
+      const currentQty = Number(stockBalances[productId]?.qty_on_hand) || 0;
+      const resultingQty = currentQty + nextQty - oldQty;
+      if (resultingQty < 0) {
+        throw new Error(`Cannot reduce ${product.name} below stock already sold. Current stock is ${currentQty}.`);
+      }
+      const currentWac = Number(product.weighted_cost_lkr || product.cost_price || product.cost) || 0;
+      const nextWac = oldQty === 0
+        ? calculateWacOnReceipt(currentQty, currentWac, nextQty, nextCost)
+        : calculateWacOnPurchaseEdit(currentQty, currentWac, oldQty, oldCost, nextQty, nextCost);
+      return {
+        productId,
+        weightedCost: Number(nextWac.toFixed(4)),
+        landedCost: nextQty > 0 && nextCost > 0 ? Number(nextCost.toFixed(4)) : Number(product.last_landed_cost_lkr) || 0
+      };
+    }).filter(Boolean);
 
-          const oldIt = oldItems.find(it => it.product_id === p.id);
-          const newIt = newItems.find(it => it.product_id === p.id);
+    setPurchases(prev => prev.map(p => p.id === purchaseId ? updatedPurchaseDoc : p));
 
-          const oldQty = Number(oldIt?.received_sellable_qty || oldIt?.shipped_qty || oldIt?.qty) || 0;
-          const oldCost = Number(oldIt?.final_landed_unit_cost_lkr || oldIt?.unit_cost_lkr || oldIt?.unit_cost) || 0;
-
-          const newQty = Number(newIt?.received_sellable_qty || newIt?.shipped_qty || newIt?.qty) || 0;
-          const newCost = Number(newIt?.final_landed_unit_cost_lkr || newIt?.unit_cost_lkr || newIt?.unit_cost) || 0;
-
-          const currentStock = Number(stockBalances[p.id]?.qty_on_hand) || 0;
-          const currentWAC = Number(p.weighted_cost_lkr || p.cost_price || p.cost) || 0;
-          const currentValuation = currentStock * currentWAC;
-
-          // Strip old purchase contribution to find prior base
-          const baseStock = Math.max(0, currentStock - oldQty);
-          const baseValuation = Math.max(0, currentValuation - (oldQty * oldCost));
-
-          // Apply new purchase contribution
-          const resultingStock = baseStock + newQty;
-          const resultingValuation = baseValuation + (newQty * newCost);
-
-          let resultingWAC = newCost;
-          if (resultingStock > 0 && resultingValuation > 0) {
-            resultingWAC = resultingValuation / resultingStock;
-          } else if (newQty > 0 && newCost > 0) {
-            resultingWAC = newCost;
-          } else if (currentWAC > 0) {
-            resultingWAC = currentWAC;
-          }
-
-          return {
-            ...p,
-            weighted_cost_lkr: Number(resultingWAC.toFixed(2)),
-            cost_price: Number(resultingWAC.toFixed(2)),
-            cost: Number(resultingWAC.toFixed(2)),
-            last_landed_cost_lkr: newQty > 0 && newCost > 0 ? Number(newCost.toFixed(2)) : p.last_landed_cost_lkr
-          };
-        });
-      });
-
-      // Step 2: Update stockBalances accurately
-      setStockBalances(prev => {
-        const updated = { ...prev };
-        allProductIds.forEach(pId => {
-          const oldIt = oldItems.find(it => it.product_id === pId);
-          const newIt = newItems.find(it => it.product_id === pId);
-
-          const oldQty = Number(oldIt?.received_sellable_qty || oldIt?.shipped_qty || oldIt?.qty) || 0;
-          const newQty = Number(newIt?.received_sellable_qty || newIt?.shipped_qty || newIt?.qty) || 0;
-          const deltaQty = newQty - oldQty;
-
-          const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          updated[pId] = {
-            ...cur,
-            qty_on_hand: Math.max(0, (cur.qty_on_hand || 0) + deltaQty),
-            qty_available: Math.max(0, (cur.qty_available || 0) + deltaQty)
-          };
-        });
-        return updated;
-      });
-
-      // Step 3: Record adjustment movement
-      setStockMovements(prev => [{
-        id: 'mov-' + Date.now(),
-        date: updatedPurchaseDoc.receipt_date || new Date().toISOString().slice(0, 10),
-        type: 'purchase_edit',
-        doc_no: existingPur.doc_no,
-        reference: `Edited Purchase Document ${existingPur.doc_no}`,
-        total_amount: totalLandedLkr,
-        items_count: newItems.length,
-        created_at: new Date().toISOString()
-      }, ...prev]);
-    } else if (wasDraft && !isNowDraft) {
-      // Promoting from draft to received!
-      setProducts(prevProducts => {
-        return prevProducts.map(p => {
-          const newIt = newItems.find(it => it.product_id === p.id);
-          if (!newIt) return p;
-
-          const currentStock = Number(stockBalances[p.id]?.qty_on_hand) || 0;
-          const currentWAC = Number(p.weighted_cost_lkr || p.cost_price || p.cost) || 0;
-          const receivedQty = Number(newIt.received_sellable_qty) || 0;
-          const receivedUnitCost = Number(newIt.final_landed_unit_cost_lkr || newIt.unit_cost_lkr || newIt.unit_cost) || 0;
-
-          let newWAC = receivedUnitCost;
-          if (currentStock > 0 && currentWAC > 0 && (currentStock + receivedQty > 0)) {
-            newWAC = ((currentStock * currentWAC) + (receivedQty * receivedUnitCost)) / (currentStock + receivedQty);
-          } else if (receivedUnitCost > 0) {
-            newWAC = receivedUnitCost;
-          } else if (currentWAC > 0) {
-            newWAC = currentWAC;
-          }
-
-          return {
-            ...p,
-            weighted_cost_lkr: Number(newWAC.toFixed(2)),
-            cost_price: Number(newWAC.toFixed(2)),
-            cost: Number(newWAC.toFixed(2)),
-            last_landed_cost_lkr: receivedUnitCost > 0 ? Number(receivedUnitCost.toFixed(2)) : (Number(p.last_landed_cost_lkr) || Number(newWAC.toFixed(2)))
-          };
-        });
-      });
+    if (!wasDraft || !isNowDraft) {
+      setProducts(prev => prev.map(product => {
+        const update = purchaseCostUpdates.find(item => item.productId === product.id);
+        return update ? {
+          ...product,
+          weighted_cost_lkr: update.weightedCost,
+          cost_price: update.weightedCost,
+          cost: update.weightedCost,
+          last_landed_cost_lkr: update.landedCost
+        } : product;
+      }));
 
       setStockBalances(prev => {
         const updated = { ...prev };
-        newItems.forEach(it => {
-          const pId = it.product_id;
-          const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          const sellable = Number(it.received_sellable_qty) || 0;
-          updated[pId] = {
-            ...cur,
-            qty_on_hand: (cur.qty_on_hand || 0) + sellable,
-            qty_available: (cur.qty_available || 0) + sellable
+        allProductIds.forEach(productId => {
+          const oldItem = oldItems.find(item => item.product_id === productId);
+          const nextItem = newItems.find(item => item.product_id === productId);
+          const oldQty = wasDraft ? 0 : Number(oldItem?.received_sellable_qty || oldItem?.shipped_qty || oldItem?.qty) || 0;
+          const nextQty = isNowDraft ? 0 : Number(nextItem?.received_sellable_qty || nextItem?.shipped_qty || nextItem?.qty) || 0;
+          const oldDamaged = wasDraft ? 0 : Number(oldItem?.damaged_qty) || 0;
+          const nextDamaged = isNowDraft ? 0 : Number(nextItem?.damaged_qty) || 0;
+          const current = updated[productId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          updated[productId] = {
+            ...current,
+            qty_on_hand: Math.max(0, (Number(current.qty_on_hand) || 0) + nextQty - oldQty),
+            qty_available: Math.max(0, (Number(current.qty_available) || 0) + nextQty - oldQty),
+            qty_damaged: Math.max(0, (Number(current.qty_damaged) || 0) + nextDamaged - oldDamaged)
           };
         });
         return updated;
@@ -2601,9 +2638,11 @@ export function BusinessProvider({ children }) {
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
         date: updatedPurchaseDoc.receipt_date || new Date().toISOString().slice(0, 10),
-        type: 'purchase_in',
+        type: wasDraft && !isNowDraft ? 'purchase_in' : 'purchase_edit',
         doc_no: existingPur.doc_no,
-        reference: `Promoted Draft to Purchase Document ${existingPur.doc_no}`,
+        reference: wasDraft && !isNowDraft
+          ? `Promoted Draft to Purchase Document ${existingPur.doc_no}`
+          : `Edited Purchase Document ${existingPur.doc_no}`,
         total_amount: totalLandedLkr,
         items_count: newItems.length,
         created_at: new Date().toISOString()
@@ -2614,8 +2653,11 @@ export function BusinessProvider({ children }) {
     await runCloudWrite('Updating purchase receipt', () => supabase.from('purchase_receipts').update({
       supplier_id: isValidUUID(supId) ? supId : existingPur.supplier_id,
       is_fully_received: updatedPurchaseDoc.status !== 'draft',
+      foreign_subtotal: itemsLkrTotal,
+      items_lkr_total: itemsLkrTotal,
+      landed_expenses_lkr_total: landedExpensesLkrTotal,
       total_landed_lkr: totalLandedLkr,
-      supplier_goods_payable_lkr: totalLandedLkr,
+      supplier_goods_payable_lkr: isDirectPurchase ? totalLandedLkr : itemsLkrTotal,
       payment_type: updatedPurchaseDoc.payment_type || existingPur.payment_type || 'credit',
       receipt_date: updatedPurchaseDoc.receipt_date,
       notes: updatedPurchaseDoc.notes
@@ -2627,6 +2669,7 @@ export function BusinessProvider({ children }) {
       .map(item => ({
         id: generateUUID(),
         purchase_receipt_id: purchaseId,
+        transit_shipment_item_id: isValidUUID(item.transit_shipment_item_id) ? item.transit_shipment_item_id : null,
         product_id: item.product_id,
         received_sellable_qty: Number(item.received_sellable_qty) || 0,
         damaged_qty: Number(item.damaged_qty) || 0,
@@ -2658,6 +2701,16 @@ export function BusinessProvider({ children }) {
       });
     if (purchaseStockWrites.length) await runCloudBatch('Updating edited purchase inventory', purchaseStockWrites);
 
+    if (purchaseCostUpdates.length && (!wasDraft || !isNowDraft)) {
+      await runCloudBatch('Saving edited weighted costs', purchaseCostUpdates.map(update => (
+        supabase.from('products').update({
+          weighted_cost_lkr: update.weightedCost,
+          last_landed_cost_lkr: update.landedCost,
+          updated_at: new Date().toISOString()
+        }).eq('id', update.productId)
+      )));
+    }
+
     if (isDirectPurchase) {
       const oldSupplierId = existingPur.supplier_id;
       const nextSupplierId = updatedPurchaseDoc.supplier_id;
@@ -2682,6 +2735,23 @@ export function BusinessProvider({ children }) {
   const deletePurchaseDocument = async (purchaseId) => {
     const pur = purchases.find(p => p.id === purchaseId);
     if (!pur) return;
+
+    const deletionCostUpdates = pur.status === 'draft' ? [] : (pur.items || []).map(item => {
+      const product = products.find(entry => entry.id === item.product_id);
+      if (!product || !isValidUUID(product.id)) return null;
+      const purchaseQty = Number(item.received_sellable_qty || item.shipped_qty || item.qty) || 0;
+      const currentQty = Number(stockBalances[product.id]?.qty_on_hand) || 0;
+      if (currentQty < purchaseQty) {
+        throw new Error(`Cannot delete ${pur.doc_no}: ${product.name} has already been sold. Edit the document instead.`);
+      }
+      const purchaseCost = Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr || item.unit_cost) || 0;
+      const currentWac = Number(product.weighted_cost_lkr || product.cost_price || product.cost) || 0;
+      const remainingQty = currentQty - purchaseQty;
+      const nextWac = remainingQty > 0
+        ? calculateWacOnPurchaseEdit(currentQty, currentWac, purchaseQty, purchaseCost, 0, 0)
+        : currentWac;
+      return { productId: product.id, weightedCost: Number(nextWac.toFixed(4)) };
+    }).filter(Boolean);
 
     const linkedPayments = payments.filter(payment => payment.purchase_id === purchaseId || payment.reference === pur.doc_no || payment.reference === pur.grn_no);
     for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing purchase payment');
@@ -2712,6 +2782,14 @@ export function BusinessProvider({ children }) {
           });
         });
       if (stockReversals.length) await runCloudBatch('Reversing received inventory', stockReversals);
+      if (deletionCostUpdates.length) {
+        await runCloudBatch('Saving reversed weighted costs', deletionCostUpdates.map(update => (
+          supabase.from('products').update({
+            weighted_cost_lkr: update.weightedCost,
+            updated_at: new Date().toISOString()
+          }).eq('id', update.productId)
+        )));
+      }
       if (restoreToTransit) {
         await runCloudWrite('Restoring shipment to transit', () => supabase.from('transit_shipments').update({
           status: 'in_transit',
@@ -2742,30 +2820,14 @@ export function BusinessProvider({ children }) {
         return updated;
       });
 
-      // 3. Recalculate WAC from remaining purchase documents
-      const remainingPurchases = purchases.filter(p => p.id !== purchaseId && p.status !== 'draft');
-      setProducts(prev => prev.map(prod => {
-        const prodPurchases = remainingPurchases.flatMap(p => (p.items || []).filter(it => it.product_id === prod.id));
-        let totalQty = 0;
-        let totalCost = 0;
-        let lastCost = 0;
-        prodPurchases.forEach(it => {
-          const q = Number(it.received_sellable_qty || it.shipped_qty || it.qty) || 0;
-          const c = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr || it.unit_cost) || 0;
-          if (q > 0 && c > 0) {
-            totalQty += q;
-            totalCost += (q * c);
-            lastCost = c;
-          }
-        });
-        const newWAC = totalQty > 0 ? (totalCost / totalQty) : (Number(prod.cost_price) || 0);
-        return {
-          ...prod,
-          weighted_cost_lkr: Number(newWAC.toFixed(2)),
-          cost_price: Number(newWAC.toFixed(2)),
-          cost: Number(newWAC.toFixed(2)),
-          last_landed_cost_lkr: lastCost > 0 ? Number(lastCost.toFixed(2)) : prod.last_landed_cost_lkr
-        };
+      setProducts(prev => prev.map(product => {
+        const update = deletionCostUpdates.find(item => item.productId === product.id);
+        return update ? {
+          ...product,
+          weighted_cost_lkr: update.weightedCost,
+          cost_price: update.weightedCost,
+          cost: update.weightedCost
+        } : product;
       }));
 
     }
