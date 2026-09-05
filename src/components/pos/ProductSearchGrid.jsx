@@ -200,7 +200,8 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           const stock = stockBalances[p.id] || { qty_available: 0, qty_in_transit: 0 };
           const price = calculateWholesaleItemPrice(p, 1, customer);
           const hasAvailable = (stock.qty_available || 0) > 0;
-          const hasTransit = (stock.qty_in_transit || 0) > 0;
+          const incomingAvailable = Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0));
+          const hasTransit = incomingAvailable > 0;
           const catPath = getCategoryPath ? getCategoryPath(p.category_id) : '';
 
           return (
@@ -235,8 +236,8 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
                     style={{ color: hasAvailable ? '#52e37e' : (hasTransit ? '#ffca58' : '#ef4444') }}
                   >
                     {hasAvailable
-                      ? `● ${stock.qty_available} Avail${hasTransit ? ` (+${stock.qty_in_transit} transit)` : ''}`
-                      : (hasTransit ? `● ${stock.qty_in_transit} In Transit` : '● Out of Stock')}
+                      ? `● ${stock.qty_available} Avail${hasTransit ? ` (+${incomingAvailable} transit)` : ''}`
+                      : (hasTransit ? `● ${incomingAvailable} Transit Available` : '● Out of Stock')}
                   </span>
 
                   <div style={{ display: 'flex', gap: 4 }}>

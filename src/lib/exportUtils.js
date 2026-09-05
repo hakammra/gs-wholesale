@@ -105,6 +105,29 @@ export function buildWhatsAppInvoiceMessage(doc, businessName = 'GS WHOLESALE') 
   ].filter(Boolean).join('\n');
 }
 
+export function buildWhatsAppReservationMessage(doc, businessName = 'GS WHOLESALE') {
+  const incomingQty = (doc.items || []).reduce(
+    (sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0),
+    0
+  );
+  return [
+    `*${businessName}*`,
+    `Reservation: ${doc.doc_no || '-'}`,
+    `Date: ${doc.doc_date || '-'}`,
+    `Customer: ${doc.customer_name || 'Valued Customer'}`,
+    `--------------------------------`,
+    `Reserved total: Rs. ${formatWhatsAppCurrency(doc.grand_total)}`,
+    `Advance paid: Rs. ${formatWhatsAppCurrency(doc.paid_amount)}`,
+    `Balance payable on sale: Rs. ${formatWhatsAppCurrency(doc.balance_due)}`,
+    incomingQty > 0
+      ? `Status: Waiting for ${Number(incomingQty).toLocaleString('en-LK', { maximumFractionDigits: 2 })} incoming unit${incomingQty === 1 ? '' : 's'}`
+      : `Status: Stock reserved and ready`,
+    `--------------------------------`,
+    `This is a reservation confirmation, not a sales invoice.`,
+    `The reservation PDF is attached.`
+  ].filter(Boolean).join('\n');
+}
+
 export function buildWhatsAppSettlementMessage(payment, businessName = 'GS WHOLESALE') {
   const isCheque = payment.payment_method === 'cheque';
   return [

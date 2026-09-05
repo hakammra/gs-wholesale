@@ -40,6 +40,7 @@ export const resolveItemCode = (it, products = []) => {
 export function generateInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4', products = [], options = {}) {
   const docConfig = paperSize === 'A5' ? { orientation: 'landscape', format: 'a5' } : { orientation: 'portrait', format: 'a4' };
   const pdf = new jsPDF(docConfig);
+  const isReservation = doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order' || doc.status === 'reserved';
 
   const businessName = companySettings.business_name || 'Gatronix Store - Wholesale';
   const addressLine1 = companySettings.address_line1 || '43/H1, Kandy Road';
@@ -60,7 +61,7 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
 
   const docTitle = doc.doc_type === 'quotation'
     ? 'WHOLESALE QUOTATION'
-    : (doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order' || doc.status === 'reserved')
+    : isReservation
       ? 'WHOLESALE RESERVATION'
       : (companySettings.doc_title || 'WHOLESALE INVOICE');
 
@@ -106,7 +107,7 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(9.5);
   pdf.setTextColor(20, 20, 20);
-  pdf.text('Bill to', margin, metaY);
+  pdf.text(isReservation ? 'Reserved for' : 'Bill to', margin, metaY);
 
   pdf.setFont('helvetica', 'normal');
   pdf.setFontSize(9.5);
@@ -128,15 +129,19 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.setFontSize(9);
   pdf.setTextColor(40, 40, 40);
 
-  pdf.text('Invoice No.:', metaColLabelX, metaY);
+  pdf.text(isReservation ? 'Reservation No.:' : 'Invoice No.:', metaColLabelX, metaY);
   pdf.setFont('helvetica', 'normal');
   pdf.text(doc.doc_no || '-', metaColValX, metaY);
 
   pdf.text('Date:', metaColLabelX, metaY + 5);
   pdf.text(formatBillDate(doc.doc_date), metaColValX, metaY + 5);
 
-  pdf.text('Due date:', metaColLabelX, metaY + 10);
-  pdf.text(formatBillDate(doc.due_date || doc.doc_date), metaColValX, metaY + 10);
+  pdf.text(isReservation ? 'Stock source:' : 'Due date:', metaColLabelX, metaY + 10);
+  pdf.text(
+    isReservation ? (doc.reservation_source === 'incoming' ? 'Wait for transit' : 'Current stock') : formatBillDate(doc.due_date || doc.doc_date),
+    metaColValX,
+    metaY + 10
+  );
 
   pdf.text('Payment status:', metaColLabelX, metaY + 15);
   const statusStr = (doc.status === 'reserved' || doc.payment_status === 'reserved')
@@ -238,7 +243,7 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.text('Payment method:', payBlockX, afterTableY);
 
   // Method label: Credit / Cash / Bank / Cheque / COD
-  let methodLabel = 'Credit:';
+  let methodLabel = isReservation ? 'No advance:' : 'Credit:';
   if (doc.payment_lines && doc.payment_lines.length > 0) {
     const m = doc.payment_lines[0].method;
     methodLabel = m === 'cash' ? 'Cash:' : m === 'bank' ? 'Bank:' : m === 'cheque' ? 'Cheque:' : m === 'cod' ? 'COD (Cash on Delivery):' : 'Credit:';
@@ -252,11 +257,11 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.text(methodLabel, payBlockX, afterTableY + 6);
   pdf.text(fmtRs(grandTotal), payValX, afterTableY + 6, { align: 'right' });
 
-  pdf.text('Paid amount:', payBlockX, afterTableY + 12);
+  pdf.text(isReservation ? 'Advance paid:' : 'Paid amount:', payBlockX, afterTableY + 12);
   pdf.text(fmtRs(paidAmount), payValX, afterTableY + 12, { align: 'right' });
 
   pdf.setFont('helvetica', 'bold');
-  pdf.text('Amount due:', payBlockX, afterTableY + 18);
+  pdf.text(isReservation ? 'Balance on sale:' : 'Amount due:', payBlockX, afterTableY + 18);
   pdf.text(fmtRs(amountDue), payValX, afterTableY + 18, { align: 'right' });
 
   // Divider line
@@ -274,10 +279,10 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
           ? doc.customer.current_receivable
           : 0
   );
-  const outstandingBal = Math.max(rawCustomerBal, amountDue);
+  const outstandingBal = isReservation ? rawCustomerBal : Math.max(rawCustomerBal, amountDue);
 
   pdf.setFont('helvetica', 'normal');
-  pdf.text('Outstanding balance:', payBlockX, afterTableY + 28);
+  pdf.text(isReservation ? 'Customer account balance:' : 'Outstanding balance:', payBlockX, afterTableY + 28);
   pdf.setFont('helvetica', 'bold');
   pdf.text(fmtRs(outstandingBal), payValX, afterTableY + 28, { align: 'right' });
 
@@ -597,6 +602,7 @@ function triggerBrowserPrint(htmlContent, title = 'Document') {
 }
 
 export function printInvoiceDocument(doc, companySettings = {}, customer = null, paperSize = 'A4', products = []) {
+  const isReservation = doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order' || doc.status === 'reserved';
   const businessName = companySettings.business_name || 'Gatronix Store - Wholesale';
   const addressLine1 = companySettings.address_line1 || '43/H1, Kandy Road';
   const addressLine2 = companySettings.address_line2 || '20260 Madawala Bazaar';
@@ -619,11 +625,11 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
         ? customer.current_receivable
         : 0
   );
-  const outstandingBal = Math.max(rawCustomerBal, amountDue);
+  const outstandingBal = isReservation ? rawCustomerBal : Math.max(rawCustomerBal, amountDue);
 
   const docTitle = doc.doc_type === 'quotation'
     ? 'WHOLESALE QUOTATION'
-    : (doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order' || doc.status === 'reserved')
+    : isReservation
       ? 'WHOLESALE RESERVATION'
       : (companySettings.doc_title || 'WHOLESALE INVOICE');
 
@@ -635,7 +641,7 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
         ? 'Partial'
         : 'Unpaid';
 
-  let methodLabel = 'Credit';
+  let methodLabel = isReservation ? 'No advance' : 'Credit';
   if (doc.payment_lines && doc.payment_lines.length > 0) {
     const m = doc.payment_lines[0].method;
     methodLabel = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'cheque' ? 'Cheque' : m === 'cod' ? 'COD (Cash on Delivery)' : 'Credit';
@@ -722,16 +728,16 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
 
         <div class="meta-grid">
           <div class="meta-block">
-            <div class="meta-label">Bill To</div>
+            <div class="meta-label">${isReservation ? 'Reserved For' : 'Bill To'}</div>
             <div class="meta-val">${custName}</div>
             ${custAddr ? `<div class="meta-sub">${custAddr}</div>` : ''}
             ${custPhone ? `<div class="meta-sub">Tel: ${custPhone}</div>` : ''}
           </div>
           <div class="meta-block" style="text-align: right;">
-            <div class="meta-label">Invoice Details</div>
+            <div class="meta-label">${isReservation ? 'Reservation Details' : 'Invoice Details'}</div>
             <div class="meta-val">No: ${doc.doc_no || '-'}</div>
             <div class="meta-sub">Date: ${formatBillDate(doc.doc_date)}</div>
-            <div class="meta-sub">Due Date: ${formatBillDate(doc.due_date || doc.doc_date)}</div>
+            <div class="meta-sub">${isReservation ? `Stock Source: ${doc.reservation_source === 'incoming' ? 'Wait for transit' : 'Current stock'}` : `Due Date: ${formatBillDate(doc.due_date || doc.doc_date)}`}</div>
             <div class="meta-sub">Status: <strong>${statusStr}</strong></div>
           </div>
         </div>
@@ -765,15 +771,15 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
               <strong>${methodLabel}</strong>
             </div>
             <div class="summary-line">
-              <span>Paid Amount:</span>
+              <span>${isReservation ? 'Advance Paid:' : 'Paid Amount:'}</span>
               <span>${fmtRs(paidAmount)}</span>
             </div>
             <div class="summary-line total">
-              <span>Amount Due:</span>
+              <span>${isReservation ? 'Balance on Sale:' : 'Amount Due:'}</span>
               <span>${fmtRs(amountDue)}</span>
             </div>
             <div class="summary-line highlight" style="border-top: 1px dashed #ddd; margin-top: 4px; padding-top: 4px;">
-              <span>Total Customer Outstanding:</span>
+              <span>${isReservation ? 'Customer Account Balance:' : 'Total Customer Outstanding:'}</span>
               <span>${fmtRs(outstandingBal)}</span>
             </div>
           </div>

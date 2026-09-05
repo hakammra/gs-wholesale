@@ -3,7 +3,7 @@ import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, calculateWholesaleItemPrice, calculateDocumentTotals, formatDate } from '../../lib/formatters';
 import { createInvoicePDFFile, generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
-import { buildWhatsAppInvoiceMessage, shareWhatsAppContent } from '../../lib/exportUtils';
+import { buildWhatsAppInvoiceMessage, buildWhatsAppReservationMessage, shareWhatsAppContent } from '../../lib/exportUtils';
 import CustomerHeader from '../../components/pos/CustomerHeader';
 import ProductSearchGrid from '../../components/pos/ProductSearchGrid';
 import PosCart from '../../components/pos/PosCart';
@@ -58,13 +58,16 @@ export default function WholesalePOS() {
   // Modals
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [completedSaleDoc, setCompletedSaleDoc] = useState(null);
+  const [completedReservationDoc, setCompletedReservationDoc] = useState(null);
   const [isSharingInvoice, setIsSharingInvoice] = useState(false);
+  const [isSharingReservation, setIsSharingReservation] = useState(false);
   const [isMarginOverrideOpen, setIsMarginOverrideOpen] = useState(false);
   const [pendingLowMarginItems, setPendingLowMarginItems] = useState([]);
   const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState(false);
   const [isCreateReservationOpen, setIsCreateReservationOpen] = useState(false);
   const [reservationForm, setReservationForm] = useState({
+    reservation_source: 'on_hand',
     customer_name: '',
     customer_phone: '',
     advance_amount: '',
@@ -112,10 +115,40 @@ export default function WholesalePOS() {
     }
   };
 
+  const handleShareCompletedReservation = async () => {
+    if (!completedReservationDoc || isSharingReservation) return;
+    const phone = completedReservationDoc.customer?.whatsapp || completedReservationDoc.customer?.phone || completedReservationDoc.customer_phone;
+    if (!phone) {
+      notifyError('Add a WhatsApp or phone number for this customer first.');
+      return;
+    }
+    setIsSharingReservation(true);
+    try {
+      const file = createInvoicePDFFile(completedReservationDoc, companySettings, completedReservationDoc.customer, 'A4', products);
+      const result = await shareWhatsAppContent({
+        phone,
+        title: `Reservation ${completedReservationDoc.doc_no || ''}`.trim(),
+        text: buildWhatsAppReservationMessage(completedReservationDoc, companySettings.business_name),
+        file
+      });
+      if (result.method === 'download-and-whatsapp') {
+        notifySuccess('Reservation PDF downloaded. Attach it in the WhatsApp chat that just opened.');
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') notifyError(error.message || 'Could not share this reservation.');
+    } finally {
+      setIsSharingReservation(false);
+    }
+  };
+
   // Active Open Customer Reservations
   const openReservations = salesDocuments.filter(d =>
     (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') &&
     (d.status === 'reserved' || d.payment_status === 'reserved')
+  );
+  const getIncomingReservationQty = (document) => (document.items || []).reduce(
+    (sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0),
+    0
   );
 
   const handleQuickCash = () => {
@@ -265,38 +298,53 @@ export default function WholesalePOS() {
   };
 
   // Trigger Reserve Order Popup Modal
+  const buildReservationPlan = (source) => {
+    const pools = new Map();
+    let valid = true;
+    const plannedItems = currentTab.items.map(item => {
+      const productId = item.product?.id || item.product_id || item.id;
+      if (!pools.has(productId)) {
+        const stock = stockBalances[productId] || {};
+        pools.set(productId, {
+          onHand: Math.max(0, Number(stock.qty_available) || 0),
+          incoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
+        });
+      }
+      const pool = pools.get(productId);
+      const qty = Math.max(0, Number(item.qty) || 0);
+      let reservedInTransit = 0;
+      let reservedOnHand = qty;
+      if (source === 'incoming') {
+        reservedInTransit = Math.min(qty, pool.incoming);
+        reservedOnHand = qty - reservedInTransit;
+      }
+      if (reservedOnHand > pool.onHand || reservedInTransit > pool.incoming) valid = false;
+      pool.onHand = Math.max(0, pool.onHand - reservedOnHand);
+      pool.incoming = Math.max(0, pool.incoming - reservedInTransit);
+      return {
+        ...item,
+        reserved_on_hand_qty: reservedOnHand,
+        reserved_in_transit_qty: reservedInTransit
+      };
+    });
+    return { valid, items: plannedItems };
+  };
+
   const handleReserveBill = () => {
     if (currentTab.items.length === 0) {
       notifyWarning('Cannot reserve an empty bill. Add products first.');
       return;
     }
 
-    const hasOverLimit = currentTab.items.some(it => {
-      if (it.is_warranty_replacement) return false;
-      const p = it.product || it;
-      const pId = p?.id || it.product_id || it.id;
-      const sb = (pId && stockBalances[pId]) || {};
-      const onHand = Number(
-        sb.qty_on_hand !== undefined ? sb.qty_on_hand :
-        sb.qty_available !== undefined ? sb.qty_available :
-        p?.stock_quantity !== undefined ? p.stock_quantity :
-        p?.qty_on_hand !== undefined ? p.qty_on_hand :
-        0
-      );
-      const inTransit = Number(
-        sb.qty_in_transit !== undefined ? sb.qty_in_transit :
-        p?.qty_in_transit !== undefined ? p.qty_in_transit :
-        0
-      );
-      return Number(it.qty) > (onHand + inTransit);
-    });
-
-    if (hasOverLimit) {
-      notifyWarning('Cannot reserve: Quantity exceeds total available inventory (On-Hand + In-Transit). Please reduce quantity.');
+    const onHandPlan = buildReservationPlan('on_hand');
+    const incomingPlan = buildReservationPlan('incoming');
+    if (!onHandPlan.valid && !incomingPlan.valid) {
+      notifyWarning('Cannot reserve: quantity exceeds unreserved on-hand plus unreserved in-transit stock.');
       return;
     }
 
     setReservationForm({
+      reservation_source: onHandPlan.valid ? 'on_hand' : 'incoming',
       customer_name: currentTab.customer?.business_name || '',
       customer_phone: currentTab.customer?.phone || '',
       advance_amount: '',
@@ -338,12 +386,19 @@ export default function WholesalePOS() {
     }
 
     try {
+      const reservationPlan = buildReservationPlan(reservationForm.reservation_source);
+      if (!reservationPlan.valid) {
+        notifyWarning('Stock availability changed. Review the reservation source and quantities again.');
+        return;
+      }
       const docPayload = {
         doc_type: 'reserved_order',
+        reservation_source: reservationForm.reservation_source,
         customer_id: currentTab.customer?.id || null,
         customer_name: reservationForm.customer_name || currentTab.customer?.business_name || 'Customer Hold / Reserved',
         customer_phone: reservationForm.customer_phone || currentTab.customer?.phone || null,
-        items: currentTab.items,
+        customer: currentTab.customer || null,
+        items: reservationPlan.items,
         discount_amount: effectiveCartDiscount,
         advance_amount: advAmt,
         payment_lines: advAmt > 0 ? [{
@@ -368,7 +423,8 @@ export default function WholesalePOS() {
         notes: reservationForm.notes || `Stock hold reserved for ${reservationForm.customer_name || currentTab.customer?.business_name || 'Customer'}`
       };
 
-      await postSalesDocument(docPayload);
+      const postedReservation = await postSalesDocument(docPayload);
+      setCompletedReservationDoc(postedReservation);
 
       // Clear bill
       handleUpdateCurrentTab(tab => ({
@@ -389,6 +445,11 @@ export default function WholesalePOS() {
 
   // Load an existing reservation into POS to complete sale
   const handleLoadReservationIntoPOS = (resDoc) => {
+    const incomingOutstanding = getIncomingReservationQty(resDoc);
+    if (incomingOutstanding > 0) {
+      notifyWarning(`${resDoc.doc_no} is still waiting for ${incomingOutstanding} incoming unit${incomingOutstanding === 1 ? '' : 's'}.`);
+      return;
+    }
     const cust = customers.find(c => c.id === resDoc.customer_id) || {
       id: resDoc.customer_id,
       business_name: resDoc.customer_name,
@@ -764,8 +825,8 @@ export default function WholesalePOS() {
                           <span style={{ fontSize: 12, color: 'var(--muted)' }}>
                             Date: {formatDate(res.doc_date)}
                           </span>
-                          <span className="badge badge-warning" style={{ fontSize: 11 }}>
-                            HELD IN RESERVED
+                          <span className={`badge ${getIncomingReservationQty(res) > 0 ? 'badge-primary' : 'badge-success'}`} style={{ fontSize: 11 }}>
+                            {getIncomingReservationQty(res) > 0 ? `WAITING: ${getIncomingReservationQty(res)} INCOMING` : 'READY / HELD ON-HAND'}
                           </span>
                         </div>
                       </div>
@@ -796,9 +857,13 @@ export default function WholesalePOS() {
                         <div style={{ display: 'flex', gap: 8 }}>
                           <button
                             type="button"
-                            onClick={() => {
+                            onClick={async () => {
                               if (window.confirm(`Release reserved stock for ${res.doc_no}?`)) {
-                                cancelReservation(res.id);
+                                try {
+                                  await cancelReservation(res.id);
+                                } catch (error) {
+                                  notifyError(error.message || 'Reservation could not be released.');
+                                }
                               }
                             }}
                             className="secondary-button small-button"
@@ -810,8 +875,10 @@ export default function WholesalePOS() {
                           <button
                             type="button"
                             onClick={() => handleLoadReservationIntoPOS(res)}
+                            disabled={getIncomingReservationQty(res) > 0}
                             className="primary-button small-button"
                             style={{ fontWeight: 700 }}
+                            title={getIncomingReservationQty(res) > 0 ? 'Wait until all reserved incoming stock arrives' : 'Load and invoice this reservation'}
                           >
                             ⚡ Convert to Sale & Invoice
                           </button>
@@ -849,6 +916,49 @@ export default function WholesalePOS() {
                   <span className="badge badge-warning" style={{ fontSize: 11 }}>
                     {currentTab.items.length} items ({currentTab.items.reduce((s, i) => s + (Number(i.qty) || 0), 0)} units)
                   </span>
+                </div>
+
+                <div style={{ background: '#171717', border: '1px solid var(--line)', borderRadius: 6, padding: 12 }}>
+                  <label style={{ fontSize: 12, fontWeight: 800, marginBottom: 8, display: 'block' }}>RESERVATION SOURCE</label>
+                  <div className="reservation-source-grid">
+                    <button
+                      type="button"
+                      disabled={!buildReservationPlan('on_hand').valid}
+                      onClick={() => setReservationForm(prev => ({ ...prev, reservation_source: 'on_hand' }))}
+                      className={`secondary-button ${reservationForm.reservation_source === 'on_hand' ? 'active' : ''}`}
+                      style={{ padding: 10, textAlign: 'left', borderColor: reservationForm.reservation_source === 'on_hand' ? '#52e37e' : undefined }}
+                    >
+                      <strong style={{ display: 'block', color: '#52e37e' }}>✓ Use Current Stock</strong>
+                      <small style={{ color: 'var(--muted)' }}>Hold sellable stock now; customer does not wait.</small>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!buildReservationPlan('incoming').valid}
+                      onClick={() => setReservationForm(prev => ({ ...prev, reservation_source: 'incoming' }))}
+                      className={`secondary-button ${reservationForm.reservation_source === 'incoming' ? 'active' : ''}`}
+                      style={{ padding: 10, textAlign: 'left', borderColor: reservationForm.reservation_source === 'incoming' ? '#38bdf8' : undefined }}
+                    >
+                      <strong style={{ display: 'block', color: '#38bdf8' }}>🚢 Wait for Transit</strong>
+                      <small style={{ color: 'var(--muted)' }}>Use incoming stock first and keep current stock sellable.</small>
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 9, display: 'grid', gap: 4 }}>
+                    {buildReservationPlan(reservationForm.reservation_source).items.map((item, index) => (
+                      <div key={`${item.product?.id || item.product_id}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.5, color: 'var(--muted)' }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.product?.name || item.product_name}</span>
+                        <span className="mono" style={{ flexShrink: 0 }}>
+                          Current: {item.reserved_on_hand_qty} · Transit: {item.reserved_in_transit_qty}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {reservationForm.reservation_source === 'incoming' && (
+                    <small style={{ display: 'block', marginTop: 8, color: '#9bdcff' }}>
+                      This order cannot be converted to an invoice until every incoming portion has arrived.
+                    </small>
+                  )}
                 </div>
 
                 {/* Customer Details */}
@@ -1088,6 +1198,69 @@ export default function WholesalePOS() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Reservation confirmation and sharing */}
+      {completedReservationDoc && (
+        <div className="modal-overlay">
+          <div className="modal-box modal-md" style={{ maxWidth: 540 }}>
+            <div className="modal-header" style={{ background: '#102331', borderBottom: '1px solid #38bdf8' }}>
+              <h3 style={{ color: '#7dd3fc', display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
+                <span>📌</span> Reservation Created
+              </h3>
+              <button type="button" onClick={() => setCompletedReservationDoc(null)} className="modal-close">&times;</button>
+            </div>
+
+            <div className="modal-body" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 14 }}>
+                <div>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase' }}>Reservation Number</span>
+                  <div className="mono font-semibold" style={{ fontSize: 18, color: 'var(--primary)' }}>{completedReservationDoc.doc_no}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase' }}>Date</span>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{formatDate(completedReservationDoc.doc_date || completedReservationDoc.created_at)}</div>
+                </div>
+              </div>
+
+              <div style={{ background: '#1e1e1e', padding: 12, borderRadius: 6, border: '1px solid var(--line)', marginBottom: 14 }}>
+                <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase' }}>Reserved For</span>
+                <div style={{ fontSize: 15, fontWeight: 700, marginTop: 2 }}>{completedReservationDoc.customer_name || 'Customer'}</div>
+              </div>
+
+              <div className="reservation-confirmation-summary">
+                <div><small>RESERVED TOTAL</small><strong>{formatCurrency(completedReservationDoc.grand_total)}</strong></div>
+                <div><small>ADVANCE PAID</small><strong>{formatCurrency(completedReservationDoc.paid_amount)}</strong></div>
+                <div><small>BALANCE ON SALE</small><strong>{formatCurrency(completedReservationDoc.balance_due)}</strong></div>
+              </div>
+
+              <div style={{ background: '#102331', border: '1px solid #38bdf8', color: '#bae6fd', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+                <strong style={{ display: 'block', marginBottom: 3 }}>
+                  {getIncomingReservationQty(completedReservationDoc) > 0
+                    ? `Waiting for ${getIncomingReservationQty(completedReservationDoc)} incoming unit${getIncomingReservationQty(completedReservationDoc) === 1 ? '' : 's'}`
+                    : 'Stock is reserved and ready'}
+                </strong>
+                <small>This is a reservation confirmation, not a sales invoice. The final invoice is issued when the sale is completed.</small>
+              </div>
+
+              <div className="reservation-confirmation-actions">
+                <button type="button" onClick={() => generateInvoicePDF(completedReservationDoc, companySettings, completedReservationDoc.customer, 'A4', products)} className="secondary-button">
+                  <span>⤓</span> Reservation PDF
+                </button>
+                <button type="button" onClick={() => printInvoiceDocument(completedReservationDoc, companySettings, completedReservationDoc.customer, 'A4', products)} className="secondary-button bright">
+                  <span>🖨</span> Print
+                </button>
+                {(completedReservationDoc.customer?.whatsapp || completedReservationDoc.customer?.phone || completedReservationDoc.customer_phone) && (
+                  <button type="button" onClick={handleShareCompletedReservation} disabled={isSharingReservation} className="secondary-button reservation-whatsapp-button">
+                    <span>💬</span>
+                    <span>{isSharingReservation ? 'Preparing…' : 'WhatsApp'}<small>Send reservation</small></span>
+                  </button>
+                )}
+                <button type="button" onClick={() => setCompletedReservationDoc(null)} className="primary-button">Done</button>
+              </div>
+            </div>
           </div>
         </div>
       )}

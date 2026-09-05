@@ -78,6 +78,8 @@ export default function InventoryStockList() {
         'Reserved': stock.qty_reserved,
         'Available': stock.qty_available,
         'In Transit': stock.qty_in_transit,
+        'Incoming Reserved': Number(stock.qty_in_transit_reserved) || 0,
+        'Available to Promise': (Number(stock.qty_available) || 0) + Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0)),
         'Damaged': stock.qty_damaged,
         'Weighted Cost': p.weighted_cost_lkr,
         'Valuation (LKR)': stock.qty_on_hand * (p.weighted_cost_lkr || 0)
@@ -189,7 +191,7 @@ export default function InventoryStockList() {
           </div>
 
           <div className="table-responsive" style={{ width: '100%', overflowX: 'auto' }}>
-            <table style={{ width: '100%', minWidth: 950 }}>
+            <table style={{ width: '100%', minWidth: 1120 }}>
               <thead>
                 <tr>
                   <th>Code</th>
@@ -198,6 +200,8 @@ export default function InventoryStockList() {
                   <th>Reserved</th>
                   <th>Available</th>
                   <th>In Transit</th>
+                  <th>Incoming Reserved</th>
+                  <th>Total ATP</th>
                   <th>Damaged</th>
                   <th>Weighted Cost</th>
                   <th>Valuation (LKR)</th>
@@ -219,6 +223,10 @@ export default function InventoryStockList() {
                         {stock.qty_available}
                       </td>
                       <td className="mono" style={{ color: stock.qty_in_transit > 0 ? 'var(--primary)' : 'inherit' }}>{stock.qty_in_transit}</td>
+                      <td className="mono" style={{ color: Number(stock.qty_in_transit_reserved) > 0 ? '#ffca58' : 'inherit' }}>{Number(stock.qty_in_transit_reserved) || 0}</td>
+                      <td className="mono font-semibold" style={{ color: '#38bdf8' }}>
+                        {(Number(stock.qty_available) || 0) + Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))}
+                      </td>
                       <td className="mono" style={{ color: stock.qty_damaged > 0 ? '#ff8e8e' : 'inherit' }}>{stock.qty_damaged}</td>
                       <td className="mono">{formatCurrency(p.weighted_cost_lkr)}</td>
                       <td className="mono font-semibold">{formatCurrency(valuation)}</td>
@@ -247,7 +255,7 @@ export default function InventoryStockList() {
 
                 {filteredProducts.length === 0 && (
                   <tr>
-                    <td colSpan="10" style={{ textAlign: 'center', color: 'var(--muted)', padding: 40 }}>
+                    <td colSpan="12" style={{ textAlign: 'center', color: 'var(--muted)', padding: 40 }}>
                       {products.length === 0 ? 'No products or inventory on record. Use Import Products to load stock.' : 'No stock items match your search.'}
                     </td>
                   </tr>
