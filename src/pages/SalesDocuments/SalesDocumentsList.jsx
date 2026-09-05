@@ -54,6 +54,9 @@ export default function SalesDocumentsList() {
     : null;
   const selectedCustomerPhone = selectedCustomer?.whatsapp || selectedDoc?.customer_whatsapp || selectedCustomer?.phone || selectedDoc?.customer_phone || '';
   const isSelectedReserved = selectedDoc && (selectedDoc.doc_type === 'reserved_order' || selectedDoc.doc_type === 'sales_order') && selectedDoc.status === 'reserved';
+  const selectedIncomingOutstanding = isSelectedReserved
+    ? (selectedDoc.items || []).reduce((sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0), 0)
+    : 0;
 
   const handleExport = () => {
     const data = filteredDocs.map(d => ({
@@ -239,9 +242,15 @@ export default function SalesDocumentsList() {
               {isSelectedReserved && (
                 <>
                   <button
-                    onClick={() => {
-                      convertDocument(selectedDoc.id, 'sales_invoice');
-                      notifySuccess(`Reservation ${selectedDoc.doc_no} converted to Sales Invoice and stock finalized!`);
+                    disabled={selectedIncomingOutstanding > 0}
+                    title={selectedIncomingOutstanding > 0 ? `Waiting for ${selectedIncomingOutstanding} incoming units` : 'Convert this ready reservation to an invoice'}
+                    onClick={async () => {
+                      try {
+                        await convertDocument(selectedDoc.id, 'sales_invoice');
+                        notifySuccess(`Reservation ${selectedDoc.doc_no} converted to Sales Invoice and stock finalized!`);
+                      } catch (error) {
+                        notifyError(error.message || 'Reservation could not be converted.');
+                      }
                     }}
                     className="toolbar-button bright"
                     style={{ background: '#52e37e', color: '#000', fontWeight: 700 }}
@@ -415,7 +424,9 @@ export default function SalesDocumentsList() {
                       ) : d.status === 'cancelled' ? (
                         <span className="badge badge-danger" style={{ fontSize: 11 }}>CANCELLED</span>
                       ) : isRes ? (
-                        <span className="badge badge-warning" style={{ fontSize: 11 }}>HELD IN STOCK</span>
+                        (d.items || []).some(item => Number(item.reserved_in_transit_qty) > 0)
+                          ? <span className="badge badge-primary" style={{ fontSize: 11 }}>WAITING FOR TRANSIT</span>
+                          : <span className="badge badge-success" style={{ fontSize: 11 }}>READY / HELD</span>
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                           <span className={`badge badge-${d.payment_status === 'paid' ? 'success' : d.payment_status === 'partial' ? 'warning' : 'danger'}`}>
@@ -469,6 +480,11 @@ export default function SalesDocumentsList() {
                     <tr key={idx}>
                       <td>
                         <div style={{ fontWeight: 700 }}>{it.product_name || it.product?.name || 'Item'}</div>
+                        {isSelectedReserved && (
+                          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                            Reserved — current: {Number(it.reserved_on_hand_qty) || 0}, transit: {Number(it.reserved_in_transit_qty) || 0}
+                          </div>
+                        )}
                         {isW && (
                           <div style={{ fontSize: 11, color: '#52e37e', marginTop: 2 }}>
                             🛡️ [WARRANTY REPLACEMENT - Rs. 0.00] {it.warranty_note ? `(${it.warranty_note})` : ''}

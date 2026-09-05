@@ -65,6 +65,7 @@ export default function WholesalePOS() {
   const [isReservationsModalOpen, setIsReservationsModalOpen] = useState(false);
   const [isCreateReservationOpen, setIsCreateReservationOpen] = useState(false);
   const [reservationForm, setReservationForm] = useState({
+    reservation_source: 'on_hand',
     customer_name: '',
     customer_phone: '',
     advance_amount: '',
@@ -116,6 +117,10 @@ export default function WholesalePOS() {
   const openReservations = salesDocuments.filter(d =>
     (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') &&
     (d.status === 'reserved' || d.payment_status === 'reserved')
+  );
+  const getIncomingReservationQty = (document) => (document.items || []).reduce(
+    (sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0),
+    0
   );
 
   const handleQuickCash = () => {
@@ -265,38 +270,53 @@ export default function WholesalePOS() {
   };
 
   // Trigger Reserve Order Popup Modal
+  const buildReservationPlan = (source) => {
+    const pools = new Map();
+    let valid = true;
+    const plannedItems = currentTab.items.map(item => {
+      const productId = item.product?.id || item.product_id || item.id;
+      if (!pools.has(productId)) {
+        const stock = stockBalances[productId] || {};
+        pools.set(productId, {
+          onHand: Math.max(0, Number(stock.qty_available) || 0),
+          incoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
+        });
+      }
+      const pool = pools.get(productId);
+      const qty = Math.max(0, Number(item.qty) || 0);
+      let reservedInTransit = 0;
+      let reservedOnHand = qty;
+      if (source === 'incoming') {
+        reservedInTransit = Math.min(qty, pool.incoming);
+        reservedOnHand = qty - reservedInTransit;
+      }
+      if (reservedOnHand > pool.onHand || reservedInTransit > pool.incoming) valid = false;
+      pool.onHand = Math.max(0, pool.onHand - reservedOnHand);
+      pool.incoming = Math.max(0, pool.incoming - reservedInTransit);
+      return {
+        ...item,
+        reserved_on_hand_qty: reservedOnHand,
+        reserved_in_transit_qty: reservedInTransit
+      };
+    });
+    return { valid, items: plannedItems };
+  };
+
   const handleReserveBill = () => {
     if (currentTab.items.length === 0) {
       notifyWarning('Cannot reserve an empty bill. Add products first.');
       return;
     }
 
-    const hasOverLimit = currentTab.items.some(it => {
-      if (it.is_warranty_replacement) return false;
-      const p = it.product || it;
-      const pId = p?.id || it.product_id || it.id;
-      const sb = (pId && stockBalances[pId]) || {};
-      const onHand = Number(
-        sb.qty_on_hand !== undefined ? sb.qty_on_hand :
-        sb.qty_available !== undefined ? sb.qty_available :
-        p?.stock_quantity !== undefined ? p.stock_quantity :
-        p?.qty_on_hand !== undefined ? p.qty_on_hand :
-        0
-      );
-      const inTransit = Number(
-        sb.qty_in_transit !== undefined ? sb.qty_in_transit :
-        p?.qty_in_transit !== undefined ? p.qty_in_transit :
-        0
-      );
-      return Number(it.qty) > (onHand + inTransit);
-    });
-
-    if (hasOverLimit) {
-      notifyWarning('Cannot reserve: Quantity exceeds total available inventory (On-Hand + In-Transit). Please reduce quantity.');
+    const onHandPlan = buildReservationPlan('on_hand');
+    const incomingPlan = buildReservationPlan('incoming');
+    if (!onHandPlan.valid && !incomingPlan.valid) {
+      notifyWarning('Cannot reserve: quantity exceeds unreserved on-hand plus unreserved in-transit stock.');
       return;
     }
 
     setReservationForm({
+      reservation_source: onHandPlan.valid ? 'on_hand' : 'incoming',
       customer_name: currentTab.customer?.business_name || '',
       customer_phone: currentTab.customer?.phone || '',
       advance_amount: '',
@@ -338,12 +358,18 @@ export default function WholesalePOS() {
     }
 
     try {
+      const reservationPlan = buildReservationPlan(reservationForm.reservation_source);
+      if (!reservationPlan.valid) {
+        notifyWarning('Stock availability changed. Review the reservation source and quantities again.');
+        return;
+      }
       const docPayload = {
         doc_type: 'reserved_order',
+        reservation_source: reservationForm.reservation_source,
         customer_id: currentTab.customer?.id || null,
         customer_name: reservationForm.customer_name || currentTab.customer?.business_name || 'Customer Hold / Reserved',
         customer_phone: reservationForm.customer_phone || currentTab.customer?.phone || null,
-        items: currentTab.items,
+        items: reservationPlan.items,
         discount_amount: effectiveCartDiscount,
         advance_amount: advAmt,
         payment_lines: advAmt > 0 ? [{
@@ -389,6 +415,11 @@ export default function WholesalePOS() {
 
   // Load an existing reservation into POS to complete sale
   const handleLoadReservationIntoPOS = (resDoc) => {
+    const incomingOutstanding = getIncomingReservationQty(resDoc);
+    if (incomingOutstanding > 0) {
+      notifyWarning(`${resDoc.doc_no} is still waiting for ${incomingOutstanding} incoming unit${incomingOutstanding === 1 ? '' : 's'}.`);
+      return;
+    }
     const cust = customers.find(c => c.id === resDoc.customer_id) || {
       id: resDoc.customer_id,
       business_name: resDoc.customer_name,
@@ -764,8 +795,8 @@ export default function WholesalePOS() {
                           <span style={{ fontSize: 12, color: 'var(--muted)' }}>
                             Date: {formatDate(res.doc_date)}
                           </span>
-                          <span className="badge badge-warning" style={{ fontSize: 11 }}>
-                            HELD IN RESERVED
+                          <span className={`badge ${getIncomingReservationQty(res) > 0 ? 'badge-primary' : 'badge-success'}`} style={{ fontSize: 11 }}>
+                            {getIncomingReservationQty(res) > 0 ? `WAITING: ${getIncomingReservationQty(res)} INCOMING` : 'READY / HELD ON-HAND'}
                           </span>
                         </div>
                       </div>
@@ -810,8 +841,10 @@ export default function WholesalePOS() {
                           <button
                             type="button"
                             onClick={() => handleLoadReservationIntoPOS(res)}
+                            disabled={getIncomingReservationQty(res) > 0}
                             className="primary-button small-button"
                             style={{ fontWeight: 700 }}
+                            title={getIncomingReservationQty(res) > 0 ? 'Wait until all reserved incoming stock arrives' : 'Load and invoice this reservation'}
                           >
                             ⚡ Convert to Sale & Invoice
                           </button>
@@ -849,6 +882,49 @@ export default function WholesalePOS() {
                   <span className="badge badge-warning" style={{ fontSize: 11 }}>
                     {currentTab.items.length} items ({currentTab.items.reduce((s, i) => s + (Number(i.qty) || 0), 0)} units)
                   </span>
+                </div>
+
+                <div style={{ background: '#171717', border: '1px solid var(--line)', borderRadius: 6, padding: 12 }}>
+                  <label style={{ fontSize: 12, fontWeight: 800, marginBottom: 8, display: 'block' }}>RESERVATION SOURCE</label>
+                  <div className="reservation-source-grid">
+                    <button
+                      type="button"
+                      disabled={!buildReservationPlan('on_hand').valid}
+                      onClick={() => setReservationForm(prev => ({ ...prev, reservation_source: 'on_hand' }))}
+                      className={`secondary-button ${reservationForm.reservation_source === 'on_hand' ? 'active' : ''}`}
+                      style={{ padding: 10, textAlign: 'left', borderColor: reservationForm.reservation_source === 'on_hand' ? '#52e37e' : undefined }}
+                    >
+                      <strong style={{ display: 'block', color: '#52e37e' }}>✓ Use Current Stock</strong>
+                      <small style={{ color: 'var(--muted)' }}>Hold sellable stock now; customer does not wait.</small>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!buildReservationPlan('incoming').valid}
+                      onClick={() => setReservationForm(prev => ({ ...prev, reservation_source: 'incoming' }))}
+                      className={`secondary-button ${reservationForm.reservation_source === 'incoming' ? 'active' : ''}`}
+                      style={{ padding: 10, textAlign: 'left', borderColor: reservationForm.reservation_source === 'incoming' ? '#38bdf8' : undefined }}
+                    >
+                      <strong style={{ display: 'block', color: '#38bdf8' }}>🚢 Wait for Transit</strong>
+                      <small style={{ color: 'var(--muted)' }}>Use incoming stock first and keep current stock sellable.</small>
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 9, display: 'grid', gap: 4 }}>
+                    {buildReservationPlan(reservationForm.reservation_source).items.map((item, index) => (
+                      <div key={`${item.product?.id || item.product_id}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.5, color: 'var(--muted)' }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.product?.name || item.product_name}</span>
+                        <span className="mono" style={{ flexShrink: 0 }}>
+                          Current: {item.reserved_on_hand_qty} · Transit: {item.reserved_in_transit_qty}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {reservationForm.reservation_source === 'incoming' && (
+                    <small style={{ display: 'block', marginTop: 8, color: '#9bdcff' }}>
+                      This order cannot be converted to an invoice until every incoming portion has arrived.
+                    </small>
+                  )}
                 </div>
 
                 {/* Customer Details */}

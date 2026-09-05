@@ -241,7 +241,7 @@ export function BusinessProvider({ children }) {
         if (!stockRes.error) {
           const nextBalances = {};
           (prodData || []).forEach(product => {
-            nextBalances[product.id] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+            nextBalances[product.id] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_in_transit_reserved: 0, qty_damaged: 0 };
           });
           (stockRes.data || []).forEach(balance => {
             const onHand = Number(balance.qty_on_hand) || 0;
@@ -252,6 +252,7 @@ export function BusinessProvider({ children }) {
               qty_reserved: reserved,
               qty_available: balance.qty_available == null ? Math.max(0, onHand - reserved) : Number(balance.qty_available) || 0,
               qty_in_transit: Number(balance.qty_in_transit) || 0,
+              qty_in_transit_reserved: Number(balance.qty_in_transit_reserved) || 0,
               qty_damaged: Number(balance.qty_damaged) || 0
             };
           });
@@ -263,6 +264,7 @@ export function BusinessProvider({ children }) {
             const isActiveReservation = document.doc_type === 'sales_order' && document.status === 'confirmed';
             return {
               ...document,
+              reservation_source: document.reservation_source || (isActiveReservation ? 'on_hand' : null),
               discount_amount: Number(document.doc_discount_total) || 0,
               status: isActiveReservation ? 'reserved' : document.status,
               payment_status: isActiveReservation && document.payment_status === 'unpaid'
@@ -273,6 +275,8 @@ export function BusinessProvider({ children }) {
               customer_whatsapp: document.customer?.whatsapp || '',
               items: (document.items || []).map(item => ({
                 ...item,
+                reserved_on_hand_qty: item.reserved_on_hand_qty == null && isActiveReservation ? Number(item.base_qty || item.qty) || 0 : Number(item.reserved_on_hand_qty) || 0,
+                reserved_in_transit_qty: Number(item.reserved_in_transit_qty) || 0,
                 discount_amount: Number(item.line_discount) || 0,
                 is_warranty_replacement: String(item.notes || '').toLowerCase().includes('warranty replacement'),
                 warranty_note: String(item.notes || '').toLowerCase().includes('warranty replacement') ? item.notes : '',
@@ -2340,6 +2344,25 @@ export function BusinessProvider({ children }) {
 
     // Only update inventory, WAC, movements, and payments if NOT saved as draft
     if (!isDraft) {
+      const receivedStockTotals = new Map();
+      items.forEach(item => {
+        const productId = item.product_id;
+        const current = receivedStockTotals.get(productId) || { sellable: 0, shipped: 0, damaged: 0 };
+        const sellable = Number(item.received_sellable_qty) || 0;
+        current.sellable += sellable;
+        current.shipped += isDirect ? 0 : (Number(item.shipped_qty) || sellable);
+        current.damaged += Number(item.damaged_qty) || 0;
+        receivedStockTotals.set(productId, current);
+      });
+
+      const arrivalReservationAllocations = new Map();
+      if (!isDirect) {
+        receivedStockTotals.forEach((totals, productId) => {
+          const incomingReserved = Number(stockBalances[productId]?.qty_in_transit_reserved) || 0;
+          arrivalReservationAllocations.set(productId, Math.min(totals.sellable, incomingReserved));
+        });
+      }
+
       // Recalculate Weighted Average Cost (WAC) & Last Landed Cost for each product
       setProducts(prevProducts => {
         return prevProducts.map(p => {
@@ -2359,19 +2382,18 @@ export function BusinessProvider({ children }) {
       // Move stock: add to qty_on_hand and qty_available; deduct from qty_in_transit if transit shipment
       setStockBalances(prev => {
         const updated = { ...prev };
-        items.forEach(it => {
-          const pId = it.product_id;
+        receivedStockTotals.forEach((totals, pId) => {
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          const sellable = Number(it.received_sellable_qty) || 0;
-          const damaged = Number(it.damaged_qty) || 0;
-          const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
+          const allocatedToReservations = Number(arrivalReservationAllocations.get(pId)) || 0;
 
           updated[pId] = {
             ...cur,
-            qty_on_hand: (cur.qty_on_hand || 0) + sellable,
-            qty_available: (cur.qty_available || 0) + sellable,
-            qty_in_transit: Math.max(0, (cur.qty_in_transit || 0) - shipped),
-            qty_damaged: (cur.qty_damaged || 0) + damaged
+            qty_on_hand: (cur.qty_on_hand || 0) + totals.sellable,
+            qty_reserved: (Number(cur.qty_reserved) || 0) + allocatedToReservations,
+            qty_available: Math.max(0, (Number(cur.qty_available) || 0) + totals.sellable - allocatedToReservations),
+            qty_in_transit: Math.max(0, (cur.qty_in_transit || 0) - totals.shipped),
+            qty_in_transit_reserved: Math.max(0, (Number(cur.qty_in_transit_reserved) || 0) - allocatedToReservations),
+            qty_damaged: (cur.qty_damaged || 0) + totals.damaged
           };
         });
         return updated;
@@ -2477,13 +2499,22 @@ export function BusinessProvider({ children }) {
               if (isValidUUID(it.product_id)) {
                 const sellable = Number(it.received_sellable_qty) || 0;
                 const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
-                await runCloudWrite('Updating received inventory', () => supabase.rpc('rpc_adjust_stock_balance', {
-                  p_product_id: it.product_id,
-                  p_qty_on_hand_delta: sellable,
-                  p_qty_reserved_delta: 0,
-                  p_qty_in_transit_delta: -shipped,
-                  p_qty_damaged_delta: Number(it.damaged_qty) || 0
-                }));
+                if (isDirect) {
+                  await runCloudWrite('Updating received inventory', () => supabase.rpc('rpc_adjust_stock_balance', {
+                    p_product_id: it.product_id,
+                    p_qty_on_hand_delta: sellable,
+                    p_qty_reserved_delta: 0,
+                    p_qty_in_transit_delta: 0,
+                    p_qty_damaged_delta: Number(it.damaged_qty) || 0
+                  }));
+                } else {
+                  await runCloudWrite('Receiving inventory and allocating incoming reservations', () => supabase.rpc('rpc_receive_product_and_allocate_reservations', {
+                    p_product_id: it.product_id,
+                    p_sellable_qty: sellable,
+                    p_shipped_qty: shipped,
+                    p_damaged_qty: Number(it.damaged_qty) || 0
+                  }));
+                }
               }
             }
           }
@@ -2695,6 +2726,35 @@ export function BusinessProvider({ children }) {
         });
         return updated;
       });
+
+      if (arrivalReservationAllocations.size) {
+        setSalesDocuments(prev => {
+          const remaining = new Map(arrivalReservationAllocations);
+          const activeInOrder = prev
+            .filter(document => (document.doc_type === 'reserved_order' || document.doc_type === 'sales_order') && document.status === 'reserved')
+            .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+          const changedItems = new Map();
+          activeInOrder.forEach(document => {
+            (document.items || []).forEach((item, itemIndex) => {
+              const productId = item.product_id || item.product?.id;
+              const availableAllocation = Number(remaining.get(productId)) || 0;
+              const incomingQty = Number(item.reserved_in_transit_qty) || 0;
+              if (availableAllocation <= 0 || incomingQty <= 0) return;
+              const allocated = Math.min(availableAllocation, incomingQty);
+              changedItems.set(item.id || `${document.id}:${itemIndex}`, {
+                ...item,
+                reserved_in_transit_qty: incomingQty - allocated,
+                reserved_on_hand_qty: (Number(item.reserved_on_hand_qty) || 0) + allocated
+              });
+              remaining.set(productId, availableAllocation - allocated);
+            });
+          });
+          return prev.map(document => ({
+            ...document,
+            items: (document.items || []).map((item, itemIndex) => changedItems.get(item.id || `${document.id}:${itemIndex}`) || item)
+          }));
+        });
+      }
 
       setStockMovements(prev => [{
         id: 'mov-' + Date.now(),
@@ -3073,7 +3133,8 @@ export function BusinessProvider({ children }) {
           qty_on_hand: Number(stock.qty_on_hand) || 0,
           qty_available: Number(stock.qty_available) || 0,
           qty_reserved: Number(stock.qty_reserved) || 0,
-          qty_in_transit: Number(stock.qty_in_transit) || 0
+          qty_in_transit: Number(stock.qty_in_transit) || 0,
+          qty_in_transit_reserved: Number(stock.qty_in_transit_reserved) || 0
         });
       }
 
@@ -3224,12 +3285,13 @@ export function BusinessProvider({ children }) {
           doc_type: doc.doc_type === 'quotation' ? 'quotation' : (doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order') ? 'sales_order' : 'sales_invoice',
           doc_no: doc.doc_no,
           customer_id: custId,
+          reservation_source: (doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order') ? (doc.reservation_source || 'on_hand') : null,
           doc_date: doc.doc_date || new Date().toISOString().slice(0, 10),
           subtotal: Number(doc.items_subtotal || doc.subtotal) || 0,
           grand_total: Number(doc.grand_total) || 0,
           paid_amount: Number(doc.paid_amount) || 0,
           balance_due: Number(doc.balance_due) || 0,
-          status: doc.status === 'draft' ? 'draft' : 'completed',
+          status: doc.status === 'draft' ? 'draft' : ((doc.doc_type === 'reserved_order' || doc.doc_type === 'sales_order') && doc.status === 'reserved' ? 'confirmed' : 'completed'),
           payment_status: doc.payment_status || 'unpaid',
           notes: doc.notes || null
         });
@@ -3244,7 +3306,9 @@ export function BusinessProvider({ children }) {
               product_id: pId,
               qty: Number(it.qty) || 1,
               unit_price: Number(it.unit_price) || 0,
-              line_total: Number(it.line_total) || (Number(it.qty || 1) * Number(it.unit_price || 0))
+              line_total: Number(it.line_total) || (Number(it.qty || 1) * Number(it.unit_price || 0)),
+              reserved_on_hand_qty: Number(it.reserved_on_hand_qty) || 0,
+              reserved_in_transit_qty: Number(it.reserved_in_transit_qty) || 0
             };
           }).filter(Boolean);
           if (docItems.length > 0) {
@@ -3349,7 +3413,7 @@ export function BusinessProvider({ children }) {
     setStockBalances(prev => {
       const reset = {};
       Object.keys(prev).forEach(k => {
-        reset[k] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+        reset[k] = { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_in_transit_reserved: 0, qty_damaged: 0 };
       });
       return reset;
     });
@@ -3384,6 +3448,7 @@ export function BusinessProvider({ children }) {
           qty_reserved: 0,
           qty_available: 0,
           qty_in_transit: 0,
+          qty_in_transit_reserved: 0,
           qty_damaged: 0
         }).neq('product_id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('customers').update({
@@ -3406,6 +3471,37 @@ export function BusinessProvider({ children }) {
     const isQuotation = docData.doc_type === 'quotation';
     const prefix = isQuotation ? 'QT' : isReservation ? 'RES' : 'INV';
     const docNo = `${prefix}-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    if (isReservation) {
+      const reservationSource = docData.reservation_source === 'incoming' ? 'incoming' : 'on_hand';
+      const pools = new Map();
+      const allocatedItems = (docData.items || []).map(item => {
+        const productId = item.product?.id || item.product_id || item.id;
+        if (!pools.has(productId)) {
+          const stock = stockBalances[productId] || {};
+          pools.set(productId, {
+            onHand: Math.max(0, Number(stock.qty_available) || 0),
+            incoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
+          });
+        }
+        const pool = pools.get(productId);
+        const qty = Math.max(0, Number(item.qty) || 0);
+        const incomingQty = reservationSource === 'incoming' ? Math.min(qty, pool.incoming) : 0;
+        const onHandQty = qty - incomingQty;
+        if (onHandQty > pool.onHand || incomingQty > pool.incoming) {
+          const product = products.find(entry => entry.id === productId);
+          throw new Error(`Not enough unreserved current and incoming stock for ${product?.name || 'this item'}.`);
+        }
+        pool.onHand -= onHandQty;
+        pool.incoming -= incomingQty;
+        return {
+          ...item,
+          reserved_on_hand_qty: onHandQty,
+          reserved_in_transit_qty: incomingQty
+        };
+      });
+      docData = { ...docData, reservation_source: reservationSource, items: allocatedItems };
+    }
 
     const itemsSubtotal = (docData.items || []).reduce((sum, it) => {
       const price = it.is_warranty_replacement ? 0 : (Number(it.unit_price) || 0);
@@ -3440,6 +3536,27 @@ export function BusinessProvider({ children }) {
       : null;
     const releasedFromReservation = !!sourceDoc &&
       (sourceDoc.doc_type === 'reserved_order' || sourceDoc.doc_type === 'sales_order');
+    if (releasedFromReservation) {
+      const incomingOutstanding = (sourceDoc.items || []).reduce((sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0), 0);
+      if (incomingOutstanding > 0) {
+        throw new Error(`Reservation ${sourceDoc.doc_no} is still waiting for ${incomingOutstanding} incoming unit${incomingOutstanding === 1 ? '' : 's'}.`);
+      }
+    }
+    if (docData.doc_type === 'sales_invoice' && !releasedFromReservation) {
+      const availableByProduct = new Map();
+      (docData.items || []).forEach(item => {
+        const productId = item.product?.id || item.product_id || item.id;
+        if (!availableByProduct.has(productId)) {
+          availableByProduct.set(productId, Math.max(0, Number(stockBalances[productId]?.qty_available) || 0));
+        }
+        const remaining = availableByProduct.get(productId) - (Number(item.qty) || 0);
+        if (remaining < 0) {
+          const product = products.find(entry => entry.id === productId);
+          throw new Error(`Only ${availableByProduct.get(productId)} unreserved units of ${product?.name || 'this item'} are available to invoice.`);
+        }
+        availableByProduct.set(productId, remaining);
+      });
+    }
 
     // When converting from a reservation, carry over any previously paid advance deposit
     if (sourceDoc && Number(sourceDoc.paid_amount) > 0) {
@@ -3484,7 +3601,8 @@ export function BusinessProvider({ children }) {
       setSalesDocuments(prev => prev.map(d => d.id === docData.source_reserved_doc_id ? {
         ...d,
         status: 'converted_to_sale',
-        converted_invoice_no: docNo
+        converted_invoice_no: docNo,
+        items: (d.items || []).map(item => ({ ...item, reserved_on_hand_qty: 0, reserved_in_transit_qty: 0 }))
       } : d));
     }
 
@@ -3495,12 +3613,14 @@ export function BusinessProvider({ children }) {
         (docData.items || []).forEach(it => {
           const pId = it.product?.id || it.product_id;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
-          const qty = Number(it.qty) || 1;
+          const onHandQty = Number(it.reserved_on_hand_qty) || 0;
+          const incomingQty = Number(it.reserved_in_transit_qty) || 0;
 
           updated[pId] = {
             ...cur,
-            qty_reserved: (cur.qty_reserved || 0) + qty,
-            qty_available: Math.max(0, (cur.qty_available || 0) - qty)
+            qty_reserved: (Number(cur.qty_reserved) || 0) + onHandQty,
+            qty_available: Math.max(0, (Number(cur.qty_available) || 0) - onHandQty),
+            qty_in_transit_reserved: (Number(cur.qty_in_transit_reserved) || 0) + incomingQty
           };
         });
         return updated;
@@ -3517,7 +3637,7 @@ export function BusinessProvider({ children }) {
         created_at: new Date().toISOString()
       }, ...prev]);
 
-      notifySuccess(`Stock reserved successfully (${docNo})! ${paidAmount > 0 ? `Advance payment of Rs. ${paidAmount.toLocaleString()} recorded.` : ''}`);
+      notifySuccess(`${docData.reservation_source === 'incoming' ? 'Incoming stock promised' : 'Current stock reserved'} successfully (${docNo})! ${paidAmount > 0 ? `Advance payment of Rs. ${paidAmount.toLocaleString()} recorded.` : ''}`);
     }
 
     // 2. If SALES INVOICE (Physical sale):
@@ -3592,6 +3712,7 @@ export function BusinessProvider({ children }) {
       doc_type: isQuotation ? 'quotation' : isReservation ? 'sales_order' : 'sales_invoice',
       doc_no: docNo,
       customer_id: custId,
+      reservation_source: isReservation ? docData.reservation_source : null,
       doc_date: newDoc.doc_date,
       subtotal: itemsSubtotal,
       line_discount_total: (docData.items || []).reduce((sum, item) => sum + (Number(item.discount_amount) || 0), 0),
@@ -3638,6 +3759,8 @@ export function BusinessProvider({ children }) {
         unit_cost_snapshot: unitCost,
         line_profit: lineProfit,
         line_profit_pct: lineTotal > 0 ? (lineProfit / lineTotal) * 100 : 0,
+        reserved_on_hand_qty: isReservation ? Number(item.reserved_on_hand_qty) || 0 : 0,
+        reserved_in_transit_qty: isReservation ? Number(item.reserved_in_transit_qty) || 0 : 0,
         notes: item.warranty_note || item.notes || (item.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
       };
     }).filter(item => isValidUUID(item.product_id));
@@ -3650,10 +3773,17 @@ export function BusinessProvider({ children }) {
         const productId = item.product?.id || item.product_id;
         if (!isValidUUID(productId)) return null;
         const qty = Number(item.qty) || 1;
+        if (isReservation) {
+          return supabase.rpc('rpc_adjust_stock_reservation', {
+            p_product_id: productId,
+            p_on_hand_reserved_delta: Number(item.reserved_on_hand_qty) || 0,
+            p_in_transit_reserved_delta: Number(item.reserved_in_transit_qty) || 0
+          });
+        }
         return supabase.rpc('rpc_adjust_stock_balance', {
           p_product_id: productId,
-          p_qty_on_hand_delta: isReservation ? 0 : -qty,
-          p_qty_reserved_delta: isReservation ? qty : (releasedFromReservation ? -qty : 0),
+          p_qty_on_hand_delta: -qty,
+          p_qty_reserved_delta: releasedFromReservation ? -qty : 0,
           p_qty_in_transit_delta: 0,
           p_qty_damaged_delta: item.is_warranty_replacement ? qty : 0
         });
@@ -3742,6 +3872,10 @@ export function BusinessProvider({ children }) {
         notes: [sourceDoc.notes, `Converted to ${docNo}`].filter(Boolean).join(' | '),
         updated_at: new Date().toISOString()
       }).eq('id', sourceDoc.id));
+      await runCloudWrite('Clearing converted reservation allocations', () => supabase.from('sales_document_items').update({
+        reserved_on_hand_qty: 0,
+        reserved_in_transit_qty: 0
+      }).eq('sales_document_id', sourceDoc.id));
     }
 
     return newDoc;
@@ -3763,7 +3897,7 @@ export function BusinessProvider({ children }) {
     const rawItems = updatedData.items || existingDoc.items || [];
     if (!rawItems.length) throw new Error('Add at least one item before saving the document.');
 
-    const nextItems = rawItems.map(item => {
+    let nextItems = rawItems.map(item => {
       const productId = item.product_id || item.product?.id || item.id;
       const product = products.find(entry => entry.id === productId) || item.product;
       const qty = Number(item.qty || item.base_qty) || 0;
@@ -3789,6 +3923,56 @@ export function BusinessProvider({ children }) {
         is_warranty_replacement: isWarranty
       };
     });
+
+    if (isReservation) {
+      const reservationSource = updatedData.reservation_source || existingDoc.reservation_source || 'on_hand';
+      const oldAllocations = (existingDoc.items || []).reduce((map, item) => {
+        const productId = item.product_id || item.product?.id;
+        const qty = Number(item.qty || item.base_qty) || 0;
+        const current = map.get(productId) || { onHand: 0, incoming: 0 };
+        current.onHand += item.reserved_on_hand_qty == null ? qty : Number(item.reserved_on_hand_qty) || 0;
+        current.incoming += Number(item.reserved_in_transit_qty) || 0;
+        map.set(productId, current);
+        return map;
+      }, new Map());
+      const pools = new Map();
+      nextItems = nextItems.map(item => {
+        const productId = item.product_id;
+        if (!pools.has(productId)) {
+          const stock = stockBalances[productId] || {};
+          const old = oldAllocations.get(productId) || { onHand: 0, incoming: 0 };
+          pools.set(productId, {
+            availableOnHand: (Number(stock.qty_available) || 0) + old.onHand,
+            availableIncoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0) + old.incoming),
+            arrivedFromThisOrder: old.onHand
+          });
+        }
+        const pool = pools.get(productId);
+        let needed = item.qty;
+        let onHandQty = 0;
+        let incomingQty = 0;
+        if (reservationSource === 'incoming') {
+          const keepArrived = Math.min(needed, pool.arrivedFromThisOrder);
+          onHandQty += keepArrived;
+          needed -= keepArrived;
+          pool.arrivedFromThisOrder -= keepArrived;
+          pool.availableOnHand -= keepArrived;
+
+          incomingQty = Math.min(needed, pool.availableIncoming);
+          needed -= incomingQty;
+          pool.availableIncoming -= incomingQty;
+        }
+        const additionalOnHand = Math.min(needed, pool.availableOnHand);
+        onHandQty += additionalOnHand;
+        needed -= additionalOnHand;
+        pool.availableOnHand -= additionalOnHand;
+        if (needed > 0) {
+          const product = products.find(entry => entry.id === productId);
+          throw new Error(`Not enough unreserved current and incoming stock for ${product?.name || 'this item'}.`);
+        }
+        return { ...item, reserved_on_hand_qty: onHandQty, reserved_in_transit_qty: incomingQty };
+      });
+    }
 
     const lineSubtotal = nextItems.reduce((sum, item) => sum + item.line_total, 0);
     const documentDiscount = Math.min(Math.max(0, Number(updatedData.discount_amount) || 0), lineSubtotal);
@@ -3842,8 +4026,14 @@ export function BusinessProvider({ children }) {
     const aggregateItems = (items) => items.reduce((map, item) => {
       const productId = item.product_id || item.product?.id;
       if (!isValidUUID(productId)) return map;
-      const current = map.get(productId) || { qty: 0, damaged: 0 };
+      const current = map.get(productId) || { qty: 0, damaged: 0, reservedOnHand: 0, reservedIncoming: 0 };
       current.qty += Number(item.qty || item.base_qty) || 0;
+      if (isReservation) {
+        current.reservedOnHand += item.reserved_on_hand_qty == null
+          ? Number(item.qty || item.base_qty) || 0
+          : Number(item.reserved_on_hand_qty) || 0;
+        current.reservedIncoming += Number(item.reserved_in_transit_qty) || 0;
+      }
       if (item.is_warranty_replacement || String(item.notes || '').toLowerCase().includes('warranty replacement')) {
         current.damaged += Number(item.qty || item.base_qty) || 0;
       }
@@ -3857,21 +4047,20 @@ export function BusinessProvider({ children }) {
     const stockDeltas = [];
     if (isInvoice || isReservation) {
       for (const productId of affectedProductIds) {
-        const oldLine = oldItemsByProduct.get(productId) || { qty: 0, damaged: 0 };
-        const nextLine = nextItemsByProduct.get(productId) || { qty: 0, damaged: 0 };
+        const oldLine = oldItemsByProduct.get(productId) || { qty: 0, damaged: 0, reservedOnHand: 0, reservedIncoming: 0 };
+        const nextLine = nextItemsByProduct.get(productId) || { qty: 0, damaged: 0, reservedOnHand: 0, reservedIncoming: 0 };
         const stock = stockBalances[productId] || {};
-        if (isInvoice && nextLine.qty > (Number(stock.qty_on_hand) || 0) + oldLine.qty) {
+        // The old invoice quantity has already been deducted, so it can be
+        // reused while editing. Other customers' on-hand reservations cannot.
+        if (isInvoice && nextLine.qty > (Number(stock.qty_available) || 0) + oldLine.qty) {
           const product = products.find(item => item.id === productId);
-          throw new Error(`Not enough stock to increase ${product?.name || 'this item'} to ${nextLine.qty}.`);
-        }
-        if (isReservation && nextLine.qty > (Number(stock.qty_available) || 0) + oldLine.qty) {
-          const product = products.find(item => item.id === productId);
-          throw new Error(`Not enough available stock to reserve ${nextLine.qty} of ${product?.name || 'this item'}.`);
+          throw new Error(`Not enough unreserved stock to increase ${product?.name || 'this item'} to ${nextLine.qty}.`);
         }
         stockDeltas.push({
           productId,
           onHand: isInvoice ? oldLine.qty - nextLine.qty : 0,
-          reserved: isReservation ? nextLine.qty - oldLine.qty : 0,
+          reserved: isReservation ? nextLine.reservedOnHand - oldLine.reservedOnHand : 0,
+          transitReserved: isReservation ? nextLine.reservedIncoming - oldLine.reservedIncoming : 0,
           damaged: isInvoice ? nextLine.damaged - oldLine.damaged : 0
         });
       }
@@ -3892,6 +4081,7 @@ export function BusinessProvider({ children }) {
 
     await runCloudWrite('Updating sales document', () => supabase.from('sales_documents').update({
       customer_id: nextCustomerId,
+      reservation_source: isReservation ? (updatedData.reservation_source || existingDoc.reservation_source || 'on_hand') : null,
       doc_date: updatedData.doc_date || existingDoc.doc_date,
       subtotal: lineSubtotal,
       line_discount_total: nextItems.reduce((sum, item) => sum + item.discount_amount, 0),
@@ -3929,20 +4119,28 @@ export function BusinessProvider({ children }) {
         unit_cost_snapshot: item.unit_cost_snapshot,
         line_profit: lineProfit,
         line_profit_pct: item.line_total > 0 ? (lineProfit / item.line_total) * 100 : 0,
+        reserved_on_hand_qty: isReservation ? Number(item.reserved_on_hand_qty) || 0 : 0,
+        reserved_in_transit_qty: isReservation ? Number(item.reserved_in_transit_qty) || 0 : 0,
         notes: item.is_warranty_replacement ? (item.warranty_note || 'Warranty Replacement (Rs. 0)') : (item.notes || null)
       };
     });
     await runCloudWrite('Saving edited sales items', () => supabase.from('sales_document_items').insert(cloudItems));
 
     const stockWrites = stockDeltas
-      .filter(delta => delta.onHand || delta.reserved || delta.damaged)
-      .map(delta => supabase.rpc('rpc_adjust_stock_balance', {
-        p_product_id: delta.productId,
-        p_qty_on_hand_delta: delta.onHand,
-        p_qty_reserved_delta: delta.reserved,
-        p_qty_in_transit_delta: 0,
-        p_qty_damaged_delta: delta.damaged
-      }));
+      .filter(delta => delta.onHand || delta.reserved || delta.transitReserved || delta.damaged)
+      .map(delta => isReservation
+        ? supabase.rpc('rpc_adjust_stock_reservation', {
+            p_product_id: delta.productId,
+            p_on_hand_reserved_delta: delta.reserved,
+            p_in_transit_reserved_delta: delta.transitReserved
+          })
+        : supabase.rpc('rpc_adjust_stock_balance', {
+            p_product_id: delta.productId,
+            p_qty_on_hand_delta: delta.onHand,
+            p_qty_reserved_delta: 0,
+            p_qty_in_transit_delta: 0,
+            p_qty_damaged_delta: delta.damaged
+          }));
     if (stockWrites.length) await runCloudBatch('Readjusting edited sales inventory', stockWrites);
 
     const oldCustomerId = isValidUUID(existingDoc.customer_id) ? existingDoc.customer_id : null;
@@ -3992,6 +4190,7 @@ export function BusinessProvider({ children }) {
             qty_on_hand: qtyOnHand,
             qty_reserved: qtyReserved,
             qty_available: Math.max(0, qtyOnHand - qtyReserved),
+            qty_in_transit_reserved: Math.max(0, (Number(current.qty_in_transit_reserved) || 0) + (Number(delta.transitReserved) || 0)),
             qty_damaged: Math.max(0, (Number(current.qty_damaged) || 0) + delta.damaged)
           };
         });
@@ -4015,6 +4214,7 @@ export function BusinessProvider({ children }) {
       id: existingDoc.id,
       doc_no: existingDoc.doc_no,
       doc_type: existingDoc.doc_type,
+      reservation_source: isReservation ? (updatedData.reservation_source || existingDoc.reservation_source || 'on_hand') : null,
       customer_id: nextCustomerId,
       customer_name: nextCustomer?.business_name || updatedData.customer_name || 'Cash / Counter Customer',
       customer_phone: nextCustomer?.phone || '',
@@ -4053,12 +4253,12 @@ export function BusinessProvider({ children }) {
     const stockWrites = (doc.items || []).map(item => {
       const productId = item.product?.id || item.product_id;
       const qty = Number(item.qty) || 0;
-      return supabase.rpc('rpc_adjust_stock_balance', {
+      const onHandReserved = item.reserved_on_hand_qty == null ? qty : Number(item.reserved_on_hand_qty) || 0;
+      const incomingReserved = Number(item.reserved_in_transit_qty) || 0;
+      return supabase.rpc('rpc_adjust_stock_reservation', {
         p_product_id: productId,
-        p_qty_on_hand_delta: 0,
-        p_qty_reserved_delta: -qty,
-        p_qty_in_transit_delta: 0,
-        p_qty_damaged_delta: 0
+        p_on_hand_reserved_delta: -onHandReserved,
+        p_in_transit_reserved_delta: -incomingReserved
       });
     });
     if (stockWrites.length) await runCloudBatch('Releasing reserved stock', stockWrites);
@@ -4069,17 +4269,30 @@ export function BusinessProvider({ children }) {
         const pId = it.product?.id || it.product_id;
         const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
         const qty = Number(it.qty) || 1;
+        const onHandReserved = it.reserved_on_hand_qty == null ? qty : Number(it.reserved_on_hand_qty) || 0;
+        const incomingReserved = Number(it.reserved_in_transit_qty) || 0;
 
         updated[pId] = {
           ...cur,
-          qty_reserved: Math.max(0, (cur.qty_reserved || 0) - qty),
-          qty_available: (cur.qty_available || 0) + qty
+          qty_reserved: Math.max(0, (Number(cur.qty_reserved) || 0) - onHandReserved),
+          qty_available: (Number(cur.qty_available) || 0) + onHandReserved,
+          qty_in_transit_reserved: Math.max(0, (Number(cur.qty_in_transit_reserved) || 0) - incomingReserved)
         };
       });
       return updated;
     });
 
-    setSalesDocuments(prev => prev.map(d => d.id === docId ? { ...d, status: 'cancelled', payment_status: 'cancelled' } : d));
+    setSalesDocuments(prev => prev.map(d => d.id === docId ? {
+      ...d,
+      status: 'cancelled',
+      payment_status: 'cancelled',
+      items: (d.items || []).map(item => ({ ...item, reserved_on_hand_qty: 0, reserved_in_transit_qty: 0 }))
+    } : d));
+
+    await runCloudWrite('Clearing cancelled reservation allocations', () => supabase.from('sales_document_items').update({
+      reserved_on_hand_qty: 0,
+      reserved_in_transit_qty: 0
+    }).eq('sales_document_id', docId));
 
     setStockMovements(prev => [{
       id: 'mov-' + Date.now(),
@@ -4120,10 +4333,17 @@ export function BusinessProvider({ children }) {
         .map(item => {
           const productId = item.product_id || item.product?.id;
           const qty = Number(item.qty) || 0;
+          if (isReservationDocument) {
+            return supabase.rpc('rpc_adjust_stock_reservation', {
+              p_product_id: productId,
+              p_on_hand_reserved_delta: -(item.reserved_on_hand_qty == null ? qty : Number(item.reserved_on_hand_qty) || 0),
+              p_in_transit_reserved_delta: -(Number(item.reserved_in_transit_qty) || 0)
+            });
+          }
           return supabase.rpc('rpc_adjust_stock_balance', {
             p_product_id: productId,
-            p_qty_on_hand_delta: isReservationDocument ? 0 : qty,
-            p_qty_reserved_delta: isReservationDocument ? -qty : 0,
+            p_qty_on_hand_delta: qty,
+            p_qty_reserved_delta: 0,
             p_qty_in_transit_delta: 0,
             p_qty_damaged_delta: item.is_warranty_replacement ? -Math.min(qty, Number(stockBalances[productId]?.qty_damaged) || 0) : 0
           });
@@ -4156,10 +4376,13 @@ export function BusinessProvider({ children }) {
           const pId = it.product_id;
           const qty = Number(it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          const onHandReserved = it.reserved_on_hand_qty == null ? qty : Number(it.reserved_on_hand_qty) || 0;
+          const incomingReserved = Number(it.reserved_in_transit_qty) || 0;
           updated[pId] = {
             ...cur,
-            qty_reserved: Math.max(0, (cur.qty_reserved || 0) - qty),
-            qty_available: (cur.qty_available || 0) + qty
+            qty_reserved: Math.max(0, (Number(cur.qty_reserved) || 0) - onHandReserved),
+            qty_available: (Number(cur.qty_available) || 0) + onHandReserved,
+            qty_in_transit_reserved: Math.max(0, (Number(cur.qty_in_transit_reserved) || 0) - incomingReserved)
           };
         });
         return updated;

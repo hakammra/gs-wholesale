@@ -2207,6 +2207,7 @@ tr:hover td { background: #303030; }
 
 /* Sales document editor */
 .sales-edit-modal { width: min(1080px, 100%); }
+.reservation-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .sales-edit-header-grid { display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(150px, .7fr) minmax(170px, .8fr); gap: 12px; }
 .sales-edit-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
 .sales-edit-add-row button { min-height: 40px; }
@@ -2238,6 +2239,7 @@ tr:hover td { background: #303030; }
 }
 
 @media (max-width: 480px) {
+  .reservation-source-grid { grid-template-columns: minmax(0, 1fr); }
   .sales-edit-header-grid,
   .sales-edit-summary-grid { grid-template-columns: minmax(0, 1fr); }
 }

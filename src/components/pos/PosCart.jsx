@@ -43,18 +43,19 @@ export default function PosCart({
     const sb = (pId && stockBalances[pId]) || {};
 
     const onHand = Number(
-      sb.qty_on_hand !== undefined ? sb.qty_on_hand :
       sb.qty_available !== undefined ? sb.qty_available :
+      sb.qty_on_hand !== undefined ? Math.max(0, Number(sb.qty_on_hand) - (Number(sb.qty_reserved) || 0)) :
       p?.stock_quantity !== undefined ? p.stock_quantity :
       p?.qty_on_hand !== undefined ? p.qty_on_hand :
       0
     );
 
-    const inTransit = Number(
+    const inTransitTotal = Number(
       sb.qty_in_transit !== undefined ? sb.qty_in_transit :
       p?.qty_in_transit !== undefined ? p.qty_in_transit :
       0
     );
+    const inTransit = Math.max(0, inTransitTotal - (Number(sb.qty_in_transit_reserved) || 0));
 
     return { onHand, inTransit, total: onHand + inTransit };
   };
