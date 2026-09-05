@@ -3,6 +3,7 @@ import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
 import { generateStatementPDF, generateInvoicePDF } from '../../lib/pdfGenerator';
+import { buildWhatsAppSettlementMessage, generateWhatsAppMessageLink, shareWhatsAppContent } from '../../lib/exportUtils';
 
 export default function CustomerList({ onNavigateTab }) {
   const {
@@ -28,6 +29,8 @@ export default function CustomerList({ onNavigateTab }) {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [isSettlementModalOpen, setIsSettlementModalOpen] = useState(false);
   const [isSavingSettlement, setIsSavingSettlement] = useState(false);
+  const [settlementReceipt, setSettlementReceipt] = useState(null);
+  const [isSharingReceipt, setIsSharingReceipt] = useState(false);
   const [customerModalMode, setCustomerModalMode] = useState('create'); // 'create' | 'edit'
 
   const [customerForm, setCustomerForm] = useState({
@@ -288,7 +291,7 @@ export default function CustomerList({ onNavigateTab }) {
 
     setIsSavingSettlement(true);
     try {
-      await recordCustomerSettlement({
+      const payment = await recordCustomerSettlement({
         customer_id: selectedCust.id,
         customer_name: selectedCust.business_name,
         amount: amt,
@@ -302,10 +305,37 @@ export default function CustomerList({ onNavigateTab }) {
         bank_name: settlementForm.bank_name
       });
       setIsSettlementModalOpen(false);
+      setSettlementReceipt({
+        ...payment,
+        customer_name: selectedCust.business_name,
+        customer_phone: selectedCust.phone || '',
+        customer_whatsapp: selectedCust.whatsapp || ''
+      });
     } catch (err) {
       notifyError(err.message);
     } finally {
       setIsSavingSettlement(false);
+    }
+  };
+
+  const handleShareSettlementReceipt = async () => {
+    if (!settlementReceipt || isSharingReceipt) return;
+    const phone = settlementReceipt.customer_whatsapp || settlementReceipt.customer_phone;
+    if (!phone) {
+      notifyError('Add a WhatsApp or phone number for this customer first.');
+      return;
+    }
+    setIsSharingReceipt(true);
+    try {
+      await shareWhatsAppContent({
+        phone,
+        title: `Payment receipt ${settlementReceipt.payment_no || ''}`.trim(),
+        text: buildWhatsAppSettlementMessage(settlementReceipt, companySettings.business_name)
+      });
+    } catch (error) {
+      if (error?.name !== 'AbortError') notifyError(error.message || 'Could not share the payment receipt.');
+    } finally {
+      setIsSharingReceipt(false);
     }
   };
 
@@ -467,7 +497,7 @@ export default function CustomerList({ onNavigateTab }) {
                     {selectedCust.phone && <span>📞 <strong>Phone:</strong> {selectedCust.phone}</span>}
                     {selectedCust.whatsapp && (
                       <a
-                        href={`https://wa.me/${selectedCust.whatsapp.replace(/[^0-9]/g, '')}`}
+                        href={generateWhatsAppMessageLink(selectedCust.whatsapp, `Hello ${selectedCust.business_name}`)}
                         target="_blank"
                         rel="noreferrer"
                         style={{ color: '#52e37e', textDecoration: 'none', fontWeight: 600 }}
@@ -1084,6 +1114,62 @@ export default function CustomerList({ onNavigateTab }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Settlement receipt and WhatsApp share */}
+      {settlementReceipt && (
+        <div className="modal-overlay">
+          <div className="modal-box modal-md">
+            <div className="modal-header">
+              <h3>Payment Recorded</h3>
+              <button type="button" onClick={() => setSettlementReceipt(null)} className="modal-close">&times;</button>
+            </div>
+
+            <div className="modal-body">
+              <div style={{ textAlign: 'center', marginBottom: 16 }}>
+                <div style={{ fontSize: 34, marginBottom: 6 }}>✓</div>
+                <strong style={{ color: '#52e37e', fontSize: 18 }}>Payment saved successfully</strong>
+                <div style={{ color: 'var(--muted)', marginTop: 4 }}>{settlementReceipt.customer_name}</div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+                <div className="panel-card" style={{ padding: 12 }}>
+                  <small style={{ color: 'var(--muted)' }}>AMOUNT PAID</small>
+                  <div className="mono font-semibold" style={{ color: '#52e37e', fontSize: 18, marginTop: 4 }}>
+                    {formatCurrency(settlementReceipt.amount)}
+                  </div>
+                </div>
+                <div className="panel-card" style={{ padding: 12 }}>
+                  <small style={{ color: 'var(--muted)' }}>REMAINING BALANCE</small>
+                  <div className="mono font-semibold" style={{ color: Number(settlementReceipt.remaining_balance) > 0 ? '#ffca58' : '#52e37e', fontSize: 18, marginTop: 4 }}>
+                    {formatCurrency(settlementReceipt.remaining_balance)}
+                  </div>
+                </div>
+              </div>
+
+              {settlementReceipt.payment_method === 'cheque' && (
+                <div style={{ marginTop: 12, padding: 10, borderRadius: 6, background: 'rgba(255, 202, 88, 0.1)', color: '#ffca58', fontSize: 12 }}>
+                  Cheque received and recorded. The WhatsApp receipt will state that bank clearance is pending.
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" onClick={() => setSettlementReceipt(null)} className="secondary-button">
+                Done
+              </button>
+              <button
+                type="button"
+                onClick={handleShareSettlementReceipt}
+                disabled={isSharingReceipt}
+                className="primary-button"
+                style={{ background: '#25d366', color: '#071a0e', fontWeight: 800 }}
+              >
+                {isSharingReceipt ? 'Opening share…' : '💬 Share WhatsApp Receipt'}
+              </button>
+            </div>
           </div>
         </div>
       )}

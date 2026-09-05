@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
-import { generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
-import { exportToExcel, generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
+import { createInvoicePDFFile, generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
+import { buildWhatsAppInvoiceMessage, exportToExcel, shareWhatsAppContent } from '../../lib/exportUtils';
 
 export default function SalesDocumentsList() {
   const {
@@ -20,6 +20,7 @@ export default function SalesDocumentsList() {
   const [editForm, setEditForm] = useState(null);
   const [addProductId, setAddProductId] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isSharingInvoice, setIsSharingInvoice] = useState(false);
 
   const reservedDocsCount = salesDocuments.filter(d =>
     (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') &&
@@ -48,6 +49,10 @@ export default function SalesDocumentsList() {
   });
 
   const selectedDoc = salesDocuments.find(d => d.id === selectedDocId) || filteredDocs[0];
+  const selectedCustomer = selectedDoc
+    ? customers.find(c => String(c.id) === String(selectedDoc.customer_id)) || selectedDoc.customer
+    : null;
+  const selectedCustomerPhone = selectedCustomer?.whatsapp || selectedDoc?.customer_whatsapp || selectedCustomer?.phone || selectedDoc?.customer_phone || '';
   const isSelectedReserved = selectedDoc && (selectedDoc.doc_type === 'reserved_order' || selectedDoc.doc_type === 'sales_order') && selectedDoc.status === 'reserved';
 
   const handleExport = () => {
@@ -62,6 +67,31 @@ export default function SalesDocumentsList() {
       'Status': d.status || d.payment_status
     }));
     exportToExcel(data, 'Sales_Documents_Export');
+  };
+
+  const handleShareInvoice = async () => {
+    if (!selectedDoc || isSharingInvoice) return;
+    if (!selectedCustomerPhone) {
+      notifyError('Add a WhatsApp or phone number for this customer first.');
+      return;
+    }
+    setIsSharingInvoice(true);
+    try {
+      const file = createInvoicePDFFile(selectedDoc, companySettings, selectedCustomer, 'A4', products);
+      const result = await shareWhatsAppContent({
+        phone: selectedCustomerPhone,
+        title: `Invoice ${selectedDoc.doc_no || ''}`.trim(),
+        text: buildWhatsAppInvoiceMessage(selectedDoc, companySettings.business_name),
+        file
+      });
+      if (result.method === 'download-and-whatsapp') {
+        notifySuccess('Invoice PDF downloaded. Attach it in the WhatsApp chat that just opened.');
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') notifyError(error.message || 'Could not share this invoice.');
+    } finally {
+      setIsSharingInvoice(false);
+    }
   };
 
   const getLinkedPayments = (document) => payments.filter(payment =>
@@ -194,17 +224,16 @@ export default function SalesDocumentsList() {
                 <span>Print Document</span>
               </button>
 
-              {selectedDoc.customer_phone && (
-                <a
-                  href={generateWhatsAppInvoiceLink(selectedDoc, selectedDoc.customer_phone, companySettings.business_name)}
-                  target="_blank"
-                  rel="noreferrer"
+              {selectedCustomerPhone && (
+                <button
+                  type="button"
+                  onClick={handleShareInvoice}
+                  disabled={isSharingInvoice}
                   className="toolbar-button"
-                  style={{ textDecoration: 'none' }}
                 >
                   <span className="icon">💬</span>
-                  <span>WhatsApp</span>
-                </a>
+                  <span>{isSharingInvoice ? 'Preparing…' : 'Share Invoice'}</span>
+                </button>
               )}
 
               {isSelectedReserved && (

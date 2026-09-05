@@ -37,7 +37,7 @@ export const resolveItemCode = (it, products = []) => {
   return '';
 };
 
-export function generateInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4', products = []) {
+export function generateInvoicePDF(doc, companySettings = {}, customer = null, paperSize = 'A4', products = [], options = {}) {
   const docConfig = paperSize === 'A5' ? { orientation: 'landscape', format: 'a5' } : { orientation: 'portrait', format: 'a4' };
   const pdf = new jsPDF(docConfig);
 
@@ -300,7 +300,18 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
   pdf.text(footerText, margin, footY);
   pdf.text(`Page 1`, pageWidth - margin, footY, { align: 'right' });
 
-  pdf.save(`${doc.doc_no || 'Invoice'}.pdf`);
+  const fileName = `${doc.doc_no || 'Invoice'}.pdf`;
+  if (options.output === 'file') {
+    return new File([pdf.output('blob')], fileName, { type: 'application/pdf' });
+  }
+  if (options.output === 'blob') return pdf.output('blob');
+
+  pdf.save(fileName);
+  return pdf;
+}
+
+export function createInvoicePDFFile(doc, companySettings = {}, customer = null, paperSize = 'A4', products = []) {
+  return generateInvoicePDF(doc, companySettings, customer, paperSize, products, { output: 'file' });
 }
 
 export function generateStatementPDF(customer, invoices, payments, companySettings = {}) {

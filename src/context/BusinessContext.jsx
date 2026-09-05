@@ -142,7 +142,7 @@ export function BusinessProvider({ children }) {
           supabase.from('brands').select('*').order('name', { ascending: true }),
           supabase.from('products').select('*').order('created_at', { ascending: false }),
           supabase.from('stock_balances').select('*'),
-          supabase.from('sales_documents').select('*, items:sales_document_items(*, product:products(name, item_code)), customer:customers(business_name, billing_address, phone)').order('created_at', { ascending: false }),
+          supabase.from('sales_documents').select('*, items:sales_document_items(*, product:products(name, item_code)), customer:customers(business_name, billing_address, phone, whatsapp)').order('created_at', { ascending: false }),
           supabase.from('customers').select('*').order('business_name', { ascending: true }),
           supabase.from('suppliers').select('*').order('name', { ascending: true }),
           supabase.from('bank_accounts').select('*').order('created_at', { ascending: true }),
@@ -238,6 +238,7 @@ export function BusinessProvider({ children }) {
                 : document.payment_status === 'partially_paid' ? 'partial' : document.payment_status,
               customer_name: document.customer?.business_name || 'Cash / Counter Customer',
               customer_phone: document.customer?.phone || '',
+              customer_whatsapp: document.customer?.whatsapp || '',
               items: (document.items || []).map(item => ({
                 ...item,
                 discount_amount: Number(item.line_discount) || 0,
@@ -1043,6 +1044,14 @@ export function BusinessProvider({ children }) {
       : (settlementData.payment_method === 'bank' && isValidUUID(bankAccounts[0]?.id) ? bankAccounts[0].id : null);
     const paymentReference = settlementData.reference || (settlementData.cheque_no ? `Cheque #${settlementData.cheque_no}` : 'Customer Credit Settlement');
 
+    const customerDocuments = salesDocuments
+      .filter(document => document.customer_id === customerId && document.doc_type !== 'quotation' && document.status !== 'cancelled');
+    const documentBalance = customerDocuments
+      .reduce((sum, document) => sum + Math.max(0, Number(document.balance_due) || 0), 0);
+    const previousBalance = customerDocuments.length
+      ? documentBalance
+      : Math.max(0, Number(customer?.current_receivable) || 0);
+
     const allocations = [];
     let remaining = amount;
     salesDocuments
@@ -1136,7 +1145,11 @@ export function BusinessProvider({ children }) {
       party_type: 'customer',
       party_id: customerId,
       customer_name: customer?.business_name || settlementData.customer_name || 'Customer',
+      customer_phone: customer?.phone || '',
+      customer_whatsapp: customer?.whatsapp || '',
       amount,
+      previous_balance: previousBalance,
+      remaining_balance: Math.max(0, previousBalance - amount),
       currency: 'LKR',
       payment_method: settlementData.payment_method || 'cash',
       bank_account_id: effectiveBankId,
@@ -3882,6 +3895,7 @@ export function BusinessProvider({ children }) {
       customer_id: nextCustomerId,
       customer_name: nextCustomer?.business_name || updatedData.customer_name || 'Cash / Counter Customer',
       customer_phone: nextCustomer?.phone || '',
+      customer_whatsapp: nextCustomer?.whatsapp || '',
       doc_date: updatedData.doc_date || existingDoc.doc_date,
       items_subtotal: lineSubtotal,
       subtotal: lineSubtotal,

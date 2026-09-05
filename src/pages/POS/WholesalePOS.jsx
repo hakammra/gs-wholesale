@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, calculateWholesaleItemPrice, calculateDocumentTotals, formatDate } from '../../lib/formatters';
-import { generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
-import { generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
+import { createInvoicePDFFile, generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
+import { buildWhatsAppInvoiceMessage, shareWhatsAppContent } from '../../lib/exportUtils';
 import CustomerHeader from '../../components/pos/CustomerHeader';
 import ProductSearchGrid from '../../components/pos/ProductSearchGrid';
 import PosCart from '../../components/pos/PosCart';
@@ -58,6 +58,7 @@ export default function WholesalePOS() {
   // Modals
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [completedSaleDoc, setCompletedSaleDoc] = useState(null);
+  const [isSharingInvoice, setIsSharingInvoice] = useState(false);
   const [isMarginOverrideOpen, setIsMarginOverrideOpen] = useState(false);
   const [pendingLowMarginItems, setPendingLowMarginItems] = useState([]);
   const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
@@ -84,6 +85,32 @@ export default function WholesalePOS() {
     : (Number(currentTab.discount) || 0);
 
   const totals = calculateDocumentTotals(currentTab.items, effectiveCartDiscount, 0);
+
+  const handleShareCompletedInvoice = async () => {
+    if (!completedSaleDoc || isSharingInvoice) return;
+    const phone = completedSaleDoc.customer?.whatsapp || completedSaleDoc.customer?.phone || completedSaleDoc.customer_phone;
+    if (!phone) {
+      notifyError('Add a WhatsApp or phone number for this customer first.');
+      return;
+    }
+    setIsSharingInvoice(true);
+    try {
+      const file = createInvoicePDFFile(completedSaleDoc, companySettings, completedSaleDoc.customer, 'A4', products);
+      const result = await shareWhatsAppContent({
+        phone,
+        title: `Invoice ${completedSaleDoc.doc_no || ''}`.trim(),
+        text: buildWhatsAppInvoiceMessage(completedSaleDoc, companySettings.business_name),
+        file
+      });
+      if (result.method === 'download-and-whatsapp') {
+        notifySuccess('Invoice PDF downloaded. Attach it in the WhatsApp chat that just opened.');
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') notifyError(error.message || 'Could not share this invoice.');
+    } finally {
+      setIsSharingInvoice(false);
+    }
+  };
 
   // Active Open Customer Reservations
   const openReservations = salesDocuments.filter(d =>
@@ -1174,16 +1201,16 @@ export default function WholesalePOS() {
                   <span>🖨</span> Print Invoice
                 </button>
 
-                {completedSaleDoc.customer_phone && (
-                  <a
-                    href={generateWhatsAppInvoiceLink(completedSaleDoc, completedSaleDoc.customer_phone, companySettings.business_name)}
-                    target="_blank"
-                    rel="noreferrer"
+                {(completedSaleDoc.customer?.whatsapp || completedSaleDoc.customer?.phone || completedSaleDoc.customer_phone) && (
+                  <button
+                    type="button"
+                    onClick={handleShareCompletedInvoice}
+                    disabled={isSharingInvoice}
                     className="secondary-button"
-                    style={{ padding: '10px 14px', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}
+                    style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}
                   >
-                    <span>💬</span> WhatsApp
-                  </a>
+                    <span>💬</span> {isSharingInvoice ? 'Preparing…' : 'Share Invoice'}
+                  </button>
                 )}
 
                 <button

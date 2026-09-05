@@ -74,22 +74,93 @@ export function downloadProductExcelTemplate() {
   XLSX.writeFile(wb, 'GS_Wholesale_Product_Import_Template.xlsx');
 }
 
-export function generateWhatsAppInvoiceLink(doc, customerPhone, businessName = 'GS WHOLESALE') {
-  if (!customerPhone) return null;
-  const cleanPhone = customerPhone.replace(/[^0-9]/g, '');
-  const lines = [
+export function normalizeWhatsAppPhone(phone, defaultCountryCode = '94') {
+  let cleanPhone = String(phone || '').replace(/[^0-9]/g, '');
+  if (!cleanPhone) return '';
+  if (cleanPhone.startsWith('00')) cleanPhone = cleanPhone.slice(2);
+  if (cleanPhone.startsWith('0')) cleanPhone = `${defaultCountryCode}${cleanPhone.slice(1)}`;
+  else if (cleanPhone.length === 9) cleanPhone = `${defaultCountryCode}${cleanPhone}`;
+  return cleanPhone;
+}
+
+const formatWhatsAppCurrency = (amount) => Number(amount || 0).toLocaleString('en-LK', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
+export function buildWhatsAppInvoiceMessage(doc, businessName = 'GS WHOLESALE') {
+  return [
     `*${businessName}*`,
-    `Invoice: ${doc.doc_no}`,
-    `Date: ${doc.doc_date}`,
+    `Invoice: ${doc.doc_no || '-'}`,
+    `Date: ${doc.doc_date || '-'}`,
     `Customer: ${doc.customer_name || 'Valued Customer'}`,
     `--------------------------------`,
-    `Total: Rs. ${(doc.grand_total || 0).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`,
-    `Paid: Rs. ${(doc.paid_amount || 0).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`,
-    `Balance Due: Rs. ${(doc.balance_due || 0).toLocaleString('en-LK', { minimumFractionDigits: 2 })}`,
+    `Total: Rs. ${formatWhatsAppCurrency(doc.grand_total)}`,
+    `Paid: Rs. ${formatWhatsAppCurrency(doc.paid_amount)}`,
+    `Balance Due: Rs. ${formatWhatsAppCurrency(doc.balance_due)}`,
     doc.due_date ? `Due Date: ${doc.due_date}` : '',
     `--------------------------------`,
+    `The invoice PDF is attached.`,
     `Thank you for your business!`
-  ].filter(Boolean).join('%0A');
+  ].filter(Boolean).join('\n');
+}
 
-  return `https://wa.me/${cleanPhone}?text=${lines}`;
+export function buildWhatsAppSettlementMessage(payment, businessName = 'GS WHOLESALE') {
+  const isCheque = payment.payment_method === 'cheque';
+  return [
+    `*${businessName}*`,
+    isCheque ? `Cheque payment received` : `Payment received`,
+    `Customer: ${payment.customer_name || 'Valued Customer'}`,
+    `Receipt: ${payment.payment_no || '-'}`,
+    `Date: ${payment.payment_date || '-'}`,
+    `Paid: Rs. ${formatWhatsAppCurrency(payment.amount)}`,
+    `Remaining Balance: Rs. ${formatWhatsAppCurrency(payment.remaining_balance)}`,
+    payment.reference ? `Reference: ${payment.reference}` : '',
+    isCheque ? `Note: This cheque is pending bank clearance.` : '',
+    `Thank you. Your payment has been recorded.`
+  ].filter(Boolean).join('\n');
+}
+
+export function generateWhatsAppMessageLink(phone, message) {
+  const cleanPhone = normalizeWhatsAppPhone(phone);
+  if (!cleanPhone) return null;
+  return `https://wa.me/${cleanPhone}?text=${encodeURIComponent(message)}`;
+}
+
+export function generateWhatsAppInvoiceLink(doc, customerPhone, businessName = 'GS WHOLESALE') {
+  return generateWhatsAppMessageLink(customerPhone, buildWhatsAppInvoiceMessage(doc, businessName));
+}
+
+function downloadSharedFile(file) {
+  const url = URL.createObjectURL(file);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = file.name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function shareWhatsAppContent({ phone, title, text, file = null }) {
+  const shareData = {
+    title: title || 'GS Wholesale',
+    text,
+    ...(file ? { files: [file] } : {})
+  };
+
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    const canShareFiles = !file || (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }));
+    if (canShareFiles) {
+      await navigator.share(shareData);
+      return { method: 'native-share' };
+    }
+  }
+
+  if (file) downloadSharedFile(file);
+  const url = generateWhatsAppMessageLink(phone, text);
+  if (!url) throw new Error('Add a WhatsApp or phone number for this customer first.');
+  window.open(url, '_blank', 'noopener,noreferrer');
+
+  return { method: file ? 'download-and-whatsapp' : 'whatsapp-link' };
 }
