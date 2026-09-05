@@ -1002,6 +1002,67 @@ export function BusinessProvider({ children }) {
     return { success: true };
   };
 
+  const markProductAsDamaged = async (damageData) => {
+    const productId = damageData?.product_id;
+    const product = products.find(item => item.id === productId);
+    if (!product || !isValidUUID(productId)) throw new Error('Select a valid product.');
+
+    const quantity = Number(damageData.quantity) || 0;
+    if (quantity <= 0) throw new Error('Damaged quantity must be greater than zero.');
+
+    const current = stockBalances[productId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+    const available = Math.max(0, Number(current.qty_available ?? ((Number(current.qty_on_hand) || 0) - (Number(current.qty_reserved) || 0))) || 0);
+    if (quantity > available) {
+      throw new Error(`Only ${available} sellable units of ${product.name} are available.`);
+    }
+
+    const movementDate = damageData.movement_date || new Date().toISOString().slice(0, 10);
+    const referenceNo = `DMG-${movementDate.replaceAll('-', '')}-${Date.now().toString().slice(-6)}`;
+    const reason = damageData.reason || 'Physical damage';
+    const notes = damageData.notes || '';
+
+    const cloudBalance = await runCloudWrite('Moving stock to damaged inventory', () => supabase.rpc('rpc_mark_stock_damaged', {
+      p_product_id: productId,
+      p_quantity: quantity,
+      p_reference_no: referenceNo,
+      p_reason: reason,
+      p_notes: notes || null,
+      p_movement_date: movementDate
+    }));
+
+    const nextOnHand = Number(cloudBalance?.qty_on_hand ?? ((Number(current.qty_on_hand) || 0) - quantity)) || 0;
+    const nextAvailable = Number(cloudBalance?.qty_available ?? Math.max(0, nextOnHand - (Number(current.qty_reserved) || 0))) || 0;
+    const nextDamaged = Number(cloudBalance?.qty_damaged ?? ((Number(current.qty_damaged) || 0) + quantity)) || 0;
+    const movementNotes = cloudBalance?.notes || ['Moved to damaged stock', reason, notes].filter(Boolean).join(' | ');
+    const createdAt = cloudBalance?.created_at || `${movementDate}T00:00:00.000Z`;
+
+    setStockBalances(prev => ({
+      ...prev,
+      [productId]: {
+        ...(prev[productId] || current),
+        qty_on_hand: nextOnHand,
+        qty_available: nextAvailable,
+        qty_damaged: nextDamaged
+      }
+    }));
+
+    setStockMovements(prev => [{
+      id: `local-${referenceNo}`,
+      product_id: productId,
+      movement_type: 'stock_adjustment',
+      reference_doc_type: 'inventory_damage',
+      reference_doc_no: referenceNo,
+      qty_change: -quantity,
+      unit_cost_snapshot: Number(cloudBalance?.unit_cost_snapshot ?? product.weighted_cost_lkr) || 0,
+      balance_after: nextOnHand,
+      notes: movementNotes,
+      created_at: createdAt
+    }, ...prev.filter(movement => movement.reference_doc_no !== referenceNo)]);
+
+    notifySuccess(`${quantity} ${quantity === 1 ? 'unit' : 'units'} of ${product.name} moved to damaged stock.`);
+    return { reference_no: referenceNo, qty_on_hand: nextOnHand, qty_available: nextAvailable, qty_damaged: nextDamaged };
+  };
+
   // Customer CRUD
   const saveCustomer = async (customerData) => {
     const targetId = customerData.id || generateUUID();
@@ -4257,7 +4318,7 @@ export function BusinessProvider({ children }) {
       categories, setCategories, saveCategory, deleteCategory, deleteAllCategories, getCategoryPath,
       brands, setBrands, saveBrand, deleteBrand,
       products, setProducts, saveProduct, deleteProduct, importProductsFromExcel,
-      stockBalances, setStockBalances,
+      stockBalances, setStockBalances, markProductAsDamaged,
       stockMovements, setStockMovements,
       customers, setCustomers, saveCustomer, deleteCustomer, recordCustomerSettlement,
       suppliers, setSuppliers, saveSupplier, deleteSupplier,

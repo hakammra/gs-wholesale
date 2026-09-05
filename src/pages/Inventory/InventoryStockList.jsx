@@ -5,11 +5,19 @@ import { formatCurrency, formatDate } from '../../lib/formatters';
 import { exportToExcel, parseExcelFile, downloadProductExcelTemplate } from '../../lib/exportUtils';
 
 export default function InventoryStockList() {
-  const { products, stockBalances, stockMovements, importProductsFromExcel, categories } = useBusiness();
+  const { products, stockBalances, stockMovements, importProductsFromExcel, categories, markProductAsDamaged } = useBusiness();
   const { notifySuccess, notifyError } = useNotification();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedProductMovements, setSelectedProductMovements] = useState(null);
+  const [damageProduct, setDamageProduct] = useState(null);
+  const [damageForm, setDamageForm] = useState({
+    quantity: 1,
+    movement_date: new Date().toISOString().slice(0, 10),
+    reason: 'Physical damage',
+    notes: ''
+  });
+  const [isMarkingDamaged, setIsMarkingDamaged] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -29,6 +37,34 @@ export default function InventoryStockList() {
     const stock = stockBalances[p.id] || { qty_available: 0 };
     return sum + (stock.qty_available || 0);
   }, 0);
+
+  const totalDamagedUnits = products.reduce((sum, product) => (
+    sum + (Number(stockBalances[product.id]?.qty_damaged) || 0)
+  ), 0);
+
+  const openDamageModal = (product) => {
+    setDamageProduct(product);
+    setDamageForm({
+      quantity: 1,
+      movement_date: new Date().toISOString().slice(0, 10),
+      reason: 'Physical damage',
+      notes: ''
+    });
+  };
+
+  const handleMarkDamaged = async (event) => {
+    event.preventDefault();
+    if (!damageProduct || isMarkingDamaged) return;
+    setIsMarkingDamaged(true);
+    try {
+      await markProductAsDamaged({ ...damageForm, product_id: damageProduct.id });
+      setDamageProduct(null);
+    } catch (error) {
+      notifyError(error?.message || 'Could not move the selected stock to damaged inventory.');
+    } finally {
+      setIsMarkingDamaged(false);
+    }
+  };
 
   const handleExport = () => {
     const data = products.map(p => {
@@ -100,7 +136,7 @@ export default function InventoryStockList() {
       </div>
 
       <div className="page-section" style={{ padding: 18 }}>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))' }}>
           <div className="stat-card">
             <p>TOTAL INVENTORY VALUATION</p>
             <strong style={{ color: 'var(--primary)' }}>{formatCurrency(totalOnHandValue)}</strong>
@@ -108,6 +144,10 @@ export default function InventoryStockList() {
           <div className="stat-card">
             <p>TOTAL SELLABLE UNITS</p>
             <strong style={{ color: '#52e37e' }}>{totalAvailableUnits.toLocaleString()} Units</strong>
+          </div>
+          <div className="stat-card">
+            <p>DAMAGED UNITS</p>
+            <strong style={{ color: '#ff8e8e' }}>{totalDamagedUnits.toLocaleString()} Units</strong>
           </div>
           <div className="stat-card">
             <p>ACTIVE SKU COUNT</p>
@@ -183,12 +223,23 @@ export default function InventoryStockList() {
                       <td className="mono">{formatCurrency(p.weighted_cost_lkr)}</td>
                       <td className="mono font-semibold">{formatCurrency(valuation)}</td>
                       <td>
-                        <button
-                          onClick={() => setSelectedProductMovements(p)}
-                          className="secondary-button small-button"
-                        >
-                          Ledger
-                        </button>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            onClick={() => openDamageModal(p)}
+                            disabled={(Number(stock.qty_available) || 0) <= 0}
+                            className="secondary-button small-button"
+                            style={{ color: '#ff8e8e', borderColor: 'rgba(255, 142, 142, 0.45)' }}
+                            title={(Number(stock.qty_available) || 0) > 0 ? 'Move sellable stock into damaged stock' : 'No sellable stock available'}
+                          >
+                            Mark Damaged
+                          </button>
+                          <button
+                            onClick={() => setSelectedProductMovements(p)}
+                            className="secondary-button small-button"
+                          >
+                            Ledger
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -226,6 +277,7 @@ export default function InventoryStockList() {
                     <th>Qty Change</th>
                     <th>Cost Snapshot</th>
                     <th>Balance After</th>
+                    <th>Notes</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -239,11 +291,12 @@ export default function InventoryStockList() {
                       </td>
                       <td className="mono">{formatCurrency(mv.unit_cost_snapshot)}</td>
                       <td className="mono font-semibold">{mv.balance_after}</td>
+                      <td style={{ whiteSpace: 'normal', minWidth: 180 }}>{mv.notes || '-'}</td>
                     </tr>
                   ))}
                   {stockMovements.filter(m => m.product_id === selectedProductMovements.id).length === 0 && (
                     <tr>
-                      <td colSpan="6" style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>
+                      <td colSpan="7" style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>
                         No audit ledger records yet for this product.
                       </td>
                     </tr>
@@ -260,6 +313,100 @@ export default function InventoryStockList() {
           </div>
         </div>
       )}
+
+      {damageProduct && (() => {
+        const stock = stockBalances[damageProduct.id] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_damaged: 0 };
+        const available = Math.max(0, Number(stock.qty_available) || 0);
+        return (
+          <div className="modal-overlay">
+            <div className="modal-box modal-sm">
+              <div className="modal-header">
+                <div>
+                  <h3 style={{ margin: 0 }}>Mark Stock as Damaged</h3>
+                  <small className="mono" style={{ color: 'var(--primary)' }}>{damageProduct.item_code}</small>
+                </div>
+                <button type="button" onClick={() => setDamageProduct(null)} className="modal-close">&times;</button>
+              </div>
+
+              <form onSubmit={handleMarkDamaged}>
+                <div className="modal-body">
+                  <div style={{ padding: 12, marginBottom: 12, background: '#1c1c1c', border: '1px solid var(--line)', borderRadius: 4 }}>
+                    <strong style={{ display: 'block', marginBottom: 6 }}>{damageProduct.name}</strong>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, fontSize: 12 }}>
+                      <div><span style={{ color: 'var(--muted)' }}>On hand</span><div className="mono">{stock.qty_on_hand || 0}</div></div>
+                      <div><span style={{ color: 'var(--muted)' }}>Available</span><div className="mono" style={{ color: '#52e37e' }}>{available}</div></div>
+                      <div><span style={{ color: 'var(--muted)' }}>Damaged</span><div className="mono" style={{ color: '#ff8e8e' }}>{stock.qty_damaged || 0}</div></div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div>
+                      <label>Quantity *</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        max={available}
+                        step="0.01"
+                        required
+                        autoFocus
+                        className="mono font-semibold"
+                        value={damageForm.quantity}
+                        onChange={(event) => setDamageForm(prev => ({ ...prev, quantity: event.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label>Date *</label>
+                      <input
+                        type="date"
+                        required
+                        value={damageForm.movement_date}
+                        onChange={(event) => setDamageForm(prev => ({ ...prev, movement_date: event.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label>Reason *</label>
+                    <select
+                      required
+                      value={damageForm.reason}
+                      onChange={(event) => setDamageForm(prev => ({ ...prev, reason: event.target.value }))}
+                    >
+                      <option value="Physical damage">Physical damage</option>
+                      <option value="Failed inspection">Failed inspection / defective</option>
+                      <option value="Handling damage">Handling damage</option>
+                      <option value="Water or moisture damage">Water or moisture damage</option>
+                      <option value="Packaging damage">Packaging damage</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label>Notes</label>
+                    <textarea
+                      rows="3"
+                      placeholder="Optional details, serial numbers, location, or responsible person"
+                      value={damageForm.notes}
+                      onChange={(event) => setDamageForm(prev => ({ ...prev, notes: event.target.value }))}
+                    />
+                  </div>
+
+                  <div style={{ padding: 9, background: 'rgba(255, 142, 142, 0.08)', border: '1px solid rgba(255, 142, 142, 0.35)', borderRadius: 4, color: '#ffc2c2', fontSize: 12 }}>
+                    This removes the quantity from sellable/on-hand stock and adds the same quantity to damaged stock. Product WAC is unchanged.
+                  </div>
+                </div>
+
+                <div className="modal-footer">
+                  <button type="button" onClick={() => setDamageProduct(null)} className="secondary-button">Cancel</button>
+                  <button type="submit" disabled={isMarkingDamaged || available <= 0} className="primary-button" style={{ background: '#b91c1c', borderColor: '#ef4444' }}>
+                    {isMarkingDamaged ? 'Moving…' : 'Confirm Damaged Stock'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
