@@ -2205,3 +2205,40 @@ tr:hover td { background: #303030; }
   }
 }
 
+/* Sales document editor */
+.sales-edit-modal { width: min(1080px, 100%); }
+.sales-edit-header-grid { display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(150px, .7fr) minmax(170px, .8fr); gap: 12px; }
+.sales-edit-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.sales-edit-add-row button { min-height: 40px; }
+.sales-edit-items { border: 1px solid var(--line); border-radius: 8px; }
+.sales-edit-items table { min-width: 900px; }
+.sales-edit-items th:nth-child(1) { min-width: 210px; }
+.sales-edit-items th:nth-child(2) { width: 90px; }
+.sales-edit-items th:nth-child(3),
+.sales-edit-items th:nth-child(4) { width: 130px; }
+.sales-edit-items th:nth-child(5) { width: 125px; }
+.sales-edit-items th:nth-child(6) { width: 140px; }
+.sales-edit-warranty-toggle { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.sales-edit-warranty-toggle input,
+.sales-payment-adjustment input { width: 18px; height: 18px; margin: 0; flex: 0 0 18px; accent-color: var(--primary); }
+.sales-edit-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.sales-edit-summary-grid > div { display: grid; gap: 5px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-3); min-width: 0; }
+.sales-edit-summary-grid small { color: var(--muted); font-weight: 700; }
+.sales-edit-summary-grid strong { font-family: 'JetBrains Mono', Consolas, monospace; overflow-wrap: anywhere; }
+.sales-edit-summary-grid > div:nth-child(3) strong { color: var(--primary); font-size: 18px; }
+.sales-payment-adjustment { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid rgba(34, 168, 232, .4); border-radius: 8px; background: rgba(34, 168, 232, .08); cursor: pointer; }
+.sales-payment-adjustment span { display: grid; gap: 3px; min-width: 0; }
+.sales-payment-adjustment small { color: var(--muted); font-weight: 500; line-height: 1.35; }
+
+@media (max-width: 768px) {
+  .sales-edit-header-grid,
+  .sales-edit-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sales-edit-add-row { grid-template-columns: minmax(0, 1fr); }
+  .sales-edit-add-row button { width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .sales-edit-header-grid,
+  .sales-edit-summary-grid { grid-template-columns: minmax(0, 1fr); }
+}
+

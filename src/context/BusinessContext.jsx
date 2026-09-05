@@ -231,12 +231,18 @@ export function BusinessProvider({ children }) {
             const isActiveReservation = document.doc_type === 'sales_order' && document.status === 'confirmed';
             return {
               ...document,
+              discount_amount: Number(document.doc_discount_total) || 0,
               status: isActiveReservation ? 'reserved' : document.status,
-              payment_status: isActiveReservation && document.payment_status === 'unpaid' ? 'reserved' : document.payment_status,
+              payment_status: isActiveReservation && document.payment_status === 'unpaid'
+                ? 'reserved'
+                : document.payment_status === 'partially_paid' ? 'partial' : document.payment_status,
               customer_name: document.customer?.business_name || 'Cash / Counter Customer',
               customer_phone: document.customer?.phone || '',
               items: (document.items || []).map(item => ({
                 ...item,
+                discount_amount: Number(item.line_discount) || 0,
+                is_warranty_replacement: String(item.notes || '').toLowerCase().includes('warranty replacement'),
+                warranty_note: String(item.notes || '').toLowerCase().includes('warranty replacement') ? item.notes : '',
                 product_name: item.product?.name || 'Product Item',
                 item_code: item.product?.item_code || '',
                 product: item.product || null
@@ -3270,6 +3276,12 @@ export function BusinessProvider({ children }) {
       return sum + ((Number(it.qty) || 1) * price - (Number(it.discount_amount) || 0));
     }, 0);
     const grandTotal = Math.max(0, itemsSubtotal - (Number(docData.discount_amount) || 0));
+    const totalCostSnapshot = (docData.items || []).reduce((sum, item) => {
+      const qty = Number(item.qty) || 1;
+      const unitCost = Number(item.unit_cost_snapshot || item.product?.weighted_cost_lkr || item.product?.cost_price) || 0;
+      return sum + (qty * unitCost);
+    }, 0);
+    const grossProfit = grandTotal - totalCostSnapshot;
 
     let paidAmount = 0;
     const isCod = (docData.payment_lines || []).some(p => p.method === 'cod');
@@ -3446,7 +3458,14 @@ export function BusinessProvider({ children }) {
       customer_id: custId,
       doc_date: newDoc.doc_date,
       subtotal: itemsSubtotal,
+      line_discount_total: (docData.items || []).reduce((sum, item) => sum + (Number(item.discount_amount) || 0), 0),
+      doc_discount_type: 'amount',
+      doc_discount_value: Number(docData.discount_amount) || 0,
+      doc_discount_total: Number(docData.discount_amount) || 0,
       grand_total: grandTotal,
+      total_cost_snapshot: totalCostSnapshot,
+      gross_profit: grossProfit,
+      gross_profit_pct: grandTotal > 0 ? (grossProfit / grandTotal) * 100 : 0,
       paid_amount: paidAmount,
       balance_due: balanceDue,
       status: isReservation ? 'confirmed' : isQuotation ? 'draft' : (balanceDue <= 0.01 ? 'completed' : 'confirmed'),
@@ -3463,6 +3482,10 @@ export function BusinessProvider({ children }) {
       const productId = item.product?.id || item.product_id;
       const unitPrice = item.is_warranty_replacement ? 0 : (Number(item.unit_price) || 0);
       const qty = Number(item.qty) || 1;
+      const lineDiscount = item.is_warranty_replacement ? 0 : (Number(item.discount_amount) || 0);
+      const unitCost = Number(item.unit_cost_snapshot || item.product?.weighted_cost_lkr || item.product?.cost_price) || 0;
+      const lineTotal = Math.max(0, qty * unitPrice - lineDiscount);
+      const lineProfit = lineTotal - (qty * unitCost);
       return {
         id: generateUUID(),
         sales_document_id: docId,
@@ -3472,8 +3495,14 @@ export function BusinessProvider({ children }) {
         conversion_factor: 1,
         base_qty: qty,
         unit_price: unitPrice,
-        line_total: Math.max(0, qty * unitPrice - (Number(item.discount_amount) || 0)),
-        notes: item.notes || (item.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
+        discount_type: 'amount',
+        discount_value: lineDiscount,
+        line_discount: lineDiscount,
+        line_total: lineTotal,
+        unit_cost_snapshot: unitCost,
+        line_profit: lineProfit,
+        line_profit_pct: lineTotal > 0 ? (lineProfit / lineTotal) * 100 : 0,
+        notes: item.warranty_note || item.notes || (item.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
       };
     }).filter(item => isValidUUID(item.product_id));
     if (itemsToInsert.length) {
@@ -3580,6 +3609,297 @@ export function BusinessProvider({ children }) {
     }
 
     return newDoc;
+  };
+
+  // Edit an existing sales document and apply only the financial/inventory
+  // deltas. This preserves the document number and linked payment identities.
+  const updateSalesDocument = async (documentId, updatedData = {}) => {
+    const existingDoc = salesDocuments.find(document => String(document.id) === String(documentId));
+    if (!existingDoc) throw new Error('Sales document not found.');
+    if (!isValidUUID(existingDoc.id)) throw new Error('This sales document has an invalid cloud identifier.');
+    if (['cancelled', 'converted_to_sale', 'returned'].includes(existingDoc.status)) {
+      throw new Error('Cancelled, returned, or converted documents cannot be edited.');
+    }
+
+    const isReservation = existingDoc.doc_type === 'reserved_order' || existingDoc.doc_type === 'sales_order';
+    const isQuotation = existingDoc.doc_type === 'quotation';
+    const isInvoice = existingDoc.doc_type === 'sales_invoice';
+    const rawItems = updatedData.items || existingDoc.items || [];
+    if (!rawItems.length) throw new Error('Add at least one item before saving the document.');
+
+    const nextItems = rawItems.map(item => {
+      const productId = item.product_id || item.product?.id || item.id;
+      const product = products.find(entry => entry.id === productId) || item.product;
+      const qty = Number(item.qty || item.base_qty) || 0;
+      const isWarranty = Boolean(item.is_warranty_replacement);
+      const unitPrice = isWarranty ? 0 : Math.max(0, Number(item.unit_price) || 0);
+      const discountAmount = isWarranty ? 0 : Math.max(0, Number(item.discount_amount ?? item.line_discount) || 0);
+      const lineTotal = Math.max(0, (qty * unitPrice) - discountAmount);
+      const unitCost = Number(item.unit_cost_snapshot || product?.weighted_cost_lkr || product?.cost_price) || 0;
+      if (!isValidUUID(productId)) throw new Error(`Select a valid product for ${product?.name || item.product_name || 'each line'}.`);
+      if (qty <= 0) throw new Error(`Quantity must be greater than zero for ${product?.name || item.product_name || 'each line'}.`);
+      return {
+        ...item,
+        product_id: productId,
+        product,
+        product_name: product?.name || item.product_name || 'Product Item',
+        item_code: product?.item_code || item.item_code || '',
+        qty,
+        base_qty: qty,
+        unit_price: unitPrice,
+        discount_amount: Math.min(discountAmount, qty * unitPrice),
+        line_total: lineTotal,
+        unit_cost_snapshot: unitCost,
+        is_warranty_replacement: isWarranty
+      };
+    });
+
+    const lineSubtotal = nextItems.reduce((sum, item) => sum + item.line_total, 0);
+    const documentDiscount = Math.min(Math.max(0, Number(updatedData.discount_amount) || 0), lineSubtotal);
+    const grandTotal = Math.max(0, lineSubtotal - documentDiscount);
+    const totalCostSnapshot = nextItems.reduce((sum, item) => sum + (item.qty * item.unit_cost_snapshot), 0);
+    const grossProfit = grandTotal - totalCostSnapshot;
+
+    const linkedPayments = payments.filter(payment =>
+      String(payment.sales_doc_id || '') === String(existingDoc.id) ||
+      payment.reference === existingDoc.doc_no
+    );
+    const activeLinkedPayments = linkedPayments.filter(payment => {
+      if (payment.payment_method !== 'cheque') return true;
+      const cheque = cheques.find(entry => entry.id === payment.cheque_id || entry.payment_id === payment.id);
+      return !cheque || !['returned', 'cancelled'].includes(cheque.status);
+    });
+    const adjustablePayment = activeLinkedPayments.length === 1 && Number(existingDoc.balance_due) <= 0.01
+      ? activeLinkedPayments[0]
+      : null;
+    const shouldAdjustPaidPayment = Boolean(updatedData.adjust_paid_payment);
+    if (shouldAdjustPaidPayment && !adjustablePayment) {
+      throw new Error('Only a fully paid document with one linked payment can automatically readjust its payment.');
+    }
+
+    let paidAmount = Number(existingDoc.paid_amount) || 0;
+    let paymentDelta = 0;
+    if (shouldAdjustPaidPayment && adjustablePayment) {
+      paymentDelta = grandTotal - (Number(adjustablePayment.amount) || 0);
+      paidAmount = grandTotal;
+      if (grandTotal <= 0) throw new Error('A paid document cannot be reduced to zero. Remove or replace the payment first.');
+      if (paymentDelta && adjustablePayment.payment_method === 'bank' && !isValidUUID(adjustablePayment.bank_account_id)) {
+        throw new Error('The linked bank payment has no valid bank account and cannot be adjusted safely.');
+      }
+      if (paymentDelta && adjustablePayment.payment_method === 'cheque') {
+        const cheque = cheques.find(entry => entry.id === adjustablePayment.cheque_id || entry.payment_id === adjustablePayment.id);
+        if (cheque?.status === 'cleared' && !isValidUUID(cheque.deposit_bank_account_id)) {
+          throw new Error('The cleared cheque has no deposit account and cannot be adjusted safely.');
+        }
+      }
+    } else if (grandTotal + 0.01 < paidAmount) {
+      throw new Error(`The edited total cannot be below the recorded payment (${paidAmount.toFixed(2)} LKR). Enable payment readjustment when available.`);
+    }
+
+    const balanceDue = Math.max(0, grandTotal - paidAmount);
+    const nextCustomerId = isValidUUID(updatedData.customer_id) ? updatedData.customer_id : null;
+    if (!isQuotation && balanceDue > 0.01 && !nextCustomerId) {
+      throw new Error('Select a customer when the edited document has an outstanding balance.');
+    }
+    const nextCustomer = customers.find(customer => customer.id === nextCustomerId);
+
+    const aggregateItems = (items) => items.reduce((map, item) => {
+      const productId = item.product_id || item.product?.id;
+      if (!isValidUUID(productId)) return map;
+      const current = map.get(productId) || { qty: 0, damaged: 0 };
+      current.qty += Number(item.qty || item.base_qty) || 0;
+      if (item.is_warranty_replacement || String(item.notes || '').toLowerCase().includes('warranty replacement')) {
+        current.damaged += Number(item.qty || item.base_qty) || 0;
+      }
+      map.set(productId, current);
+      return map;
+    }, new Map());
+
+    const oldItemsByProduct = aggregateItems(existingDoc.items || []);
+    const nextItemsByProduct = aggregateItems(nextItems);
+    const affectedProductIds = Array.from(new Set([...oldItemsByProduct.keys(), ...nextItemsByProduct.keys()]));
+    const stockDeltas = [];
+    if (isInvoice || isReservation) {
+      for (const productId of affectedProductIds) {
+        const oldLine = oldItemsByProduct.get(productId) || { qty: 0, damaged: 0 };
+        const nextLine = nextItemsByProduct.get(productId) || { qty: 0, damaged: 0 };
+        const stock = stockBalances[productId] || {};
+        if (isInvoice && nextLine.qty > (Number(stock.qty_on_hand) || 0) + oldLine.qty) {
+          const product = products.find(item => item.id === productId);
+          throw new Error(`Not enough stock to increase ${product?.name || 'this item'} to ${nextLine.qty}.`);
+        }
+        if (isReservation && nextLine.qty > (Number(stock.qty_available) || 0) + oldLine.qty) {
+          const product = products.find(item => item.id === productId);
+          throw new Error(`Not enough available stock to reserve ${nextLine.qty} of ${product?.name || 'this item'}.`);
+        }
+        stockDeltas.push({
+          productId,
+          onHand: isInvoice ? oldLine.qty - nextLine.qty : 0,
+          reserved: isReservation ? nextLine.qty - oldLine.qty : 0,
+          damaged: isInvoice ? nextLine.damaged - oldLine.damaged : 0
+        });
+      }
+    }
+
+    const localPaymentStatus = isReservation
+      ? (balanceDue <= 0.01 ? 'paid_advance' : paidAmount > 0 ? 'partial_advance' : 'reserved')
+      : isQuotation
+        ? 'draft'
+        : balanceDue <= 0.01
+          ? 'paid'
+          : paidAmount > 0
+            ? 'partial'
+            : existingDoc.payment_status === 'credit' ? 'credit' : 'unpaid';
+    const cloudPaymentStatus = balanceDue <= 0.01 ? 'paid' : paidAmount > 0 ? 'partially_paid' : existingDoc.payment_status === 'credit' ? 'credit' : 'unpaid';
+    const cloudStatus = isQuotation ? 'draft' : isReservation ? 'confirmed' : balanceDue <= 0.01 ? 'completed' : paidAmount > 0 ? 'partially_paid' : 'confirmed';
+    const now = new Date().toISOString();
+
+    await runCloudWrite('Updating sales document', () => supabase.from('sales_documents').update({
+      customer_id: nextCustomerId,
+      doc_date: updatedData.doc_date || existingDoc.doc_date,
+      subtotal: lineSubtotal,
+      line_discount_total: nextItems.reduce((sum, item) => sum + item.discount_amount, 0),
+      doc_discount_type: 'amount',
+      doc_discount_value: documentDiscount,
+      doc_discount_total: documentDiscount,
+      grand_total: grandTotal,
+      paid_amount: paidAmount,
+      balance_due: balanceDue,
+      total_cost_snapshot: totalCostSnapshot,
+      gross_profit: grossProfit,
+      gross_profit_pct: grandTotal > 0 ? (grossProfit / grandTotal) * 100 : 0,
+      status: cloudStatus,
+      payment_status: cloudPaymentStatus,
+      notes: updatedData.notes ?? existingDoc.notes ?? null,
+      updated_at: now
+    }).eq('id', existingDoc.id));
+
+    await runCloudWrite('Replacing sales document items', () => supabase.from('sales_document_items').delete().eq('sales_document_id', existingDoc.id));
+    const cloudItems = nextItems.map(item => {
+      const lineProfit = item.line_total - (item.qty * item.unit_cost_snapshot);
+      return {
+        id: generateUUID(),
+        sales_document_id: existingDoc.id,
+        product_id: item.product_id,
+        qty: item.qty,
+        unit_type: item.unit_type || 'unit',
+        conversion_factor: Number(item.conversion_factor) || 1,
+        base_qty: item.qty,
+        unit_price: item.unit_price,
+        discount_type: 'amount',
+        discount_value: item.discount_amount,
+        line_discount: item.discount_amount,
+        line_total: item.line_total,
+        unit_cost_snapshot: item.unit_cost_snapshot,
+        line_profit: lineProfit,
+        line_profit_pct: item.line_total > 0 ? (lineProfit / item.line_total) * 100 : 0,
+        notes: item.is_warranty_replacement ? (item.warranty_note || 'Warranty Replacement (Rs. 0)') : (item.notes || null)
+      };
+    });
+    await runCloudWrite('Saving edited sales items', () => supabase.from('sales_document_items').insert(cloudItems));
+
+    const stockWrites = stockDeltas
+      .filter(delta => delta.onHand || delta.reserved || delta.damaged)
+      .map(delta => supabase.rpc('rpc_adjust_stock_balance', {
+        p_product_id: delta.productId,
+        p_qty_on_hand_delta: delta.onHand,
+        p_qty_reserved_delta: delta.reserved,
+        p_qty_in_transit_delta: 0,
+        p_qty_damaged_delta: delta.damaged
+      }));
+    if (stockWrites.length) await runCloudBatch('Readjusting edited sales inventory', stockWrites);
+
+    const oldCustomerId = isValidUUID(existingDoc.customer_id) ? existingDoc.customer_id : null;
+    const oldBalanceDue = Number(existingDoc.balance_due) || 0;
+    if (oldCustomerId === nextCustomerId) {
+      if (nextCustomerId) await adjustCustomerBalance('Readjusting customer receivable', nextCustomerId, balanceDue - oldBalanceDue, 0);
+    } else {
+      if (oldCustomerId && oldBalanceDue) await adjustCustomerBalance('Reversing previous customer receivable', oldCustomerId, -oldBalanceDue, 0);
+      if (nextCustomerId && balanceDue) await adjustCustomerBalance('Recording new customer receivable', nextCustomerId, balanceDue, 0);
+    }
+
+    if (nextCustomerId !== oldCustomerId) {
+      await runCloudWrite('Relinking sales payments', () => supabase.from('payments').update({ party_id: nextCustomerId }).eq('sales_doc_id', existingDoc.id));
+      await runCloudWrite('Relinking sales cheques', () => supabase.from('cheque_register').update({ party_id: nextCustomerId }).eq('sales_document_id', existingDoc.id));
+    }
+
+    if (adjustablePayment && shouldAdjustPaidPayment && paymentDelta) {
+      await runCloudWrite('Readjusting linked sales payment', () => supabase.from('payments').update({ amount: grandTotal }).eq('id', adjustablePayment.id));
+      if (adjustablePayment.payment_method === 'bank') {
+        await adjustBankBalance('Readjusting sales bank balance', adjustablePayment.bank_account_id, paymentDelta);
+      }
+      if (adjustablePayment.payment_method === 'cheque') {
+        const cheque = cheques.find(entry => entry.id === adjustablePayment.cheque_id || entry.payment_id === adjustablePayment.id);
+        if (cheque) {
+          await runCloudWrite('Readjusting sales cheque amount', () => supabase.from('cheque_register').update({ amount: grandTotal }).eq('id', cheque.id));
+          if (cheque.status === 'cleared') {
+            await adjustBankBalance('Readjusting cleared cheque balance', cheque.deposit_bank_account_id, paymentDelta);
+          }
+          setCheques(prev => prev.map(entry => entry.id === cheque.id ? { ...entry, amount: grandTotal, party_id: nextCustomerId, party_name: nextCustomer?.business_name || entry.party_name } : entry));
+        }
+      }
+      setPayments(prev => prev.map(payment => payment.id === adjustablePayment.id ? { ...payment, amount: grandTotal, party_id: nextCustomerId } : payment));
+    } else if (nextCustomerId !== oldCustomerId) {
+      setPayments(prev => prev.map(payment => String(payment.sales_doc_id || '') === String(existingDoc.id) ? { ...payment, party_id: nextCustomerId } : payment));
+      setCheques(prev => prev.map(cheque => String(cheque.sales_document_id || cheque.sales_doc_id || '') === String(existingDoc.id) ? { ...cheque, party_id: nextCustomerId, party_name: nextCustomer?.business_name || 'Customer' } : cheque));
+    }
+
+    if (stockDeltas.length) {
+      setStockBalances(prev => {
+        const next = { ...prev };
+        stockDeltas.forEach(delta => {
+          const current = next[delta.productId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
+          const qtyOnHand = Math.max(0, (Number(current.qty_on_hand) || 0) + delta.onHand);
+          const qtyReserved = Math.max(0, (Number(current.qty_reserved) || 0) + delta.reserved);
+          next[delta.productId] = {
+            ...current,
+            qty_on_hand: qtyOnHand,
+            qty_reserved: qtyReserved,
+            qty_available: Math.max(0, qtyOnHand - qtyReserved),
+            qty_damaged: Math.max(0, (Number(current.qty_damaged) || 0) + delta.damaged)
+          };
+        });
+        return next;
+      });
+      setStockMovements(prev => [{
+        id: `mov-${Date.now()}`,
+        date: updatedData.doc_date || existingDoc.doc_date,
+        type: isReservation ? 'reservation_edit' : isInvoice ? 'sales_edit' : 'quotation_edit',
+        doc_no: existingDoc.doc_no,
+        reference: `Edited ${existingDoc.doc_no}; inventory readjusted by document delta`,
+        total_amount: grandTotal,
+        items_count: nextItems.length,
+        created_at: now
+      }, ...prev]);
+    }
+
+    const updatedDocument = {
+      ...existingDoc,
+      ...updatedData,
+      id: existingDoc.id,
+      doc_no: existingDoc.doc_no,
+      doc_type: existingDoc.doc_type,
+      customer_id: nextCustomerId,
+      customer_name: nextCustomer?.business_name || updatedData.customer_name || 'Cash / Counter Customer',
+      customer_phone: nextCustomer?.phone || '',
+      doc_date: updatedData.doc_date || existingDoc.doc_date,
+      items_subtotal: lineSubtotal,
+      subtotal: lineSubtotal,
+      discount_amount: documentDiscount,
+      grand_total: grandTotal,
+      paid_amount: paidAmount,
+      balance_due: balanceDue,
+      payment_status: localPaymentStatus,
+      total_cost_snapshot: totalCostSnapshot,
+      gross_profit: grossProfit,
+      gross_profit_pct: grandTotal > 0 ? (grossProfit / grandTotal) * 100 : 0,
+      notes: updatedData.notes ?? existingDoc.notes,
+      items: nextItems,
+      updated_at: now
+    };
+    setSalesDocuments(prev => prev.map(document => String(document.id) === String(existingDoc.id) ? updatedDocument : document));
+    notifySuccess(`Document ${existingDoc.doc_no} updated and dependent balances readjusted.`);
+    return updatedDocument;
   };
 
   // Cancel Customer Reservation & Release Stock back to available
@@ -3870,7 +4190,7 @@ export function BusinessProvider({ children }) {
       supplierAdvances, setSupplierAdvances, recordSupplierAdvance,
       transitShipments, setTransitShipments, createTransitShipment, updateTransitShipment, deleteTransitShipment, addLandedCostExpense,
       purchases, setPurchases, receivePurchaseShipment, updatePurchaseDocument, deletePurchaseDocument,
-      salesDocuments, setSalesDocuments, postSalesDocument, convertDocument, cancelReservation, deleteSalesDocument,
+      salesDocuments, setSalesDocuments, postSalesDocument, updateSalesDocument, convertDocument, cancelReservation, deleteSalesDocument,
       cheques, setCheques, updateChequeStatus,
       payments, setPayments, recordDirectExpense, recordDirectIncome, deletePayment,
       resetAllData, resetTransactionsOnly, exportAllData, importAllData, syncLocalDataToCloud,

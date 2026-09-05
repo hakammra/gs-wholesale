@@ -6,13 +6,20 @@ import { generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator
 import { exportToExcel, generateWhatsAppInvoiceLink } from '../../lib/exportUtils';
 
 export default function SalesDocumentsList() {
-  const { salesDocuments, customers = [], products = [], convertDocument, cancelReservation, deleteSalesDocument, companySettings } = useBusiness();
-  const { notifySuccess } = useNotification();
+  const {
+    salesDocuments, customers = [], products = [], payments = [], cheques = [],
+    updateSalesDocument, convertDocument, cancelReservation, deleteSalesDocument, companySettings
+  } = useBusiness();
+  const { notifySuccess, notifyError } = useNotification();
 
   const [activeTab, setActiveTab] = useState('all'); // all, reserved, invoices, quotations
   const [filterStatus, setFilterStatus] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedDocId, setSelectedDocId] = useState(salesDocuments[0]?.id || null);
+  const [editingDocument, setEditingDocument] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [addProductId, setAddProductId] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const reservedDocsCount = salesDocuments.filter(d =>
     (d.doc_type === 'reserved_order' || d.doc_type === 'sales_order') &&
@@ -55,6 +62,100 @@ export default function SalesDocumentsList() {
       'Status': d.status || d.payment_status
     }));
     exportToExcel(data, 'Sales_Documents_Export');
+  };
+
+  const getLinkedPayments = (document) => payments.filter(payment =>
+    String(payment.sales_doc_id || '') === String(document.id) || payment.reference === document.doc_no
+  );
+
+  const openEditDocument = (document) => {
+    const linkedPayments = getLinkedPayments(document).filter(payment => {
+      if (payment.payment_method !== 'cheque') return true;
+      const cheque = cheques.find(entry => entry.id === payment.cheque_id || entry.payment_id === payment.id);
+      return !cheque || !['returned', 'cancelled'].includes(cheque.status);
+    });
+    const canAdjustPayment = linkedPayments.length === 1 && Number(document.balance_due) <= 0.01;
+    setEditingDocument(document);
+    setEditForm({
+      customer_id: document.customer_id || '',
+      doc_date: document.doc_date || new Date().toISOString().slice(0, 10),
+      discount_amount: Number(document.discount_amount ?? document.doc_discount_total) || 0,
+      notes: document.notes || '',
+      adjust_paid_payment: canAdjustPayment,
+      can_adjust_payment: canAdjustPayment,
+      linked_payment: canAdjustPayment ? linkedPayments[0] : null,
+      items: (document.items || []).map(item => {
+        const productId = item.product_id || item.product?.id;
+        const product = products.find(entry => entry.id === productId) || item.product;
+        return {
+          ...item,
+          product_id: productId,
+          product,
+          product_name: product?.name || item.product_name || 'Product Item',
+          qty: Number(item.qty || item.base_qty) || 1,
+          unit_price: Number(item.unit_price) || 0,
+          discount_amount: Number(item.discount_amount ?? item.line_discount) || 0,
+          is_warranty_replacement: Boolean(item.is_warranty_replacement) || String(item.notes || '').toLowerCase().includes('warranty replacement')
+        };
+      })
+    });
+    setAddProductId('');
+  };
+
+  const updateEditItem = (index, field, value) => {
+    setEditForm(current => ({
+      ...current,
+      items: current.items.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item)
+    }));
+  };
+
+  const handleAddEditProduct = () => {
+    const product = products.find(entry => entry.id === addProductId);
+    if (!product) return;
+    const existingIndex = editForm.items.findIndex(item => item.product_id === product.id && !item.is_warranty_replacement);
+    if (existingIndex >= 0) {
+      updateEditItem(existingIndex, 'qty', (Number(editForm.items[existingIndex].qty) || 0) + 1);
+    } else {
+      setEditForm(current => ({
+        ...current,
+        items: [...current.items, {
+          product_id: product.id,
+          product,
+          product_name: product.name,
+          item_code: product.item_code,
+          qty: 1,
+          unit_price: Number(product.wholesale_price || product.dealer_price || product.retail_price) || 0,
+          discount_amount: 0,
+          unit_cost_snapshot: Number(product.weighted_cost_lkr || product.cost_price) || 0,
+          is_warranty_replacement: false
+        }]
+      }));
+    }
+    setAddProductId('');
+  };
+
+  const editItemsSubtotal = (editForm?.items || []).reduce((sum, item) => {
+    const qty = Number(item.qty) || 0;
+    const price = item.is_warranty_replacement ? 0 : Number(item.unit_price) || 0;
+    const discount = item.is_warranty_replacement ? 0 : Number(item.discount_amount) || 0;
+    return sum + Math.max(0, (qty * price) - discount);
+  }, 0);
+  const editGrandTotal = Math.max(0, editItemsSubtotal - (Number(editForm?.discount_amount) || 0));
+
+  const handleSaveEdit = async (event) => {
+    event.preventDefault();
+    if (!editingDocument || !editForm || isSavingEdit) return;
+    setIsSavingEdit(true);
+    try {
+      const updated = await updateSalesDocument(editingDocument.id, editForm);
+      setSelectedDocId(updated.id);
+      setEditingDocument(null);
+      setEditForm(null);
+    } catch (error) {
+      notifyError(error.message || 'The sales document could not be updated.');
+    } finally {
+      setIsSavingEdit(false);
+    }
   };
 
   return (
@@ -142,6 +243,18 @@ export default function SalesDocumentsList() {
                 >
                   <span className="icon">➔</span>
                   <span>Convert to Invoice</span>
+                </button>
+              )}
+
+              {!['cancelled', 'converted_to_sale', 'returned'].includes(selectedDoc.status) && (
+                <button
+                  type="button"
+                  onClick={() => openEditDocument(selectedDoc)}
+                  className="toolbar-button bright"
+                  title="Edit items, customer, date, discount and notes"
+                >
+                  <span className="icon">✎</span>
+                  <span>Edit Document</span>
                 </button>
               )}
 
@@ -351,6 +464,127 @@ export default function SalesDocumentsList() {
           )}
         </div>
       </div>
+
+      {editingDocument && editForm && (
+        <div className="modal-overlay">
+          <div className="modal-box modal-lg sales-edit-modal">
+            <div className="modal-header">
+              <div>
+                <h3>Edit {editingDocument.doc_no}</h3>
+                <small style={{ color: 'var(--muted)' }}>Inventory and account balances are readjusted from the saved differences.</small>
+              </div>
+              <button type="button" onClick={() => setEditingDocument(null)} className="modal-close">&times;</button>
+            </div>
+
+            <form onSubmit={handleSaveEdit}>
+              <div className="modal-body">
+                <div className="sales-edit-header-grid">
+                  <div>
+                    <label>Customer</label>
+                    <select value={editForm.customer_id} onChange={(event) => setEditForm(current => ({ ...current, customer_id: event.target.value }))}>
+                      <option value="">Cash / Counter Customer</option>
+                      {customers.map(customer => <option key={customer.id} value={customer.id}>{customer.customer_code} - {customer.business_name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Document Date *</label>
+                    <input type="date" required value={editForm.doc_date} onChange={(event) => setEditForm(current => ({ ...current, doc_date: event.target.value }))} />
+                  </div>
+                  <div>
+                    <label>Document Discount (LKR)</label>
+                    <input type="number" min="0" max={editItemsSubtotal} step="0.01" value={editForm.discount_amount} onChange={(event) => setEditForm(current => ({ ...current, discount_amount: Number(event.target.value) || 0 }))} />
+                  </div>
+                </div>
+
+                <div className="sales-edit-add-row">
+                  <div>
+                    <label>Add Product</label>
+                    <select value={addProductId} onChange={(event) => setAddProductId(event.target.value)}>
+                      <option value="">Select a product…</option>
+                      {products.filter(product => product.is_active !== false).map(product => (
+                        <option key={product.id} value={product.id}>{product.item_code} - {product.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button type="button" className="secondary-button" disabled={!addProductId} onClick={handleAddEditProduct}>+ Add Item</button>
+                </div>
+
+                <div className="table-responsive sales-edit-items">
+                  <table>
+                    <thead><tr><th>Product</th><th>Qty</th><th>Unit Price</th><th>Discount</th><th>Warranty</th><th>Line Total</th><th></th></tr></thead>
+                    <tbody>
+                      {editForm.items.map((item, index) => {
+                        const lineTotal = item.is_warranty_replacement
+                          ? 0
+                          : Math.max(0, (Number(item.qty) || 0) * (Number(item.unit_price) || 0) - (Number(item.discount_amount) || 0));
+                        return (
+                          <tr key={`${item.product_id}-${index}`}>
+                            <td><strong>{item.product_name || item.product?.name}</strong><small className="table-subtext mono">{item.item_code || item.product?.item_code}</small></td>
+                            <td><input className="table-number-input mono" type="number" min="0.01" step="0.01" required value={item.qty} onChange={(event) => updateEditItem(index, 'qty', Number(event.target.value) || 0)} /></td>
+                            <td><input className="table-number-input mono" type="number" min="0" step="0.01" required disabled={item.is_warranty_replacement} value={item.is_warranty_replacement ? 0 : item.unit_price} onChange={(event) => updateEditItem(index, 'unit_price', Number(event.target.value) || 0)} /></td>
+                            <td><input className="table-number-input mono" type="number" min="0" step="0.01" disabled={item.is_warranty_replacement} value={item.is_warranty_replacement ? 0 : item.discount_amount} onChange={(event) => updateEditItem(index, 'discount_amount', Number(event.target.value) || 0)} /></td>
+                            <td>
+                              <label className="sales-edit-warranty-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={item.is_warranty_replacement}
+                                  onChange={(event) => setEditForm(current => ({
+                                    ...current,
+                                    items: current.items.map((entry, itemIndex) => itemIndex === index ? {
+                                      ...entry,
+                                      is_warranty_replacement: event.target.checked,
+                                      original_unit_price: event.target.checked ? entry.unit_price : entry.original_unit_price,
+                                      unit_price: event.target.checked ? 0 : (Number(entry.original_unit_price) || Number(entry.product?.wholesale_price) || 0),
+                                      discount_amount: event.target.checked ? 0 : entry.discount_amount
+                                    } : entry)
+                                  }))}
+                                />
+                                <span>{item.is_warranty_replacement ? 'Warranty' : 'Normal'}</span>
+                              </label>
+                            </td>
+                            <td className="mono font-semibold">{formatCurrency(lineTotal)}</td>
+                            <td><button type="button" className="danger-button small-button" onClick={() => setEditForm(current => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></td>
+                          </tr>
+                        );
+                      })}
+                      {!editForm.items.length && <tr><td colSpan="7" className="empty-state-cell">Add at least one product.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="sales-edit-summary-grid">
+                  <div><small>ITEMS SUBTOTAL</small><strong>{formatCurrency(editItemsSubtotal)}</strong></div>
+                  <div><small>DOCUMENT DISCOUNT</small><strong>-{formatCurrency(editForm.discount_amount || 0)}</strong></div>
+                  <div><small>EDITED TOTAL</small><strong>{formatCurrency(editGrandTotal)}</strong></div>
+                  <div><small>RECORDED PAID</small><strong>{formatCurrency(editingDocument.paid_amount || 0)}</strong></div>
+                </div>
+
+                {editForm.can_adjust_payment ? (
+                  <label className="sales-payment-adjustment">
+                    <input type="checkbox" checked={editForm.adjust_paid_payment} onChange={(event) => setEditForm(current => ({ ...current, adjust_paid_payment: event.target.checked }))} />
+                    <span>
+                      <strong>Readjust the linked {editForm.linked_payment?.payment_method} payment to the edited total</strong>
+                      <small>Cash Flow{editForm.linked_payment?.payment_method === 'bank' ? ' and the selected bank balance' : editForm.linked_payment?.payment_method === 'cheque' ? ' and the linked cheque amount' : ''} will change by the same difference.</small>
+                    </span>
+                  </label>
+                ) : Number(editingDocument.paid_amount) > 0 && (
+                  <p className="form-warning">Existing split or partial payments will be preserved. The edited total cannot be lower than the amount already paid.</p>
+                )}
+
+                <div>
+                  <label>Notes</label>
+                  <textarea value={editForm.notes} onChange={(event) => setEditForm(current => ({ ...current, notes: event.target.value }))} placeholder="Document notes or edit reason" />
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button type="button" className="secondary-button" disabled={isSavingEdit} onClick={() => setEditingDocument(null)}>Cancel</button>
+                <button type="submit" className="primary-button" disabled={isSavingEdit || !editForm.items.length}>{isSavingEdit ? 'Readjusting…' : 'Save & Readjust Records'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
