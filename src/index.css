@@ -1893,6 +1893,24 @@ tr:hover td { background: #303030; }
 .dashboard-heading p, .panel-heading p { margin: 4px 0 0; color: var(--muted); }
 .dashboard-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .dashboard-metric-grid .stat-card small, .cheque-stats-grid .stat-card small { display: block; margin-top: 7px; color: var(--muted); }
+.dashboard-profit-panel { min-width: 0; margin-bottom: 14px; padding: 0; overflow: hidden; }
+.dashboard-profit-panel .panel-heading { align-items: flex-start; }
+.profit-equation { display: flex; align-items: center; gap: 10px; }
+.profit-equation > span { display: grid; gap: 2px; min-width: 120px; }
+.profit-equation small { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.profit-equation strong { font-family: 'JetBrains Mono', monospace; font-size: 14px; }
+.profit-equation b { color: var(--muted); font-size: 18px; }
+.profit-cost-notice { padding: 10px 16px; border-bottom: 1px solid rgba(245, 158, 11, .35); background: rgba(245, 158, 11, .09); color: #ffd889; font-size: 12.5px; line-height: 1.45; }
+.profit-cost-notice.danger { border-color: rgba(239, 68, 68, .4); background: rgba(239, 68, 68, .1); color: #ffb0b0; }
+.dashboard-profit-table table { min-width: 920px; }
+.dashboard-profit-table tfoot th { position: static; border-top: 2px solid var(--primary); border-bottom: 0; }
+.profit-line-details { margin-top: 5px; max-width: 460px; white-space: normal; }
+.profit-line-details summary { color: var(--primary); cursor: pointer; font-size: 11.5px; user-select: none; }
+.profit-line { display: grid; grid-template-columns: minmax(140px, 1fr) auto; gap: 3px 14px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11.5px; }
+.profit-line:last-child { border-bottom: 0; }
+.profit-line em { grid-column: 1 / -1; color: #ffca58; font-size: 10.5px; font-style: normal; }
+.danger-text { color: #ff8e8e !important; }
+.cost-correction-note { display: block; margin-top: 3px; color: #ffca58; font-size: 10.5px; }
 .dashboard-quick-actions { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
 .dashboard-quick-actions button { min-height: 48px; border: 1px solid var(--line); border-radius: 9px; background: var(--card-bg); color: var(--text); font-weight: 700; cursor: pointer; }
 .dashboard-quick-actions button:hover { border-color: var(--primary); background: rgba(56, 189, 248, .08); }
@@ -1927,6 +1945,10 @@ tr:hover td { background: #303030; }
   .cheque-detail-grid, .dashboard-metric-grid, .cheque-stats-grid, .dashboard-quick-actions { grid-template-columns: 1fr; }
   .dashboard-heading, .ledger-filter-row { align-items: stretch; flex-direction: column; }
   .ledger-filter-row select { width: 100%; }
+  .dashboard-profit-panel .panel-heading { align-items: stretch; flex-direction: column; }
+  .profit-equation { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; width: 100%; }
+  .profit-equation > span { min-width: 0; }
+  .profit-equation strong { font-size: 11px; }
 }
 
 /* Mobile content pass. The navigation drawer intentionally keeps its existing behaviour. */
