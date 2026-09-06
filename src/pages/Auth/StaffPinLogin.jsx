@@ -12,7 +12,7 @@ export default function StaffPinLogin() {
   useEffect(() => {
     listUnlockStaff().then(result => {
       setBusy(false);
-      if (!result.success) return setError(`${result.error}. Run database migration 010_staff_pin_access.sql.`);
+      if (!result.success) return setError(result.error);
       setStaff(result.staff);
       setSelectedId(result.staff[0]?.id || '');
     });

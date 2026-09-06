@@ -87,7 +87,7 @@ AS $$
 DECLARE active_staff_id UUID;
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Email login required'; END IF;
-  IF EXISTS (SELECT 1 FROM public.wholesale_security_owner WHERE id = TRUE AND auth_user_id IS NOT NULL AND auth_user_id <> auth.uid())
+  IF EXISTS (SELECT 1 FROM public.wholesale_security_owner owner WHERE owner.id = TRUE AND owner.auth_user_id IS NOT NULL AND owner.auth_user_id <> auth.uid())
     THEN RAISE EXCEPTION 'This email is not authorized for this business'; END IF;
   active_staff_id := public.current_wholesale_staff_id();
   RETURN jsonb_build_object(
@@ -103,7 +103,7 @@ SET search_path = public, auth
 AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Email login required'; END IF;
-  IF EXISTS (SELECT 1 FROM public.wholesale_security_owner WHERE id = TRUE AND auth_user_id IS NOT NULL AND auth_user_id <> auth.uid())
+  IF EXISTS (SELECT 1 FROM public.wholesale_security_owner owner WHERE owner.id = TRUE AND owner.auth_user_id IS NOT NULL AND owner.auth_user_id <> auth.uid())
     THEN RAISE EXCEPTION 'This email is not authorized for this business'; END IF;
   RETURN QUERY
   SELECT staff.id, staff.full_name, staff.role
@@ -125,12 +125,12 @@ BEGIN
   session_id := public.wholesale_auth_session_id();
   IF session_id IS NULL THEN RAISE EXCEPTION 'Could not identify this email session'; END IF;
 
-  SELECT auth_user_id INTO owner_user_id FROM public.wholesale_security_owner WHERE id = TRUE FOR UPDATE;
+  SELECT owner.auth_user_id INTO owner_user_id FROM public.wholesale_security_owner owner WHERE owner.id = TRUE FOR UPDATE;
   IF owner_user_id IS NOT NULL AND owner_user_id <> auth.uid()
     THEN RAISE EXCEPTION 'This email is not authorized for this business'; END IF;
 
   SELECT * INTO staff_row FROM public.wholesale_staff
-  WHERE id = p_staff_id AND is_active FOR UPDATE;
+  WHERE wholesale_staff.id = p_staff_id AND wholesale_staff.is_active FOR UPDATE;
   IF staff_row.id IS NULL THEN RAISE EXCEPTION 'Staff account is unavailable'; END IF;
   IF staff_row.pin_locked_until > NOW() THEN RAISE EXCEPTION 'Too many attempts. Try again shortly'; END IF;
 
@@ -139,17 +139,17 @@ BEGIN
     SET failed_pin_attempts = failed_pin_attempts + 1,
         pin_locked_until = CASE WHEN failed_pin_attempts + 1 >= 5 THEN NOW() + INTERVAL '1 minute' ELSE NULL END,
         updated_at = NOW()
-    WHERE id = staff_row.id;
+    WHERE wholesale_staff.id = staff_row.id;
     RAISE EXCEPTION 'Incorrect PIN';
   END IF;
 
   IF owner_user_id IS NULL THEN
     IF staff_row.role <> 'admin' THEN RAISE EXCEPTION 'Use the Administrator account for first-time setup'; END IF;
-    UPDATE public.wholesale_security_owner SET auth_user_id = auth.uid(), claimed_at = NOW() WHERE id = TRUE;
+    UPDATE public.wholesale_security_owner owner SET auth_user_id = auth.uid(), claimed_at = NOW() WHERE owner.id = TRUE;
   END IF;
 
   UPDATE public.wholesale_staff SET failed_pin_attempts = 0, pin_locked_until = NULL, updated_at = NOW()
-  WHERE id = staff_row.id;
+  WHERE wholesale_staff.id = staff_row.id;
   INSERT INTO public.wholesale_operator_sessions(auth_session_id, auth_user_id, staff_id, expires_at)
   VALUES (session_id, auth.uid(), staff_row.id, NOW() + INTERVAL '12 hours')
   ON CONFLICT (auth_session_id) DO UPDATE
@@ -174,8 +174,8 @@ SET search_path = public, auth
 AS $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM public.wholesale_staff
-    WHERE id = public.current_wholesale_staff_id() AND role = 'admin' AND is_active
+    SELECT 1 FROM public.wholesale_staff staff
+    WHERE staff.id = public.current_wholesale_staff_id() AND staff.role = 'admin' AND staff.is_active
   ) THEN RAISE EXCEPTION 'Administrator PIN required'; END IF;
   RETURN QUERY SELECT staff.id, staff.full_name, staff.role, staff.is_active, TRUE, staff.created_at
   FROM public.wholesale_staff staff
@@ -197,7 +197,7 @@ AS $$
 DECLARE admin_id UUID; target public.wholesale_staff%ROWTYPE;
 BEGIN
   admin_id := public.current_wholesale_staff_id();
-  IF NOT EXISTS (SELECT 1 FROM public.wholesale_staff WHERE id = admin_id AND role = 'admin' AND is_active)
+  IF NOT EXISTS (SELECT 1 FROM public.wholesale_staff staff WHERE staff.id = admin_id AND staff.role = 'admin' AND staff.is_active)
     THEN RAISE EXCEPTION 'Administrator PIN required'; END IF;
   IF NULLIF(TRIM(p_full_name), '') IS NULL THEN RAISE EXCEPTION 'Staff name is required'; END IF;
   IF p_role NOT IN ('admin', 'viewer') THEN RAISE EXCEPTION 'Invalid access level'; END IF;
@@ -214,7 +214,7 @@ BEGIN
     VALUES (TRIM(p_full_name), p_role, crypt(p_pin, gen_salt('bf', 10)), p_is_active)
     RETURNING * INTO target;
   ELSE
-    SELECT * INTO target FROM public.wholesale_staff WHERE id = p_staff_id FOR UPDATE;
+    SELECT * INTO target FROM public.wholesale_staff staff WHERE staff.id = p_staff_id FOR UPDATE;
     IF target.id IS NULL THEN RAISE EXCEPTION 'Staff account not found'; END IF;
     IF target.id = admin_id AND (p_role <> 'admin' OR NOT p_is_active)
       THEN RAISE EXCEPTION 'The active administrator cannot demote or deactivate their own account'; END IF;
@@ -227,7 +227,7 @@ BEGIN
         failed_pin_attempts = CASE WHEN p_pin IS NULL THEN failed_pin_attempts ELSE 0 END,
         pin_locked_until = CASE WHEN p_pin IS NULL THEN pin_locked_until ELSE NULL END,
         updated_at = NOW()
-    WHERE id = target.id RETURNING * INTO target;
+    WHERE wholesale_staff.id = target.id RETURNING * INTO target;
   END IF;
   RETURN public.wholesale_staff_json(target.id);
 END;

@@ -14,12 +14,17 @@ export default function ReportsIndex() {
     let cost = 0;
 
     salesDocuments.forEach(doc => {
-      if (doc.doc_type === 'sales_invoice' && doc.status !== 'cancelled') {
+      if (doc.doc_type === 'sales_invoice' && !['cancelled', 'returned'].includes(doc.status)) {
+        const beforeDocumentDiscount = (doc.items || []).reduce((sum, item) => sum + (Number(item.line_total) || 0), 0);
+        const documentRevenueRatio = beforeDocumentDiscount > 0
+          ? (Number(doc.grand_total) || 0) / beforeDocumentDiscount
+          : 1;
         (doc.items || []).forEach(it => {
           if (it.product_id === p.id) {
-            soldQty += (it.base_qty || it.qty);
-            revenue += (it.line_total || 0);
-            cost += ((it.unit_cost_snapshot || p.weighted_cost_lkr || 0) * (it.base_qty || it.qty));
+            const qty = Number(it.base_qty || it.qty) || 0;
+            soldQty += qty;
+            revenue += (Number(it.line_total) || 0) * documentRevenueRatio;
+            cost += (Number(it.unit_cost_snapshot) || 0) * qty;
           }
         });
       }

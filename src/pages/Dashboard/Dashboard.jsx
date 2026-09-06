@@ -13,13 +13,19 @@ export default function Dashboard({ onNavigateTab }) {
 
   const monthKey = new Date().toISOString().slice(0, 7);
   const monthlySales = salesDocuments.filter(document =>
-    document.doc_type === 'sales_invoice' && document.status !== 'cancelled' && String(document.doc_date || '').startsWith(monthKey)
+    document.doc_type === 'sales_invoice' && !['cancelled', 'returned'].includes(document.status) && String(document.doc_date || '').startsWith(monthKey)
   );
   const monthlyRevenue = monthlySales.reduce((sum, document) => sum + (Number(document.grand_total) || 0), 0);
-  const monthlyProfit = monthlySales.reduce((sum, document) => sum + (document.items || []).reduce((itemSum, item) => {
-    const qty = Number(item.base_qty || item.qty) || 0;
-    return itemSum + (Number(item.line_total) || 0) - (qty * (Number(item.unit_cost_snapshot) || 0));
-  }, 0), 0);
+  const monthlyCostOfGoods = monthlySales.reduce((sum, document) => {
+    const recordedDocumentCost = Number(document.total_cost_snapshot) || 0;
+    if (recordedDocumentCost > 0) return sum + recordedDocumentCost;
+    const recordedLineCost = (document.items || []).reduce((lineSum, item) => {
+      const qty = Number(item.base_qty || item.qty) || 0;
+      return lineSum + (qty * (Number(item.unit_cost_snapshot) || 0));
+    }, 0);
+    return sum + recordedLineCost;
+  }, 0);
+  const monthlyProfit = monthlyRevenue - monthlyCostOfGoods;
 
   const chequeById = new Map(cheques.map(cheque => [String(cheque.id), cheque]));
   const monthlyPayments = payments.filter(payment => String(payment.payment_date || payment.created_at || '').startsWith(monthKey));
@@ -54,7 +60,7 @@ export default function Dashboard({ onNavigateTab }) {
 
       <div className="dashboard-metric-grid">
         <div className="stat-card"><p>MONTHLY SALES</p><strong>{formatCurrency(monthlyRevenue)}</strong><small>{monthlySales.length} posted invoices</small></div>
-        <div className="stat-card"><p>EST. GROSS PROFIT</p><strong style={{ color: monthlyProfit >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(monthlyProfit)}</strong><small>{monthlyRevenue ? `${((monthlyProfit / monthlyRevenue) * 100).toFixed(1)}% margin` : 'No sales this month'}</small></div>
+        <div className="stat-card"><p>GROSS PROFIT</p><strong style={{ color: monthlyProfit >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(monthlyProfit)}</strong><small>{monthlyRevenue ? `${((monthlyProfit / monthlyRevenue) * 100).toFixed(1)}% margin · sale-time cost` : 'No sales this month'}</small></div>
         <div className="stat-card"><p>REALIZED CASH FLOW</p><strong style={{ color: cashIn - cashOut >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(cashIn - cashOut)}</strong><small>{formatCurrency(cashIn)} in · {formatCurrency(cashOut)} out</small></div>
         <div className="stat-card"><p>BANK LIQUIDITY</p><strong>{formatCurrency(totalLiquidity)}</strong><small>Across {bankAccounts.length} accounts</small></div>
         <div className="stat-card"><p>RECEIVABLES</p><strong style={{ color: '#ffca58' }}>{formatCurrency(totalReceivables)}</strong><small>Outstanding customer balances</small></div>
