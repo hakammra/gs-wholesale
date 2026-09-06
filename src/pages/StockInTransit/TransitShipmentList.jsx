@@ -745,8 +745,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
     return (
       <div className="document-form-workspace page-section">
         {/* Workspace Header Bar */}
-        <div className="document-workspace-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div className="document-workspace-header transit-form-header">
+          <div className="transit-form-title" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
             <button
               type="button"
               className="secondary-button"
@@ -758,7 +758,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
               {editingShipmentId ? '✏️ Edit Stock in Transit Order' : '📦 New Stock in Transit Order'}
             </h2>
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div className="transit-form-actions" style={{ display: 'flex', gap: 10 }}>
             <button
               type="button"
               className="secondary-button"
@@ -1389,9 +1389,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
   }
 
   return (
-    <div className="page-section" style={{ padding: 18 }}>
+    <div className="page-section transit-page">
       {/* Top Stat Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 18 }}>
+      <div className="transit-stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 18 }}>
         <div className="panel-card" style={{ borderLeft: '4px solid #0284c7' }}>
           <small style={{ color: 'var(--muted)', fontWeight: 600 }}>ACTIVE IN TRANSIT (NOT IN STOCK)</small>
           <div className="mono font-semibold" style={{ fontSize: 24, marginTop: 4, color: '#0284c7' }}>
@@ -1415,7 +1415,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
       </div>
 
       {/* Workflow Guidance Banner */}
-      <div style={{ background: 'rgba(2, 132, 199, 0.08)', border: '1px solid rgba(2, 132, 199, 0.25)', borderRadius: 6, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+      <div className="transit-guide" style={{ background: 'rgba(2, 132, 199, 0.08)', border: '1px solid rgba(2, 132, 199, 0.25)', borderRadius: 6, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
         <div style={{ fontSize: 12.5, color: '#e0f2fe' }}>
           🚢 <strong>Stock in Transit tracking:</strong> These documents track goods as <span style={{ color: '#ffca58', fontWeight: 700 }}>In Transit</span>. When shipments arrive at your warehouse, click <strong style={{ color: '#52e37e' }}>✓ Arrive & Convert</strong> to add them to sellable on-hand stock. If you are adding stock already in your warehouse, use <strong>Purchase Documents</strong>.
         </div>
@@ -1430,8 +1430,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
       </div>
 
       {/* Action & Filter Bar */}
-      <div className="action-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+      <div className="action-toolbar transit-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+        <div className="transit-toolbar-primary" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button
             type="button"
             onClick={handleOpenNewShipment}
@@ -1459,7 +1459,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
           />
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="transit-status-filters" style={{ display: 'flex', gap: 8 }}>
           <button
             className={`secondary-button ${statusFilter === 'all' ? 'active' : ''}`}
             onClick={() => setStatusFilter('all')}
@@ -1489,7 +1489,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
       </div>
 
       {/* Shipments List Table */}
-      <div className="large-table" style={{ background: 'var(--card-bg)', border: '1px solid var(--line)', borderRadius: 6 }}>
+      <div className="large-table transit-list-table" style={{ background: 'var(--card-bg)', border: '1px solid var(--line)', borderRadius: 6 }}>
         <table>
           <thead>
             <tr>
@@ -1640,8 +1640,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
       {/* Selected Shipment Item Details Drawer */}
       {selectedTransit && (
-        <div className="panel-card" style={{ marginTop: 20, borderTop: '3px solid var(--primary)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div className="panel-card transit-details-card" style={{ marginTop: 20, borderTop: '3px solid var(--primary)' }}>
+          <div className="transit-details-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div>
               <h3 style={{ margin: 0 }}>
                 Shipment Items: <span className="mono" style={{ color: 'var(--primary)' }}>{selectedTransit.shipment_no}</span>
@@ -1650,7 +1650,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 Supplier: <strong>{suppliers.find(s => s.id === selectedTransit.supplier_id)?.name || 'Supplier'}</strong> &bull; Carrier: {selectedTransit.shipping_line_carrier} {selectedTransit.purchase_doc_no && `• Converted to Purchase Doc: ${selectedTransit.purchase_doc_no}`}
               </small>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="transit-details-actions" style={{ display: 'flex', gap: 8 }}>
               {selectedTransit.status === 'in_transit' && !checkIsArrived(selectedTransit) && (
                 <button
                   type="button"
@@ -1671,7 +1671,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, marginBottom: 12 }}>
+          <div className="transit-details-summary" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, marginBottom: 12 }}>
             {[
               ['Goods Paid', getShipmentCosts(selectedTransit).goods, '#38bdf8'],
               [checkIsArrived(selectedTransit) ? 'Calculated Shipping' : 'Shipping at Arrival', checkIsArrived(selectedTransit) ? getShipmentCosts(selectedTransit).actual : 0, '#ffca58'],
@@ -1684,7 +1684,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
             ))}
           </div>
 
-          <table>
+          <div className="transit-preview-table" role="region" aria-label="Shipment items table" tabIndex="0">
+            <div className="transit-scroll-hint">Swipe sideways to view all item columns →</div>
+            <table>
             <thead>
               <tr>
                 <th style={{ width: 40 }}>#</th>
@@ -1713,14 +1715,15 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 );
               })}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
       )}
 
       {/* MARK ARRIVED & CONVERT TO PURCHASE DOCUMENT MODAL */}
       {isReceiveModalOpen && shipmentToReceive && (
         <div className="modal-overlay">
-          <div className="modal-box modal-lg" style={{ maxWidth: 880, maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
+          <div className="modal-box modal-lg transit-arrival-modal" style={{ maxWidth: 880, maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
             <div className="modal-header" style={{ flexShrink: 0 }}>
               <h3>📦 Mark Shipment as Arrived & Convert to Purchase Document</h3>
               <button type="button" onClick={() => setIsReceiveModalOpen(false)} className="modal-close">&times;</button>
@@ -1791,7 +1794,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                     <label style={{ margin: 0, fontWeight: 700 }}>CLASSIFY ARRIVED PRODUCTS, QUANTITIES & FINAL LANDED COST</label>
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>{receivingItems.length} line items</span>
                   </div>
-                  <div style={{ maxHeight: '38vh', overflowY: 'auto', overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 4 }}>
+                  <div className="transit-arrival-table" style={{ maxHeight: '38vh', overflowY: 'auto', overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 4 }}>
                     <table style={{ margin: 0, width: '100%' }}>
                       <thead style={{ position: 'sticky', top: 0, zIndex: 5, background: '#2a2a2a' }}>
                         <tr>
