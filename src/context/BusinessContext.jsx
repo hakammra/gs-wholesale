@@ -943,11 +943,15 @@ export function BusinessProvider({ children }) {
   };
 
   const deleteTransitGroup = async (groupId) => {
-    const activeUse = transitShipments.some(shipment =>
-      shipment.status !== 'arrived' && shipment.status !== 'received' &&
+    const shipmentUse = transitShipments.some(shipment =>
       (shipment.items || []).some(item => item.transit_group_id === groupId)
     );
-    if (activeUse) throw new Error('This group is used by an active transit document and cannot be deleted.');
+    const reservationUse = salesDocuments.some(document =>
+      (document.items || []).some(item => item.transit_group_id === groupId)
+    );
+    if (shipmentUse || reservationUse) {
+      throw new Error('This group is already part of a transit or reservation document and must be kept for document history. Remove it from those documents first if it has not been completed.');
+    }
     await runCloudWrite('Deleting transit group', () => supabase.from('transit_product_groups').delete().eq('id', groupId));
     setTransitGroups(prev => prev.filter(group => group.id !== groupId));
     setProducts(prev => prev.map(product => product.transit_group_id === groupId ? { ...product, transit_group_id: null } : product));

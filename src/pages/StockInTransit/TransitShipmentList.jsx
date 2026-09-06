@@ -98,6 +98,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [isGroupManagerOpen, setIsGroupManagerOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState(null);
   const [groupDraft, setGroupDraft] = useState({ name: '', description: '', product_ids: [] });
+  const [groupProductSearch, setGroupProductSearch] = useState('');
 
   // Quick Add Supplier Modal State
   const [isAddSupplierOpen, setIsAddSupplierOpen] = useState(false);
@@ -383,6 +384,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const openNewGroup = () => {
     setEditingGroupId(null);
     setGroupDraft({ name: '', description: '', product_ids: [] });
+    setGroupProductSearch('');
     setIsGroupManagerOpen(true);
   };
 
@@ -393,8 +395,17 @@ export default function TransitShipmentList({ onNavigateTab }) {
       description: group.description || '',
       product_ids: products.filter(product => product.transit_group_id === group.id).map(product => product.id)
     });
+    setGroupProductSearch('');
     setIsGroupManagerOpen(true);
   };
+
+  const groupProductSearchTerm = groupProductSearch.trim().toLowerCase();
+  const filteredGroupProducts = products.filter(product => !groupProductSearchTerm || [
+    product.name,
+    product.item_code,
+    product.model,
+    product.barcode
+  ].some(value => String(value || '').toLowerCase().includes(groupProductSearchTerm)));
 
   const handleSaveGroup = async (event) => {
     event.preventDefault();
@@ -907,11 +918,11 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   {transitGroups.filter(group => group.is_active !== false).map(group => (
-                    <div key={group.id} style={{ display: 'flex', border: '1px solid var(--line)', borderRadius: 4, overflow: 'hidden' }}>
-                      <button type="button" onClick={() => startAddGroupToLines(group)} style={{ border: 0, borderRadius: 0, padding: '5px 8px', fontSize: 11, color: '#ffca58' }}>
+                    <div key={group.id} style={{ display: 'flex', border: '1px solid rgba(255, 202, 88, 0.55)', borderRadius: 5, overflow: 'hidden', background: 'rgba(255, 202, 88, 0.1)' }}>
+                      <button type="button" onClick={() => startAddGroupToLines(group)} style={{ border: 0, borderRadius: 0, padding: '6px 9px', fontSize: 11, color: '#ffe2a0', background: 'transparent', fontWeight: 700 }}>
                         ? {group.name}
                       </button>
-                      <button type="button" onClick={() => openEditGroup(group)} style={{ border: 0, borderLeft: '1px solid var(--line)', borderRadius: 0, padding: '5px 7px', fontSize: 10 }} title="Edit group">✏️</button>
+                      <button type="button" onClick={() => openEditGroup(group)} style={{ border: 0, borderLeft: '1px solid rgba(255, 202, 88, 0.35)', borderRadius: 0, padding: '6px 8px', fontSize: 10, color: '#ffe2a0', background: 'rgba(255, 202, 88, 0.08)' }} title="Edit group">✏️</button>
                     </div>
                   ))}
                   {!transitGroups.length && <small style={{ color: 'var(--muted)' }}>Create a group for items whose exact brand is unknown.</small>}
@@ -1207,8 +1218,19 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   <label style={{ marginTop: 10 }}>Description</label>
                   <input value={groupDraft.description} onChange={(event) => setGroupDraft(current => ({ ...current, description: event.target.value }))} placeholder="Products that may arrive under this group" />
                   <label style={{ marginTop: 12 }}>Products allowed in this group</label>
+                  <input
+                    type="search"
+                    value={groupProductSearch}
+                    onChange={(event) => setGroupProductSearch(event.target.value)}
+                    placeholder="Search product name, SKU, model or barcode..."
+                    style={{ marginBottom: 8 }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, color: 'var(--muted)', fontSize: 11 }}>
+                    <span>{filteredGroupProducts.length} matching products</span>
+                    <span>{groupDraft.product_ids.length} selected</span>
+                  </div>
                   <div style={{ maxHeight: 300, overflow: 'auto', border: '1px solid var(--line)', borderRadius: 4, padding: 8 }}>
-                    {products.map(product => (
+                    {filteredGroupProducts.map(product => (
                       <label key={product.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 4px', cursor: 'pointer' }}>
                         <input
                           type="checkbox"
@@ -1224,6 +1246,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
                         <span><strong>{product.name}</strong> <small className="mono" style={{ color: 'var(--muted)' }}>{product.item_code}</small></span>
                       </label>
                     ))}
+                    {!filteredGroupProducts.length && (
+                      <div style={{ padding: 18, textAlign: 'center', color: 'var(--muted)' }}>No matching products.</div>
+                    )}
                   </div>
                 </div>
                 <div className="modal-footer">
@@ -1476,7 +1501,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
               <th style={{ textAlign: 'center' }}>Items</th>
               <th style={{ textAlign: 'right' }}>Total (LKR)</th>
               <th style={{ textAlign: 'center' }}>Status</th>
-              <th style={{ width: 220, textAlign: 'center' }}>Action</th>
+              <th style={{ minWidth: 350, textAlign: 'center' }}>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -1508,7 +1533,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   <td className="mono font-semibold" style={{ textAlign: 'right', color: 'var(--text)' }}>
                     <div>{formatCurrency(isArrived ? shipmentCosts.basis : shipmentCosts.goods + shipmentCosts.estimate)}</div>
                     <small style={{ display: 'block', color: 'var(--muted)', fontFamily: 'var(--font)' }}>
-                      {isArrived ? 'Final landed at arrival' : 'Goods + shipping forecast'}
+                      {isArrived ? 'Final landed at arrival' : 'Goods amount paid only'}
                     </small>
                   </td>
                   <td style={{ textAlign: 'center' }}>
@@ -1522,8 +1547,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
                       </span>
                     )}
                   </td>
-                  <td style={{ textAlign: 'center' }}>
-                    <div style={{ display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <td style={{ textAlign: 'center', minWidth: 350 }}>
+                    <div style={{ display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                       {isDraft ? (
                         <>
                           <button
