@@ -12,6 +12,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
     products = [],
     categories = [],
     bankAccounts = [],
+    payments = [],
+    cheques = [],
     createTransitShipment,
     updateTransitShipment,
     deleteTransitShipment,
@@ -72,7 +74,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [estimatedShippingCost, setEstimatedShippingCost] = useState(() => Number(savedDraft?.estimatedShippingCost) || 0);
 
   // Payment Selection
-  const [paymentType, setPaymentType] = useState(() => savedDraft?.paymentType || 'credit'); // 'credit' | 'cash' | 'bank' | 'cheque'
+  const [paymentType, setPaymentType] = useState(() => (
+    savedDraft?.paymentType && savedDraft.paymentType !== 'credit' ? savedDraft.paymentType : 'cash'
+  )); // Transit goods are paid when dispatched; shipping is paid separately on arrival.
   const [bankAccountId, setBankAccountId] = useState(() => savedDraft?.bankAccountId || bankAccounts[0]?.id || '');
   const [chequeNo, setChequeNo] = useState(() => savedDraft?.chequeNo || '');
   const [chequeDate, setChequeDate] = useState(() => savedDraft?.chequeDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
@@ -178,7 +182,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setExternalReference('');
     setNotes('');
     setEstimatedShippingCost(0);
-    setPaymentType('credit');
+    setPaymentType('cash');
     setBankAccountId(bankAccounts[0]?.id || '');
     setChequeNo('');
     setItems([]);
@@ -232,7 +236,10 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
   const handlePromoteDraftToTransit = async (shipment) => {
     try {
-      await updateTransitShipment(shipment.id, { status: 'in_transit' });
+      await updateTransitShipment(shipment.id, {
+        status: 'in_transit',
+        payment_type: 'cash'
+      });
       notifySuccess(`Draft shipment ${shipment.shipment_no} dispatched! In-transit inventory updated.`);
     } catch {
       // Shared sync handling reports the error.
@@ -250,7 +257,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setExternalReference('');
     setNotes('');
     setEstimatedShippingCost(0);
-    setPaymentType('credit');
+    setPaymentType('cash');
     setItems([]);
     setTreeSearch('');
     setSelectedCategoryId('all');
@@ -267,7 +274,17 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setExternalReference(shipment.bill_of_lading_no || '');
     setNotes(shipment.notes || '');
     setEstimatedShippingCost(Math.max(0, Number(shipment.estimated_landed_expenses_lkr) || 0));
-    setPaymentType(shipment.payment_type || 'credit');
+    setPaymentType(shipment.payment_type && shipment.payment_type !== 'credit' ? shipment.payment_type : 'cash');
+    const linkedPayment = payments.find(payment => (
+      payment.source_key === `transit:${shipment.id}:payment` || payment.transit_shipment_id === shipment.id
+    ));
+    if (linkedPayment?.bank_account_id) setBankAccountId(linkedPayment.bank_account_id);
+    const linkedCheque = linkedPayment
+      ? cheques.find(cheque => cheque.id === linkedPayment.cheque_id || cheque.payment_id === linkedPayment.id)
+      : null;
+    setChequeNo(linkedCheque?.cheque_no || '');
+    setChequeDate(linkedCheque?.cheque_date || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
+    setChequeBank(linkedCheque?.bank_name || '');
 
     const shipmentItems = shipment.items || [];
     const hasSavedItemShipping = shipmentItems.some(item => Number(item.allocated_landed_lkr_per_unit) > 0);
@@ -457,6 +474,10 @@ export default function TransitShipmentList({ onNavigateTab }) {
     const validItems = items.filter(it => it.product_id);
     if (validItems.length === 0) {
       notifyError('Please select at least one product for the shipment');
+      return;
+    }
+    if (totalAmount <= 0) {
+      notifyError('Enter an item cost greater than zero so the goods payment can be recorded in Cash Flow.');
       return;
     }
 
@@ -959,19 +980,12 @@ export default function TransitShipmentList({ onNavigateTab }) {
             </div>
           </div>
 
-          {/* Payment Method Selector (4 clean buttons: Credit, Cash, Bank, Cheque) */}
+          {/* Goods payment is recorded now; shipping is recorded separately at arrival. */}
           <div style={{ background: '#242424', padding: 14, border: '1px solid var(--line)', borderRadius: 4 }}>
             <label style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8, display: 'block' }}>
-              Payment Method (Updates Cashflow & Accounts Payable)
+              Goods Payment Method (Added to Cash Flow on the Transit Document Date)
             </label>
             <div className="payment-method-selector">
-              <button
-                type="button"
-                className={`payment-method-btn credit ${paymentType === 'credit' ? 'active' : ''}`}
-                onClick={() => setPaymentType('credit')}
-              >
-                <span>💳</span> Credit / Pay Later
-              </button>
               <button
                 type="button"
                 className={`payment-method-btn cash ${paymentType === 'cash' ? 'active' : ''}`}

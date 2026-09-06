@@ -1742,7 +1742,7 @@ export function BusinessProvider({ children }) {
       foreign_items_subtotal: foreignSubtotal,
       total_landed_expenses_lkr: 0,
       total_estimated_cost_lkr: lkrFob + estimatedLandedExpenses,
-      payment_type: shipmentData.payment_type || 'credit',
+      payment_type: shipmentData.payment_type || 'cash',
       status: isDraft ? 'preparing' : 'in_transit',
       notes: shipmentData.notes || null
     }));
@@ -1781,7 +1781,7 @@ export function BusinessProvider({ children }) {
         }).eq('id', shipmentData.supplier_order_id));
       }
 
-      const payType = shipmentData.payment_type || 'credit';
+      const payType = shipmentData.payment_type || 'cash';
       if (payType !== 'credit') {
         const paymentId = generateUUID();
         const chequeId = payType === 'cheque' ? generateUUID() : null;
@@ -1867,7 +1867,7 @@ export function BusinessProvider({ children }) {
     if (!existingShp) throw new Error('Shipment not found');
 
     const oldItems = existingShp.items || [];
-    const newItems = updatedData.items || [];
+    const newItems = updatedData.items || oldItems;
     const rate = Number(updatedData.exchange_rate_snapshot || existingShp.exchange_rate_snapshot) || 1.0;
     const foreignSubtotal = newItems.reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
     const lkrFob = foreignSubtotal * rate;
@@ -1987,7 +1987,7 @@ export function BusinessProvider({ children }) {
       exchange_rate_snapshot: rate,
       foreign_items_subtotal: foreignSubtotal,
       total_estimated_cost_lkr: totalCostLkr,
-      payment_type: updatedShipment.payment_type || existingShp.payment_type || 'credit',
+      payment_type: updatedShipment.payment_type || existingShp.payment_type || 'cash',
       notes: updatedData.notes || existingShp.notes,
       updated_at: new Date().toISOString()
     }).eq('id', shipmentId));
@@ -2023,6 +2023,94 @@ export function BusinessProvider({ children }) {
       });
     });
     if (stockWrites.length) await runCloudBatch('Updating transit inventory', stockWrites);
+
+    // Keep one goods-payment row linked to the transit document. Shipping is
+    // intentionally excluded here and is recorded only when the goods arrive.
+    const goodsPaymentSourceKey = `transit:${shipmentId}:payment`;
+    const localGoodsPayment = payments.find(payment => payment.source_key === goodsPaymentSourceKey);
+    const cloudGoodsPaymentResult = await supabase.from('payments').select('*').eq('source_key', goodsPaymentSourceKey).maybeSingle();
+    if (cloudGoodsPaymentResult.error) throw cloudGoodsPaymentResult.error;
+    const existingGoodsPayment = localGoodsPayment || cloudGoodsPaymentResult.data;
+    const nextPaymentType = updatedShipment.payment_type || 'cash';
+    const shouldRecordGoodsPayment = newIsActive && nextPaymentType !== 'credit' && lkrFob > 0;
+
+    if (shouldRecordGoodsPayment) {
+      const requestedBankId = updatedData.payment_details?.bank_account_id || existingGoodsPayment?.bank_account_id;
+      const nextBankId = nextPaymentType === 'bank' && isValidUUID(requestedBankId) ? requestedBankId : null;
+      if (nextPaymentType === 'bank' && !nextBankId) throw new Error('Select the bank account used for the goods payment.');
+
+      const existingCheque = existingGoodsPayment
+        ? cheques.find(cheque => cheque.id === existingGoodsPayment.cheque_id || cheque.payment_id === existingGoodsPayment.id)
+        : null;
+      const chequeDetails = updatedData.payment_details || {};
+      if (nextPaymentType === 'cheque' && !(chequeDetails.cheque_no || existingCheque?.cheque_no)) {
+        throw new Error('Cheque number and cheque date are required for the goods payment.');
+      }
+
+      const goodsPaymentId = existingGoodsPayment?.id || generateUUID();
+      const chequeId = nextPaymentType === 'cheque' ? (existingCheque?.id || generateUUID()) : null;
+      const goodsPayment = {
+        id: goodsPaymentId,
+        payment_no: existingGoodsPayment?.payment_no || `PAY-TRN-${String(shipmentId).slice(0, 8).toUpperCase()}`,
+        payment_date: updatedData.document_date || updatedData.shipping_date || existingShp.shipping_date || new Date().toISOString().slice(0, 10),
+        payment_type: 'transit_purchase_payment',
+        party_type: 'supplier',
+        party_id: updatedShipment.supplier_id,
+        amount: lkrFob,
+        payment_method: nextPaymentType,
+        bank_account_id: nextBankId,
+        cheque_id: nextPaymentType === 'cheque' ? (existingCheque?.id || null) : null,
+        transit_shipment_id: shipmentId,
+        source_key: goodsPaymentSourceKey,
+        reference: existingShp.shipment_no,
+        notes: `Goods payment for transit shipment ${existingShp.shipment_no}`
+      };
+      await runCloudWrite('Updating transit goods payment', () => supabase.from('payments').upsert(goodsPayment, { onConflict: 'source_key' }));
+
+      if (nextPaymentType === 'cheque') {
+        const transitCheque = {
+          id: chequeId,
+          cheque_no: chequeDetails.cheque_no || existingCheque?.cheque_no,
+          direction: 'issued',
+          party_type: 'supplier',
+          party_id: updatedShipment.supplier_id,
+          payment_id: goodsPaymentId,
+          transit_shipment_id: shipmentId,
+          bank_name: chequeDetails.bank_name || existingCheque?.bank_name || 'Bank',
+          cheque_date: chequeDetails.cheque_date || existingCheque?.cheque_date,
+          received_or_issued_date: goodsPayment.payment_date,
+          amount: lkrFob,
+          status: existingCheque?.status || 'held',
+          notes: goodsPayment.notes
+        };
+        if (!transitCheque.cheque_date) throw new Error('Cheque number and cheque date are required for the goods payment.');
+        await runCloudWrite('Updating transit goods cheque', () => supabase.from('cheque_register').upsert(transitCheque));
+        if (goodsPayment.cheque_id !== chequeId) {
+          await runCloudWrite('Linking transit goods cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', goodsPaymentId));
+          goodsPayment.cheque_id = chequeId;
+        }
+        setCheques(prev => [{ ...transitCheque, party_name: updatedShipment.supplier_name || 'Supplier' }, ...prev.filter(item => item.id !== chequeId)]);
+      } else if (existingCheque) {
+        await runCloudWrite('Removing replaced transit cheque', () => supabase.from('cheque_register').delete().eq('id', existingCheque.id));
+        setCheques(prev => prev.filter(cheque => cheque.id !== existingCheque.id));
+      }
+
+      const oldBankId = isValidUUID(existingGoodsPayment?.bank_account_id) ? existingGoodsPayment.bank_account_id : null;
+      const oldAmount = Number(existingGoodsPayment?.amount) || 0;
+      if (oldBankId && oldBankId === nextBankId) {
+        await adjustBankBalance('Readjusting transit goods bank payment', nextBankId, oldAmount - lkrFob);
+      } else {
+        if (existingGoodsPayment) await reversePaymentBalance(existingGoodsPayment, 'Reversing previous transit goods payment');
+        if (nextBankId) await adjustBankBalance('Updating transit goods bank payment', nextBankId, -lkrFob);
+      }
+      setPayments(prev => [{ ...goodsPayment, created_at: existingGoodsPayment?.created_at || new Date().toISOString() }, ...prev.filter(payment => payment.source_key !== goodsPaymentSourceKey)]);
+    } else if (existingGoodsPayment) {
+      await reversePaymentBalance(existingGoodsPayment, 'Reversing transit goods payment');
+      await runCloudWrite('Removing transit goods cheque', () => supabase.from('cheque_register').delete().eq('payment_id', existingGoodsPayment.id));
+      await runCloudWrite('Removing transit goods payment', () => supabase.from('payments').delete().eq('id', existingGoodsPayment.id));
+      setPayments(prev => prev.filter(payment => payment.id !== existingGoodsPayment.id));
+      setCheques(prev => prev.filter(cheque => cheque.payment_id !== existingGoodsPayment.id));
+    }
 
     const oldSupplierId = existingShp.supplier_id;
     const nextSupplierId = updatedShipment.supplier_id;
