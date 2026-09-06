@@ -3,6 +3,7 @@ import { useBusiness } from '../../context/BusinessContext';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { getDefaultLogoDataUrl } from '../../lib/defaultLogo';
+import StaffManagement from '../../components/settings/StaffManagement';
 
 export default function CompanySettings() {
   const {
@@ -125,7 +126,9 @@ export default function CompanySettings() {
 
   return (
     <div className="page-section" style={{ padding: 18, maxWidth: 900 }}>
+      <StaffManagement />
       {/* Trusted Device Quick PIN Card */}
+      {false && (
       <div className="panel-card" style={{ marginBottom: 20, borderLeft: '4px solid var(--primary)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
@@ -217,6 +220,7 @@ export default function CompanySettings() {
           </form>
         )}
       </div>
+      )}
 
       {/* Company Profile & Invoicing Details */}
       <div className="panel-card" style={{ marginBottom: 20 }}>

@@ -20,7 +20,7 @@ const TAB_INFO = {
 };
 
 export default function Header({ currentTab, onToggleMobileNav }) {
-  const { user, logout } = useAuth();
+  const { user, activeStaff, lockStaff, logout } = useAuth();
   const { refreshData, dataLoading, syncState } = useBusiness();
 
   const info = TAB_INFO[currentTab] || { title: 'GS Wholesale POS', desc: 'Wholesale Computer Products Management' };
@@ -59,6 +59,10 @@ export default function Header({ currentTab, onToggleMobileNav }) {
       </div>
 
       <div className="topbar-right">
+        <button onClick={lockStaff} className="secondary-button small-button staff-session-button" title="Lock and switch staff account">
+          <strong>{activeStaff?.full_name || 'Staff'}</strong>
+          <small>{activeStaff?.role === 'admin' ? 'Admin' : 'View only'} · Switch</small>
+        </button>
         <div
           className={`sync-health sync-health-${syncState?.status || 'connecting'}`}
           title={syncState?.error || lastSyncLabel}

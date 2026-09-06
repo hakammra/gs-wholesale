@@ -1840,6 +1840,49 @@ tr:hover td { background: #303030; }
   }
 }
 
+/* Email + staff PIN access */
+.auth-mode-tabs { display: grid; grid-template-columns: 1fr 1fr; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.auth-mode-tabs button { border: 0; border-radius: 0; padding: 9px; background: #242424; color: var(--muted); font-weight: 700; }
+.auth-mode-tabs button.active { background: var(--primary); color: #07131a; }
+.auth-card form > label { display: grid; gap: 5px; margin-bottom: 12px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.staff-pin-card { text-align: center; width: min(460px, 100%); }
+.staff-pin-card h2 { margin: 0 0 4px; }
+.staff-pin-card > p { margin: 0 0 16px; color: var(--muted); }
+.staff-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+.staff-account-grid button { display: grid; justify-items: center; gap: 3px; padding: 12px 8px; background: #242424; color: var(--text); border: 1px solid var(--line); border-radius: 7px; }
+.staff-account-grid button.selected { border-color: var(--primary); background: rgba(34, 168, 232, .12); }
+.staff-account-grid button > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--primary); color: #07131a; font-weight: 900; }
+.staff-account-grid small, .authenticated-email { color: var(--muted); }
+.form-error { margin: 0 0 10px; padding: 8px; color: #ffb1b1; background: rgba(255, 80, 80, .1); border: 1px solid rgba(255, 80, 80, .35); border-radius: 5px; font-size: 12px; }
+.auth-link-button { margin-top: 12px; border: 0; background: transparent; color: var(--primary); text-decoration: underline; }
+.authenticated-email { display: block; margin-top: 8px; font-size: 10px; overflow-wrap: anywhere; }
+.staff-session-button { display: grid; text-align: left; line-height: 1.15; }
+.staff-session-button small { color: var(--muted); }
+.readonly-banner { margin: 8px 12px 0; padding: 9px 12px; color: #ffe2a0; background: rgba(255, 202, 88, .1); border: 1px solid rgba(255, 202, 88, .4); border-radius: 6px; font-size: 12px; font-weight: 700; }
+.staff-management { margin-bottom: 20px; border-left: 4px solid var(--primary); }
+.staff-management-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.staff-management h3 { margin: 0; }
+.staff-management p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.staff-editor-grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; align-items: end; gap: 9px; padding: 12px; margin-bottom: 12px; background: #242424; border: 1px solid var(--line); border-radius: 6px; }
+.staff-editor-grid label { display: grid; gap: 4px; }
+.staff-active-field { display: flex !important; align-items: center; min-height: 38px; }
+.staff-active-field input { width: auto; }
+.staff-editor-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
+.current-staff-label { display: block; color: var(--primary); }
+
+@media (max-width: 768px) {
+  .staff-session-button { padding: 5px 7px; }
+  .staff-session-button strong { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .staff-session-button small { display: none; }
+  .staff-management-heading { align-items: stretch; flex-direction: column; }
+  .staff-editor-grid { grid-template-columns: 1fr; }
+  .staff-editor-actions { grid-column: auto; }
+}
+
+@media (max-width: 420px) {
+  .staff-account-grid { grid-template-columns: 1fr; }
+}
+
 /* Transaction integrity workspaces */
 .payment-detail-grid { display: grid; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(9, 14, 22, .55); }
 .cheque-detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

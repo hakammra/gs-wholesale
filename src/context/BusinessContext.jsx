@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { useNotification } from './NotificationContext';
+import { useAuth } from './AuthContext';
 import { firstCell } from '../lib/exportUtils';
 
 const BusinessContext = createContext();
@@ -97,6 +98,7 @@ const safeGet = (key, fallback) => {
 
 export function BusinessProvider({ children }) {
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useNotification();
+  const { isReadOnly } = useAuth();
   const [dataLoading, setDataLoading] = useState(false);
   const [syncState, setSyncState] = useState({
     status: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connecting',
@@ -430,6 +432,12 @@ export function BusinessProvider({ children }) {
   }, []);
 
   const runCloudWrite = async (label, operation) => {
+    if (isReadOnly) {
+      const accessError = new Error('This staff account has view-only access.');
+      notifyError(accessError.message);
+      setTimeout(() => fetchSupabaseData(), 0);
+      throw accessError;
+    }
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       const offlineError = new Error(`${label} was not saved because this device is offline.`);
       setSyncState(prev => ({ ...prev, status: 'offline', error: offlineError.message }));
