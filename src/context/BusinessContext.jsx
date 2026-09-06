@@ -1716,8 +1716,8 @@ export function BusinessProvider({ children }) {
         qty: Number(it.shipped_qty || it.qty) || 1,
         foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0,
         unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0,
-        allocated_landed_lkr_per_unit: 0,
-        final_landed_unit_cost_lkr: (Number(it.foreign_unit_cost || it.unit_cost) || 0) * rate
+        allocated_landed_lkr_per_unit: Number(it.allocated_landed_lkr_per_unit) || 0,
+        final_landed_unit_cost_lkr: ((Number(it.foreign_unit_cost || it.unit_cost) || 0) * rate) + (Number(it.allocated_landed_lkr_per_unit) || 0)
       })),
       created_at: new Date().toISOString()
     };
@@ -1877,12 +1877,17 @@ export function BusinessProvider({ children }) {
     ) || 0);
     const totalCostLkr = lkrFob + estimatedLandedExpenses;
     const actualLandedExpenses = Math.max(0, Number(existingShp.total_landed_expenses_lkr) || 0);
+    const hasExplicitItemShipping = newItems.some(it => (
+      it.allocated_landed_lkr_per_unit !== undefined && it.allocated_landed_lkr_per_unit !== null
+    ));
 
     const formattedItems = newItems.map(it => {
       const shippedQty = Number(it.shipped_qty || it.qty) || 1;
       const unitCost = Number(it.foreign_unit_cost || it.unit_cost) || 0;
       const valueRatio = foreignSubtotal > 0 ? (shippedQty * unitCost) / foreignSubtotal : 0;
-      const allocatedPerUnit = actualLandedExpenses > 0 ? (actualLandedExpenses * valueRatio) / shippedQty : 0;
+      const allocatedPerUnit = hasExplicitItemShipping
+        ? Math.max(0, Number(it.allocated_landed_lkr_per_unit) || 0)
+        : (actualLandedExpenses > 0 ? (actualLandedExpenses * valueRatio) / shippedQty : 0);
       return {
         ...it,
         id: isValidUUID(it.id) ? it.id : generateUUID(),
@@ -2406,7 +2411,19 @@ export function BusinessProvider({ children }) {
           status: 'arrived',
           purchase_doc_id: newPurchaseDoc.id,
           purchase_doc_no: grnNo,
-          arrived_at: receiptDate
+          arrived_at: receiptDate,
+          total_landed_expenses_lkr: Number(receiptData.shipping_payment?.amount) || allocatedLandedLkr,
+          total_estimated_cost_lkr: goodsItemsLkr + (Number(receiptData.shipping_payment?.amount) || allocatedLandedLkr),
+          items: (s.items || []).map(shipmentItem => {
+            const receivedItem = items.find(item =>
+              item.transit_shipment_item_id === shipmentItem.id || item.product_id === shipmentItem.product_id
+            );
+            return receivedItem ? {
+              ...shipmentItem,
+              allocated_landed_lkr_per_unit: Number(receivedItem.allocated_landed_lkr_per_unit) || 0,
+              final_landed_unit_cost_lkr: Number(receivedItem.final_landed_unit_cost_lkr || receivedItem.unit_cost_lkr) || 0
+            } : shipmentItem;
+          })
         } : s));
       }
 
@@ -2450,6 +2467,8 @@ export function BusinessProvider({ children }) {
             await runCloudWrite('Marking shipment received', () => supabase.from('transit_shipments').update({
               status: 'received',
               actual_arrival_date: receiptDate,
+              total_landed_expenses_lkr: Number(receiptData.shipping_payment?.amount) || allocatedLandedLkr,
+              total_estimated_cost_lkr: goodsItemsLkr + (Number(receiptData.shipping_payment?.amount) || allocatedLandedLkr),
               updated_at: new Date().toISOString()
             }).eq('id', linkTransitId));
           }
@@ -2492,6 +2511,14 @@ export function BusinessProvider({ children }) {
             if (grnItems.length > 0) {
               await runCloudWrite('Saving purchase receipt items', () => supabase.from('purchase_receipt_items').upsert(grnItems));
             }
+
+            const transitItemUpdates = items
+              .filter(item => isValidUUID(item.transit_shipment_item_id))
+              .map(item => supabase.from('transit_shipment_items').update({
+                allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
+                final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr) || 0
+              }).eq('id', item.transit_shipment_item_id));
+            if (transitItemUpdates.length) await runCloudBatch('Saving confirmed shipment costs', transitItemUpdates);
           }
 
           if (!isDraft) {
@@ -2520,6 +2547,105 @@ export function BusinessProvider({ children }) {
           }
         };
     await performSupabaseSync();
+
+    const shippingPaymentData = !isDirect && !isDraft ? receiptData.shipping_payment : null;
+    const shippingPaymentAmount = Math.max(0, Number(shippingPaymentData?.amount) || 0);
+    if (shippingPaymentData && shippingPaymentAmount > 0 && linkTransitId) {
+      const sourceKey = `arrival-shipping:${linkTransitId}`;
+      const existingPaymentResult = await supabase.from('payments').select('id').eq('source_key', sourceKey).maybeSingle();
+      if (existingPaymentResult.error) throw existingPaymentResult.error;
+
+      if (!existingPaymentResult.data) {
+        const landedCostNo = `LC-ARR-${String(linkTransitId).slice(0, 8).toUpperCase()}`;
+        const existingCostResult = await supabase.from('landed_costs').select('id').eq('cost_no', landedCostNo).maybeSingle();
+        if (existingCostResult.error) throw existingCostResult.error;
+        const landedCostId = existingCostResult.data?.id || generateUUID();
+        const paymentMethod = shippingPaymentData.method || 'cash';
+        const bankId = paymentMethod === 'bank' && isValidUUID(shippingPaymentData.bank_account_id)
+          ? shippingPaymentData.bank_account_id
+          : null;
+        const costPayload = {
+          transit_shipment_id: linkTransitId,
+          expense_type: 'freight',
+          payee: shippingPaymentData.payee || shp?.shipping_line_carrier || 'Shipping / Clearing',
+          currency: 'LKR',
+          foreign_amount: shippingPaymentAmount,
+          exchange_rate: 1,
+          lkr_amount: shippingPaymentAmount,
+          payment_date: receiptDate,
+          payment_method: paymentMethod,
+          bank_account_id: bankId,
+          allocation_method: 'manual',
+          reference: grnNo,
+          notes: `Confirmed when ${shp?.shipment_no || 'shipment'} arrived`
+        };
+
+        if (existingCostResult.data) {
+          await runCloudWrite('Updating arrival shipping cost', () => supabase.from('landed_costs').update(costPayload).eq('id', landedCostId));
+        } else {
+          await runCloudWrite('Recording arrival shipping cost', () => supabase.from('landed_costs').insert({
+            id: landedCostId,
+            cost_no: landedCostNo,
+            ...costPayload
+          }));
+        }
+
+        const paymentId = generateUUID();
+        const chequeId = paymentMethod === 'cheque' ? generateUUID() : null;
+        const shippingPayment = {
+          id: paymentId,
+          payment_no: `PAY-${landedCostNo}`,
+          payment_date: receiptDate,
+          payment_type: 'operational_expense',
+          party_type: 'payee',
+          party_id: null,
+          purchase_id: purchaseId,
+          transit_shipment_id: linkTransitId,
+          landed_cost_id: landedCostId,
+          amount: shippingPaymentAmount,
+          payment_method: paymentMethod,
+          bank_account_id: bankId,
+          cheque_id: null,
+          source_key: sourceKey,
+          reference: grnNo,
+          notes: `Shipping / clearing payment for ${shp?.shipment_no || grnNo}`
+        };
+        await runCloudWrite('Recording arrival shipping payment', () => supabase.from('payments').insert(shippingPayment));
+
+        if (paymentMethod === 'cheque') {
+          const details = shippingPaymentData.cheque_details;
+          const shippingCheque = {
+            id: chequeId,
+            cheque_no: details.cheque_no,
+            direction: 'issued',
+            party_type: 'other',
+            party_id: null,
+            payment_id: paymentId,
+            purchase_receipt_id: purchaseId,
+            transit_shipment_id: linkTransitId,
+            landed_cost_id: landedCostId,
+            bank_name: details.bank_name,
+            cheque_date: details.cheque_date,
+            received_or_issued_date: receiptDate,
+            amount: shippingPaymentAmount,
+            status: 'held',
+            notes: shippingPayment.notes
+          };
+          await runCloudWrite('Recording shipping cheque', () => supabase.from('cheque_register').insert(shippingCheque));
+          await runCloudWrite('Linking shipping cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
+          shippingPayment.cheque_id = chequeId;
+          setCheques(prev => [{ ...shippingCheque, party_name: shippingPaymentData.payee || 'Shipping / Clearing' }, ...prev]);
+        }
+
+        if (bankId) await adjustBankBalance('Updating shipping bank payment', bankId, -shippingPaymentAmount);
+        setPayments(prev => [{
+          ...shippingPayment,
+          payee_name: shippingPaymentData.payee || 'Shipping / Clearing',
+          expense_category: 'Shipping / Landed Cost',
+          created_at: new Date().toISOString()
+        }, ...prev.filter(payment => payment.source_key !== sourceKey)]);
+      }
+    }
 
     if (receivedCostUpdates.length) {
       await runCloudBatch('Saving received weighted costs', receivedCostUpdates.map(update => (
