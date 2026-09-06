@@ -11,6 +11,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
     suppliers = [],
     products = [],
     categories = [],
+    transitGroups = [],
+    salesDocuments = [],
+    stockBalances = {},
     bankAccounts = [],
     payments = [],
     cheques = [],
@@ -19,7 +22,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
     deleteTransitShipment,
     receivePurchaseShipment,
     saveSupplier,
-    saveProduct
+    saveProduct,
+    saveTransitGroup,
+    deleteTransitGroup
   } = useBusiness();
 
   const { notifySuccess, notifyError, notifyWarning } = useNotification();
@@ -71,7 +76,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [shippingMethod, setShippingMethod] = useState(() => savedDraft?.shippingMethod || 'Air Cargo');
   const [externalReference, setExternalReference] = useState(() => savedDraft?.externalReference || '');
   const [notes, setNotes] = useState(() => savedDraft?.notes || '');
-  const [estimatedShippingCost, setEstimatedShippingCost] = useState(() => Number(savedDraft?.estimatedShippingCost) || 0);
+  const [goodsAmountPaid, setGoodsAmountPaid] = useState(() => Number(savedDraft?.goodsAmountPaid) || 0);
 
   // Payment Selection
   const [paymentType, setPaymentType] = useState(() => (
@@ -89,7 +94,10 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [treeSearch, setTreeSearch] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState('all');
   const [selectedLineProduct, setSelectedLineProduct] = useState(null);
-  const [lineDraft, setLineDraft] = useState({ qty: 1, unit_cost: 0, shipping_unit_cost: 0 });
+  const [lineDraft, setLineDraft] = useState({ qty: 1 });
+  const [isGroupManagerOpen, setIsGroupManagerOpen] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState(null);
+  const [groupDraft, setGroupDraft] = useState({ name: '', description: '', product_ids: [] });
 
   // Quick Add Supplier Modal State
   const [isAddSupplierOpen, setIsAddSupplierOpen] = useState(false);
@@ -105,17 +113,16 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [newProductCatId, setNewProductCatId] = useState('');
 
   // Calculations
-  const totalAmount = items.reduce((sum, it) => sum + ((Number(it.qty ?? it.shipped_qty) || 0) * (Number(it.unit_cost ?? it.foreign_unit_cost) || 0)), 0);
   const totalQty = items.reduce((sum, it) => sum + (Number(it.qty ?? it.shipped_qty) || 0), 0);
-  const itemShippingTotal = items.reduce((sum, it) => sum + (
-    (Number(it.qty ?? it.shipped_qty) || 0) * (Number(it.allocated_landed_lkr_per_unit ?? it.shipping_unit_cost) || 0)
+  const arrivalFinalValue = receivingItems.reduce((sum, item) => sum + (
+    ((Number(item.received_sellable_qty) || 0) + (Number(item.damaged_qty) || 0)) * (Number(item.final_landed_unit_cost_lkr) || 0)
   ), 0);
-  const effectiveEstimatedShipping = itemShippingTotal > 0 ? itemShippingTotal : Math.max(0, Number(estimatedShippingCost) || 0);
-  const arrivalShippingTotal = receivingItems.reduce((sum, item) => sum + (
-    (Number(item.shipped_qty) || 0) * (Number(item.shipping_unit_cost_lkr ?? item.allocated_landed_lkr_per_unit) || 0)
-  ), 0);
+  const arrivalGoodsPaid = Number(shipmentToReceive?.goods_amount_paid_lkr) ||
+    ((Number(shipmentToReceive?.foreign_items_subtotal) || 0) * (Number(shipmentToReceive?.exchange_rate_snapshot) || 1));
+  const arrivalCostDifference = arrivalFinalValue - arrivalGoodsPaid;
+  const arrivalShippingTotal = Math.max(0, arrivalCostDifference);
   const getShipmentCosts = (shipment) => {
-    const goods = (Number(shipment?.foreign_items_subtotal) || 0) * (Number(shipment?.exchange_rate_snapshot) || 1);
+    const goods = Number(shipment?.goods_amount_paid_lkr) || ((Number(shipment?.foreign_items_subtotal) || 0) * (Number(shipment?.exchange_rate_snapshot) || 1));
     const estimate = Math.max(0, Number(shipment?.estimated_landed_expenses_lkr) || ((Number(shipment?.total_estimated_cost_lkr) || 0) - goods));
     const actual = Math.max(0, Number(shipment?.total_landed_expenses_lkr) || 0);
     return { goods, estimate, actual, final: goods + actual, basis: goods + (actual > 0 ? actual : estimate) };
@@ -133,7 +140,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
         shippingMethod,
         externalReference,
         notes,
-        estimatedShippingCost,
+        goodsAmountPaid,
         paymentType,
         bankAccountId,
         chequeNo,
@@ -154,7 +161,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     shippingMethod,
     externalReference,
     notes,
-    estimatedShippingCost,
+    goodsAmountPaid,
     paymentType,
     bankAccountId,
     chequeNo,
@@ -181,7 +188,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setShippingMethod('Air Cargo');
     setExternalReference('');
     setNotes('');
-    setEstimatedShippingCost(0);
+    setGoodsAmountPaid(0);
     setPaymentType('cash');
     setBankAccountId(bankAccounts[0]?.id || '');
     setChequeNo('');
@@ -256,7 +263,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setShippingMethod('Air Cargo');
     setExternalReference('');
     setNotes('');
-    setEstimatedShippingCost(0);
+    setGoodsAmountPaid(0);
     setPaymentType('cash');
     setItems([]);
     setTreeSearch('');
@@ -268,12 +275,12 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const handleEditShipment = (shipment) => {
     setEditingShipmentId(shipment.id);
     setSupplierId(shipment.supplier_id || suppliers[0]?.id || '');
-    setDocumentDate(shipment.departure_date || shipment.document_date || new Date().toISOString().slice(0, 10));
-    setExpectedArrivalDate(shipment.estimated_arrival_date || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10));
-    setShippingMethod(shipment.shipping_line_carrier || 'Air Cargo');
-    setExternalReference(shipment.bill_of_lading_no || '');
+    setDocumentDate(shipment.shipping_date || shipment.departure_date || shipment.document_date || new Date().toISOString().slice(0, 10));
+    setExpectedArrivalDate(shipment.expected_arrival_date || shipment.estimated_arrival_date || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10));
+    setShippingMethod(shipment.courier_freight_company || shipment.shipping_line_carrier || 'Air Cargo');
+    setExternalReference(shipment.tracking_or_bl_no || shipment.bill_of_lading_no || shipment.supplier_invoice_ref || '');
     setNotes(shipment.notes || '');
-    setEstimatedShippingCost(Math.max(0, Number(shipment.estimated_landed_expenses_lkr) || 0));
+    setGoodsAmountPaid(Number(shipment.goods_amount_paid_lkr) || ((Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1)));
     setPaymentType(shipment.payment_type && shipment.payment_type !== 'credit' ? shipment.payment_type : 'cash');
     const linkedPayment = payments.find(payment => (
       payment.source_key === `transit:${shipment.id}:payment` || payment.transit_shipment_id === shipment.id
@@ -286,29 +293,19 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setChequeDate(linkedCheque?.cheque_date || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
     setChequeBank(linkedCheque?.bank_name || '');
 
-    const shipmentItems = shipment.items || [];
-    const hasSavedItemShipping = shipmentItems.some(item => Number(item.allocated_landed_lkr_per_unit) > 0);
-    const itemValueTotal = shipmentItems.reduce((sum, item) => sum + (
-      (Number(item.shipped_qty || item.qty) || 0) * (Number(item.foreign_unit_cost || item.unit_cost) || 0)
-    ), 0) || 1;
-    const legacyShippingTotal = Math.max(0, Number(shipment.estimated_landed_expenses_lkr) || 0);
-    const loadedItems = shipmentItems.map(it => {
+    const loadedItems = (shipment.items || []).map(it => {
       const prod = products.find(p => p.id === it.product_id);
+      const group = transitGroups.find(candidate => candidate.id === it.transit_group_id);
       const qty = Number(it.shipped_qty || it.qty) || 1;
-      const goodsUnitCost = Number(it.foreign_unit_cost || it.unit_cost) || 0;
-      const shippingUnitCost = hasSavedItemShipping
-        ? Number(it.allocated_landed_lkr_per_unit) || 0
-        : ((legacyShippingTotal * ((qty * goodsUnitCost) / itemValueTotal)) / qty);
+      const lineType = it.line_type === 'group' || it.transit_group_id ? 'group' : 'known_product';
       return {
         id: it.id,
-        product_id: it.product_id,
-        product_name: it.product_name || prod?.name || 'Product',
-        item_code: it.item_code || prod?.item_code || '',
-        qty,
-        unit_cost: goodsUnitCost,
-        shipping_unit_cost: shippingUnitCost,
-        allocated_landed_lkr_per_unit: shippingUnitCost,
-        final_landed_unit_cost_lkr: goodsUnitCost + shippingUnitCost
+        line_type: lineType,
+        product_id: lineType === 'group' ? null : it.product_id,
+        transit_group_id: lineType === 'group' ? it.transit_group_id : null,
+        product_name: lineType === 'group' ? (group?.name || it.transit_group_name || 'Unconfirmed group') : (it.product_name || prod?.name || 'Product'),
+        item_code: lineType === 'group' ? 'GROUP' : (it.item_code || prod?.item_code || ''),
+        qty
       };
     });
 
@@ -320,27 +317,30 @@ export default function TransitShipmentList({ onNavigateTab }) {
   };
 
   const startAddProductToLines = (product) => {
-    setSelectedLineProduct(product);
-    setLineDraft({
-      qty: 1,
-      unit_cost: Number(product.weighted_cost_lkr || product.cost_price) || 0,
-      shipping_unit_cost: 0
-    });
+    setSelectedLineProduct({ ...product, line_type: 'known_product' });
+    setLineDraft({ qty: 1 });
+  };
+
+  const startAddGroupToLines = (group) => {
+    setSelectedLineProduct({ ...group, line_type: 'group', item_code: 'GROUP' });
+    setLineDraft({ qty: 1 });
   };
 
   const confirmAddProductToLines = (e) => {
     if (e) e.preventDefault();
     if (!selectedLineProduct) return;
     const qty = Number(lineDraft.qty) || 1;
-    const unitCost = Number(lineDraft.unit_cost) || 0;
-    const shippingUnitCost = Math.max(0, Number(lineDraft.shipping_unit_cost) || 0);
     if (qty <= 0) {
       notifyError('Quantity must be greater than zero');
       return;
     }
 
     setItems(prev => {
-      const existingIdx = prev.findIndex(it => it.product_id === selectedLineProduct.id);
+      const isGroup = selectedLineProduct.line_type === 'group';
+      const existingIdx = prev.findIndex(it => isGroup
+        ? it.line_type === 'group' && it.transit_group_id === selectedLineProduct.id
+        : it.line_type !== 'group' && it.product_id === selectedLineProduct.id
+      );
       if (existingIdx >= 0) {
         return prev.map((it, i) => {
           if (i !== existingIdx) return it;
@@ -349,28 +349,20 @@ export default function TransitShipmentList({ onNavigateTab }) {
           return {
             ...it,
             qty: newQty,
-            shipped_qty: newQty,
-            unit_cost: unitCost,
-            foreign_unit_cost: unitCost,
-            shipping_unit_cost: shippingUnitCost,
-            allocated_landed_lkr_per_unit: shippingUnitCost,
-            final_landed_unit_cost_lkr: unitCost + shippingUnitCost
+            shipped_qty: newQty
           };
         });
       }
       return [
         ...prev,
         {
-          product_id: selectedLineProduct.id,
+          line_type: isGroup ? 'group' : 'known_product',
+          product_id: isGroup ? null : selectedLineProduct.id,
+          transit_group_id: isGroup ? selectedLineProduct.id : null,
           product_name: selectedLineProduct.name,
-          item_code: selectedLineProduct.item_code,
+          item_code: isGroup ? 'GROUP' : selectedLineProduct.item_code,
           qty,
-          shipped_qty: qty,
-          unit_cost: unitCost,
-          foreign_unit_cost: unitCost,
-          shipping_unit_cost: shippingUnitCost,
-          allocated_landed_lkr_per_unit: shippingUnitCost,
-          final_landed_unit_cost_lkr: unitCost + shippingUnitCost
+          shipped_qty: qty
         }
       ];
     });
@@ -384,17 +376,34 @@ export default function TransitShipmentList({ onNavigateTab }) {
       if (i !== idx) return it;
       const updated = { ...it, [field]: val };
       if (field === 'qty') updated.shipped_qty = val;
-      if (field === 'unit_cost') {
-        updated.foreign_unit_cost = val;
-        updated.final_landed_unit_cost_lkr = (Number(val) || 0) + (Number(updated.allocated_landed_lkr_per_unit) || 0);
-      }
-      if (field === 'shipping_unit_cost') {
-        updated.allocated_landed_lkr_per_unit = val;
-        updated.final_landed_unit_cost_lkr = (Number(updated.unit_cost ?? updated.foreign_unit_cost) || 0) + (Number(val) || 0);
-      }
       return updated;
     }));
-    if (field === 'shipping_unit_cost') setEstimatedShippingCost(0);
+  };
+
+  const openNewGroup = () => {
+    setEditingGroupId(null);
+    setGroupDraft({ name: '', description: '', product_ids: [] });
+    setIsGroupManagerOpen(true);
+  };
+
+  const openEditGroup = (group) => {
+    setEditingGroupId(group.id);
+    setGroupDraft({
+      name: group.name,
+      description: group.description || '',
+      product_ids: products.filter(product => product.transit_group_id === group.id).map(product => product.id)
+    });
+    setIsGroupManagerOpen(true);
+  };
+
+  const handleSaveGroup = async (event) => {
+    event.preventDefault();
+    try {
+      await saveTransitGroup({ id: editingGroupId, ...groupDraft });
+      setIsGroupManagerOpen(false);
+    } catch (error) {
+      notifyError(error.message || 'Could not save the transit group.');
+    }
   };
 
   const handleRemoveItem = (idx) => {
@@ -443,9 +452,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
     if (savedProd?.id) {
       setItems(prev => {
         if (prev.length === 1 && !prev[0].product_id) {
-          return [{ product_id: savedProd.id, qty: 1, unit_cost: cost }];
+          return [{ line_type: 'known_product', product_id: savedProd.id, qty: 1 }];
         }
-        return [...prev, { product_id: savedProd.id, qty: 1, unit_cost: cost }];
+        return [...prev, { line_type: 'known_product', product_id: savedProd.id, qty: 1 }];
       });
     }
 
@@ -461,23 +470,23 @@ export default function TransitShipmentList({ onNavigateTab }) {
     if (e) e.preventDefault();
     if (isSaving) return;
 
-    if (paymentType === 'cheque' && (!chequeNo.trim() || !chequeDate)) {
+    if (!asDraft && paymentType === 'cheque' && (!chequeNo.trim() || !chequeDate)) {
       notifyError('Cheque number and cheque date are required.');
       return;
     }
 
-    if (paymentType === 'bank' && !bankAccountId) {
+    if (!asDraft && paymentType === 'bank' && !bankAccountId) {
       notifyError('Select the bank account used for this payment.');
       return;
     }
 
-    const validItems = items.filter(it => it.product_id);
+    const validItems = items.filter(it => it.line_type === 'group' ? it.transit_group_id : it.product_id);
     if (validItems.length === 0) {
-      notifyError('Please select at least one product for the shipment');
+      notifyError('Add at least one known product or unconfirmed transit group.');
       return;
     }
-    if (totalAmount <= 0) {
-      notifyError('Enter an item cost greater than zero so the goods payment can be recorded in Cash Flow.');
+    if (!asDraft && Number(goodsAmountPaid) <= 0) {
+      notifyError('Enter the total goods amount paid so it can be recorded in Cash Flow.');
       return;
     }
 
@@ -501,18 +510,21 @@ export default function TransitShipmentList({ onNavigateTab }) {
       departure_date: documentDate,
       estimated_arrival_date: expectedArrivalDate,
       notes,
-      estimated_landed_expenses_lkr: effectiveEstimatedShipping,
+      goods_amount_paid_lkr: Math.max(0, Number(goodsAmountPaid) || 0),
+      estimated_landed_expenses_lkr: 0,
       payment_type: paymentType,
       payment_details: paymentType === 'bank' ? { bank_account_id: bankAccountId } : paymentType === 'cheque' ? { cheque_no: chequeNo, cheque_date: chequeDate, bank_name: chequeBank } : null,
       items: validItems.map(it => ({
         id: it.id,
-        product_id: it.product_id,
+        line_type: it.line_type === 'group' ? 'group' : 'known_product',
+        product_id: it.line_type === 'group' ? null : it.product_id,
+        transit_group_id: it.line_type === 'group' ? it.transit_group_id : null,
         shipped_qty: Number(it.qty) || 1,
         qty: Number(it.qty) || 1,
-        foreign_unit_cost: Number(it.unit_cost) || 0,
-        unit_cost: Number(it.unit_cost) || 0,
-        allocated_landed_lkr_per_unit: Number(it.allocated_landed_lkr_per_unit ?? it.shipping_unit_cost) || 0,
-        final_landed_unit_cost_lkr: (Number(it.unit_cost) || 0) + (Number(it.allocated_landed_lkr_per_unit ?? it.shipping_unit_cost) || 0),
+        foreign_unit_cost: 0,
+        unit_cost: 0,
+        allocated_landed_lkr_per_unit: 0,
+        final_landed_unit_cost_lkr: 0,
         weight_kg: 0.1,
         volume_cbm: 0.001
       })),
@@ -526,7 +538,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
         notifySuccess(asDraft ? 'Transit draft shipment updated!' : 'Stock in Transit shipment updated! In-transit inventory counts re-applied.');
       } else {
         await createTransitShipment(payload);
-        notifySuccess(asDraft ? 'Stock in Transit saved as Draft! (No inventory impact until dispatched)' : 'Stock in Transit order placed! Inventory balances remain unchanged until shipment arrives.');
+        notifySuccess(asDraft ? 'Stock in Transit saved as Draft! (No inventory impact until dispatched)' : 'Transit document saved. Goods payment entered Cash Flow and known-product quantities are now in transit.');
       }
       localStorage.removeItem('gs_transit_form_draft');
       setHasDraftBanner(false);
@@ -542,36 +554,28 @@ export default function TransitShipmentList({ onNavigateTab }) {
   // Open Receive & Convert Modal
   const handleOpenReceiveModal = (shipment) => {
     const shipmentCosts = getShipmentCosts(shipment);
-    const allocationTotal = shipmentCosts.actual > 0 ? shipmentCosts.actual : shipmentCosts.estimate;
-    const hasItemShipping = (shipment.items || []).some(item => Number(item.allocated_landed_lkr_per_unit) > 0);
-    const itemValueTotal = (shipment.items || []).reduce((sum, item) => (
-      sum + ((Number(item.shipped_qty || item.qty) || 0) * (Number(item.foreign_unit_cost || item.unit_cost) || 0))
-    ), 0) || 1;
     setShipmentToReceive(shipment);
     setArrivalDate(new Date().toISOString().slice(0, 10));
     setArrivalNotes(`Arrived from ${shipment.shipping_line_carrier} on ${new Date().toISOString().slice(0, 10)}`);
     setReceivingItems((shipment.items || []).map(it => {
       const shippedQty = Number(it.shipped_qty || it.qty) || 1;
-      const foreignUnitCost = Number(it.foreign_unit_cost || it.unit_cost) || 0;
-      const itemRatio = (shippedQty * foreignUnitCost) / itemValueTotal;
-      const allocatedPerUnit = hasItemShipping
-        ? Number(it.allocated_landed_lkr_per_unit) || 0
-        : (allocationTotal > 0 ? (allocationTotal * itemRatio) / shippedQty : 0);
-      const baseUnitCost = foreignUnitCost * (Number(shipment.exchange_rate_snapshot) || 1);
-      const finalUnitCost = baseUnitCost + allocatedPerUnit;
+      const isGroup = it.line_type === 'group' || Boolean(it.transit_group_id);
+      const product = products.find(candidate => candidate.id === it.product_id);
+      const group = transitGroups.find(candidate => candidate.id === it.transit_group_id);
       return {
+        row_id: `${it.id}-${Date.now()}-${Math.random()}`,
         transit_shipment_item_id: it.id,
-        product_id: it.product_id,
+        source_line_type: isGroup ? 'group' : 'known_product',
+        source_product_id: isGroup ? null : it.product_id,
+        transit_group_id: isGroup ? it.transit_group_id : null,
+        source_label: isGroup ? (group?.name || 'Unconfirmed group') : (product?.name || 'Known product'),
+        expected_qty: shippedQty,
+        product_id: isGroup ? '' : it.product_id,
         shipped_qty: shippedQty,
         received_sellable_qty: shippedQty,
         damaged_qty: 0,
         missing_qty: 0,
-        foreign_unit_cost: foreignUnitCost,
-        goods_unit_cost_lkr: baseUnitCost,
-        shipping_unit_cost_lkr: allocatedPerUnit,
-        allocated_landed_lkr_per_unit: allocatedPerUnit,
-        unit_cost_lkr: finalUnitCost,
-        final_landed_unit_cost_lkr: finalUnitCost
+        final_landed_unit_cost_lkr: Number(it.final_landed_unit_cost_lkr) || 0
       };
     }));
     setArrivalShippingPaymentMethod('cash');
@@ -587,10 +591,89 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setIsReceiveModalOpen(true);
   };
 
+  const addArrivalSplit = (sourceRow) => {
+    setReceivingItems(current => [...current, {
+      ...sourceRow,
+      row_id: `${sourceRow.transit_shipment_item_id}-${Date.now()}-${Math.random()}`,
+      product_id: '',
+      received_sellable_qty: 0,
+      damaged_qty: 0,
+      missing_qty: 0,
+      final_landed_unit_cost_lkr: 0
+    }]);
+  };
+
+  const updateArrivalRow = (rowId, patch) => {
+    setReceivingItems(current => current.map(row => row.row_id === rowId ? { ...row, ...patch } : row));
+  };
+
+  const removeArrivalRow = (rowId) => {
+    setReceivingItems(current => current.filter(row => row.row_id !== rowId));
+  };
+
   // Confirm Arrival & Convert to Purchase Document
   const handleConfirmArrival = async (e) => {
     e.preventDefault();
     if (!shipmentToReceive || isReceiving) return;
+
+    const sourceLines = shipmentToReceive.items || [];
+    for (const sourceLine of sourceLines) {
+      const sourceRows = receivingItems.filter(row => row.transit_shipment_item_id === sourceLine.id);
+      const accounted = sourceRows.reduce((sum, row) => sum + (Number(row.received_sellable_qty) || 0) + (Number(row.damaged_qty) || 0) + (Number(row.missing_qty) || 0), 0);
+      const expected = Number(sourceLine.shipped_qty || sourceLine.qty) || 0;
+      if (Math.abs(accounted - expected) > 0.001) {
+        notifyWarning(`${sourceRows[0]?.source_label || 'Transit line'} must account for exactly ${expected} units. Currently accounted: ${accounted}.`);
+        return;
+      }
+    }
+    const stockRows = receivingItems.filter(row => (Number(row.received_sellable_qty) || 0) + (Number(row.damaged_qty) || 0) > 0);
+    if (stockRows.some(row => !row.product_id)) {
+      notifyWarning('Select the actual product for every received or damaged quantity.');
+      return;
+    }
+    if (stockRows.some(row => Number(row.final_landed_unit_cost_lkr) <= 0)) {
+      notifyWarning('Enter the final landed unit cost for every received product.');
+      return;
+    }
+    const duplicateProduct = stockRows.find((row, index) => stockRows.findIndex(other => other.product_id === row.product_id) !== index);
+    if (duplicateProduct) {
+      notifyWarning('The same actual product is selected more than once. Merge its quantities into one arrival line.');
+      return;
+    }
+
+    const activeReservationItems = salesDocuments
+      .filter(document =>
+        (document.doc_type === 'reserved_order' || document.doc_type === 'sales_order') &&
+        (document.status === 'reserved' || document.status === 'confirmed')
+      )
+      .flatMap(document => document.items || []);
+    for (const sourceLine of sourceLines) {
+      const isGroup = sourceLine.line_type === 'group' || Boolean(sourceLine.transit_group_id);
+      const matchingArrivalRows = receivingItems.filter(row => row.transit_shipment_item_id === sourceLine.id);
+      const arrivingSellable = matchingArrivalRows.reduce((sum, row) => sum + (Number(row.received_sellable_qty) || 0), 0);
+      const otherIncoming = transitShipments
+        .filter(shipment => shipment.id !== shipmentToReceive.id && shipment.status === 'in_transit')
+        .flatMap(shipment => shipment.items || [])
+        .filter(item => isGroup ? item.transit_group_id === sourceLine.transit_group_id : item.product_id === sourceLine.product_id)
+        .reduce((sum, item) => sum + (Number(item.shipped_qty || item.qty) || 0), 0);
+      const reserved = isGroup
+        ? activeReservationItems
+          .filter(item => item.transit_group_id === sourceLine.transit_group_id)
+          .reduce((sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0), 0)
+        : Number(stockBalances[sourceLine.product_id]?.qty_in_transit_reserved) || 0;
+      const unfulfilledAfterArrival = Math.max(0, reserved - arrivingSellable);
+      if (unfulfilledAfterArrival > otherIncoming + 0.001) {
+        const sourceName = isGroup
+          ? (transitGroups.find(group => group.id === sourceLine.transit_group_id)?.name || 'transit group')
+          : (products.find(product => product.id === sourceLine.product_id)?.name || 'product');
+        notifyWarning(`${sourceName} has ${reserved} incoming units reserved. This arrival must provide at least ${reserved - otherIncoming} sellable units, or those reservations must be released first.`);
+        return;
+      }
+    }
+    if (arrivalCostDifference < -0.01) {
+      notifyWarning(`Final classified value is ${formatCurrency(Math.abs(arrivalCostDifference))} below the goods amount already paid. Increase the landed costs or correct the goods payment before completing arrival.`);
+      return;
+    }
 
     if (!arrivalShippingAlreadyRecorded && arrivalShippingTotal > 0 && arrivalShippingPaymentMethod === 'bank' && !arrivalShippingBankId) {
       notifyWarning('Select the bank account used to pay shipping.');
@@ -603,11 +686,30 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
     setIsReceiving(true);
     try {
+      const shippingRatio = arrivalFinalValue > 0 ? arrivalShippingTotal / arrivalFinalValue : 0;
+      const rowsToPost = receivingItems.filter(row =>
+        (Number(row.received_sellable_qty) || 0) + (Number(row.damaged_qty) || 0) > 0 ||
+        (row.source_line_type === 'known_product' && (Number(row.missing_qty) || 0) > 0)
+      );
+      const finalizedItems = rowsToPost.map(row => {
+        const finalUnitCost = Number(row.final_landed_unit_cost_lkr) || 0;
+        const shippingUnitCost = finalUnitCost * shippingRatio;
+        return {
+          ...row,
+          shipped_qty: (Number(row.received_sellable_qty) || 0) + (Number(row.damaged_qty) || 0) + (Number(row.missing_qty) || 0),
+          foreign_unit_cost: finalUnitCost - shippingUnitCost,
+          goods_unit_cost_lkr: finalUnitCost - shippingUnitCost,
+          shipping_unit_cost_lkr: shippingUnitCost,
+          allocated_landed_lkr_per_unit: shippingUnitCost,
+          unit_cost_lkr: finalUnitCost,
+          final_landed_unit_cost_lkr: finalUnitCost
+        };
+      });
       const purDoc = await receivePurchaseShipment({
         transit_shipment_id: shipmentToReceive.id,
         receipt_date: arrivalDate,
         notes: arrivalNotes,
-        items: receivingItems,
+        items: finalizedItems,
         shipping_payment: arrivalShippingTotal > 0 && !arrivalShippingAlreadyRecorded ? {
           amount: arrivalShippingTotal,
           method: arrivalShippingPaymentMethod,
@@ -760,11 +862,17 @@ export default function TransitShipmentList({ onNavigateTab }) {
             </div>
 
             <div>
-              <label style={{ fontSize: 12 }}>Estimated Shipping Total</label>
-              <div className="mono font-semibold" style={{ minHeight: 40, display: 'flex', alignItems: 'center', padding: '0 10px', border: '1px solid var(--line)', borderRadius: 4 }}>
-                {formatCurrency(effectiveEstimatedShipping)}
-              </div>
-              <small style={{ color: 'var(--muted)' }}>Calculated from each item's Shipping / Unit column. Forecast only; no Cash Flow entry yet.</small>
+              <label style={{ fontSize: 12 }}>Total Goods Amount Paid (LKR) *</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="mono font-semibold"
+                value={goodsAmountPaid}
+                onChange={(event) => setGoodsAmountPaid(event.target.value)}
+                required
+              />
+              <small style={{ color: 'var(--muted)' }}>One payment for the complete order. Unit and shipping costs are decided at arrival.</small>
             </div>
 
             <div>
@@ -792,6 +900,23 @@ export default function TransitShipmentList({ onNavigateTab }) {
           <div className="document-edit-layout">
             {/* Left: Product Tree Panel */}
             <div className="document-product-tree-panel">
+              <div style={{ padding: 8, borderBottom: '1px solid var(--line)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 7 }}>
+                  <strong style={{ fontSize: 12 }}>Unconfirmed Transit Groups</strong>
+                  <button type="button" className="secondary-button small-button" onClick={openNewGroup}>+ Group</button>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {transitGroups.filter(group => group.is_active !== false).map(group => (
+                    <div key={group.id} style={{ display: 'flex', border: '1px solid var(--line)', borderRadius: 4, overflow: 'hidden' }}>
+                      <button type="button" onClick={() => startAddGroupToLines(group)} style={{ border: 0, borderRadius: 0, padding: '5px 8px', fontSize: 11, color: '#ffca58' }}>
+                        ? {group.name}
+                      </button>
+                      <button type="button" onClick={() => openEditGroup(group)} style={{ border: 0, borderLeft: '1px solid var(--line)', borderRadius: 0, padding: '5px 7px', fontSize: 10 }} title="Edit group">✏️</button>
+                    </div>
+                  ))}
+                  {!transitGroups.length && <small style={{ color: 'var(--muted)' }}>Create a group for items whose exact brand is unknown.</small>}
+                </div>
+              </div>
               <div className="compact-search">
                 <input
                   type="text"
@@ -832,9 +957,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
             {/* Right: Document Lines Panel */}
             <div className="document-lines-panel">
               <div className="document-lines-toolbar">
-                <strong style={{ fontSize: 13 }}>Ordered Products & Quantities</strong>
+                <strong style={{ fontSize: 13 }}>Expected Products / Groups & Quantities</strong>
                 <span className="count-label">
-                  {items.filter(it => it.product_id).length} item{items.filter(it => it.product_id).length === 1 ? '' : 's'} in shipment
+                  {items.length} line{items.length === 1 ? '' : 's'} in shipment
                 </span>
               </div>
 
@@ -842,13 +967,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 <table>
                   <thead>
                     <tr>
-                      <th style={{ width: 100 }}>Item Code</th>
-                      <th>Product Description</th>
+                      <th style={{ width: 110 }}>Line Type</th>
+                      <th>Known Product / Unconfirmed Group</th>
                       <th style={{ width: 125, textAlign: 'center' }}>Qty</th>
-                      <th style={{ width: 120, textAlign: 'right' }}>Item / Unit</th>
-                      <th style={{ width: 120, textAlign: 'right' }}>Shipping / Unit</th>
-                      <th style={{ width: 125, textAlign: 'right' }}>Landed / Unit</th>
-                      <th style={{ width: 135, textAlign: 'right' }}>Landed Total</th>
                       <th style={{ width: 35 }}></th>
                     </tr>
                   </thead>
@@ -856,18 +977,17 @@ export default function TransitShipmentList({ onNavigateTab }) {
                     {items.map((it, idx) => {
                       const prod = products.find(p => p.id === it.product_id) || {};
                       const itemQty = Number(it.qty ?? it.shipped_qty) || 1;
-                      const itemCost = Number(it.unit_cost ?? it.foreign_unit_cost) || 0;
-                      const shippingUnitCost = Number(it.allocated_landed_lkr_per_unit ?? it.shipping_unit_cost) || 0;
-                      const landedUnitCost = itemCost + shippingUnitCost;
-                      const lineTotal = itemQty * landedUnitCost;
+                      const group = transitGroups.find(candidate => candidate.id === it.transit_group_id);
+                      const isGroup = it.line_type === 'group';
 
                       return (
-                        <tr key={it.product_id || idx}>
-                          <td className="mono" style={{ color: 'var(--primary)', fontWeight: 700 }}>
-                            {it.item_code || prod.item_code || '-'}
+                        <tr key={it.product_id || it.transit_group_id || idx}>
+                          <td style={{ color: isGroup ? '#ffca58' : '#52e37e', fontWeight: 700 }}>
+                            {isGroup ? 'Unconfirmed Group' : 'Known Product'}
                           </td>
                           <td>
-                            <div style={{ fontWeight: 600 }}>{it.product_name || prod.name || 'Product'}</div>
+                            <div style={{ fontWeight: 600 }}>{isGroup ? (group?.name || it.product_name || 'Group') : (it.product_name || prod.name || 'Product')}</div>
+                            {!isGroup && <small className="mono" style={{ color: 'var(--primary)' }}>{it.item_code || prod.item_code || '-'}</small>}
                           </td>
                           <td style={{ textAlign: 'center' }}>
                             <div className="table-qty-stepper">
@@ -906,48 +1026,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
                               </button>
                             </div>
                           </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <input
-                              type="number"
-                              step="0.01"
-                              required
-                              className="mono table-number-input"
-                              value={it.unit_cost !== undefined && it.unit_cost !== null && it.unit_cost !== '' ? it.unit_cost : itemCost}
-                              onChange={(e) => {
-                                const raw = e.target.value;
-                                handleUpdateItem(idx, 'unit_cost', raw === '' ? '' : Number(raw));
-                              }}
-                              onBlur={() => {
-                                if (it.unit_cost === '' || isNaN(Number(it.unit_cost))) {
-                                  handleUpdateItem(idx, 'unit_cost', 0);
-                                }
-                              }}
-                              style={{ width: 110, textAlign: 'right' }}
-                            />
-                          </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              className="mono table-number-input"
-                              value={it.shipping_unit_cost ?? it.allocated_landed_lkr_per_unit ?? 0}
-                              onChange={(e) => {
-                                const raw = e.target.value;
-                                handleUpdateItem(idx, 'shipping_unit_cost', raw === '' ? '' : Math.max(0, Number(raw)));
-                              }}
-                              onBlur={() => {
-                                if (it.shipping_unit_cost === '' || isNaN(Number(it.shipping_unit_cost))) {
-                                  handleUpdateItem(idx, 'shipping_unit_cost', 0);
-                                }
-                              }}
-                              style={{ width: 100, textAlign: 'right' }}
-                            />
-                          </td>
-                          <td className="mono" style={{ textAlign: 'right', color: '#ffca58' }}>{formatCurrency(landedUnitCost)}</td>
-                          <td className="mono font-semibold" style={{ textAlign: 'right', color: 'var(--primary)' }}>
-                            {formatCurrency(lineTotal)}
-                          </td>
                           <td>
                             <button
                               type="button"
@@ -965,11 +1043,11 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
                     {items.length === 0 && (
                       <tr>
-                        <td colSpan="8" style={{ textAlign: 'center', padding: '40px 16px', color: 'var(--muted)' }}>
+                        <td colSpan="4" style={{ textAlign: 'center', padding: '40px 16px', color: 'var(--muted)' }}>
                           <div style={{ fontSize: 24, marginBottom: 6 }}>📦 ➔ 🚢</div>
-                          <div style={{ fontWeight: 600, color: '#e5e5e5' }}>No products added to this shipment order yet.</div>
+                          <div style={{ fontWeight: 600, color: '#e5e5e5' }}>No products or transit groups added yet.</div>
                           <small style={{ display: 'block', marginTop: 4 }}>
-                            Click any product from the folder tree on the left to add it here.
+                            Add a known product or an unconfirmed group from the left.
                           </small>
                         </td>
                       </tr>
@@ -1029,16 +1107,16 @@ export default function TransitShipmentList({ onNavigateTab }) {
           {/* Bottom Totals & Submit Bar */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, background: '#1c1c1c', padding: '14px 18px', border: '1px solid var(--line)', borderRadius: 4 }}>
             <div style={{ color: 'var(--muted)', fontSize: 13 }}>
-              Products: <strong style={{ color: '#fff' }}>{items.length}</strong> | Total Qty: <strong style={{ color: '#fff' }}>{totalQty} units</strong>
+              Lines: <strong style={{ color: '#fff' }}>{items.length}</strong> | Expected Qty: <strong style={{ color: '#fff' }}>{totalQty} units</strong>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                  Goods {formatCurrency(totalAmount)} + estimated shipping {formatCurrency(effectiveEstimatedShipping)}
+                  Complete supplier goods payment — unit costs assigned at arrival
                 </div>
-                <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>Estimated Landed Total: </span>
+                <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>Goods Paid Now: </span>
                 <span className="mono font-semibold" style={{ fontSize: 24, color: 'var(--primary)', marginLeft: 8 }}>
-                  {formatCurrency(totalAmount + effectiveEstimatedShipping)}
+                  {formatCurrency(goodsAmountPaid)}
                 </span>
               </div>
               <button
@@ -1069,7 +1147,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
               <div className="modal-header">
                 <div className="item-entry-heading" style={{ margin: 0 }}>
                   <div>
-                    <span style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--muted)', fontWeight: 700 }}>Add Order Item</span>
+                    <span style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--muted)', fontWeight: 700 }}>
+                      {selectedLineProduct.line_type === 'group' ? 'Add Unconfirmed Group' : 'Add Known Product'}
+                    </span>
                     <h3 style={{ margin: '2px 0 0', color: '#fff' }}>{selectedLineProduct.name}</h3>
                     <p style={{ margin: 0, color: 'var(--primary)', fontFamily: 'var(--mono)', fontSize: 12 }}>{selectedLineProduct.item_code}</p>
                   </div>
@@ -1081,35 +1161,12 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 <div className="modal-body">
                   <div className="item-entry-fields">
                     <div>
-                      <label>Unit Cost (LKR) *</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        required
-                        autoFocus
-                        className="mono font-semibold"
-                        value={lineDraft.unit_cost}
-                        onChange={(e) => setLineDraft({ ...lineDraft, unit_cost: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label>Shipping / Unit (LKR)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        className="mono font-semibold"
-                        value={lineDraft.shipping_unit_cost}
-                        onChange={(e) => setLineDraft({ ...lineDraft, shipping_unit_cost: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label>Quantity *</label>
+                      <label>Expected Quantity *</label>
                       <input
                         type="number"
                         min="1"
                         required
+                        autoFocus
                         className="mono font-semibold"
                         value={lineDraft.qty}
                         onChange={(e) => setLineDraft({ ...lineDraft, qty: e.target.value })}
@@ -1118,8 +1175,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   </div>
 
                   <div className="item-entry-total">
-                    <span style={{ color: 'var(--muted)', fontSize: 12, fontWeight: 700 }}>LINE TOTAL:</span>
-                    <strong>{formatCurrency((Number(lineDraft.qty) || 0) * ((Number(lineDraft.unit_cost) || 0) + (Number(lineDraft.shipping_unit_cost) || 0)))}</strong>
+                    <span style={{ color: 'var(--muted)', fontSize: 12, fontWeight: 700 }}>COST:</span>
+                    <strong style={{ fontSize: 13, color: 'var(--muted)' }}>Assigned when the shipment arrives</strong>
                   </div>
                 </div>
 
@@ -1130,6 +1187,54 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   <button type="submit" className="primary-button" style={{ fontWeight: 800 }}>
                     Add to Order Lines
                   </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {isGroupManagerOpen && (
+          <div className="modal-overlay" style={{ zIndex: 1150 }}>
+            <div className="modal-box" style={{ maxWidth: 680 }}>
+              <div className="modal-header">
+                <h3>{editingGroupId ? 'Edit Transit Group' : 'Create Transit Group'}</h3>
+                <button type="button" className="modal-close" onClick={() => setIsGroupManagerOpen(false)}>&times;</button>
+              </div>
+              <form onSubmit={handleSaveGroup}>
+                <div className="modal-body">
+                  <label>Group Name *</label>
+                  <input required value={groupDraft.name} onChange={(event) => setGroupDraft(current => ({ ...current, name: event.target.value }))} placeholder="e.g. 120/128GB SATA SSD" />
+                  <label style={{ marginTop: 10 }}>Description</label>
+                  <input value={groupDraft.description} onChange={(event) => setGroupDraft(current => ({ ...current, description: event.target.value }))} placeholder="Products that may arrive under this group" />
+                  <label style={{ marginTop: 12 }}>Products allowed in this group</label>
+                  <div style={{ maxHeight: 300, overflow: 'auto', border: '1px solid var(--line)', borderRadius: 4, padding: 8 }}>
+                    {products.map(product => (
+                      <label key={product.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 4px', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={groupDraft.product_ids.includes(product.id)}
+                          onChange={(event) => setGroupDraft(current => ({
+                            ...current,
+                            product_ids: event.target.checked
+                              ? [...current.product_ids.filter(id => id !== product.id), product.id]
+                              : current.product_ids.filter(id => id !== product.id)
+                          }))}
+                          style={{ width: 'auto' }}
+                        />
+                        <span><strong>{product.name}</strong> <small className="mono" style={{ color: 'var(--muted)' }}>{product.item_code}</small></span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  {editingGroupId && (
+                    <button type="button" className="danger-button" onClick={async () => {
+                      if (!window.confirm('Delete this transit group?')) return;
+                      try { await deleteTransitGroup(editingGroupId); setIsGroupManagerOpen(false); } catch (error) { notifyError(error.message); }
+                    }}>Delete Group</button>
+                  )}
+                  <button type="button" className="secondary-button" onClick={() => setIsGroupManagerOpen(false)}>Cancel</button>
+                  <button type="submit" className="primary-button">Save Group</button>
                 </div>
               </form>
             </div>
@@ -1396,7 +1501,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   <td>{formatDate(shp.departure_date || shp.created_at)}</td>
                   <td style={{ fontWeight: 700 }}>{sup?.name || 'Supplier'}</td>
                   <td>{shp.shipping_line_carrier || 'Local / Cargo'}</td>
-                  <td>{formatDate(shp.estimated_arrival_date)}</td>
+                  <td>{formatDate(shp.expected_arrival_date || shp.estimated_arrival_date)}</td>
                   <td style={{ textAlign: 'center' }}>
                     <span className="badge badge-neutral">{itemCount} items</span>
                   </td>
@@ -1543,9 +1648,9 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, marginBottom: 12 }}>
             {[
-              ['Goods Cost', getShipmentCosts(selectedTransit).goods, '#38bdf8'],
-              [checkIsArrived(selectedTransit) ? 'Confirmed Shipping' : 'Estimated Shipping', checkIsArrived(selectedTransit) ? getShipmentCosts(selectedTransit).actual : getShipmentCosts(selectedTransit).estimate, '#ffca58'],
-              [checkIsArrived(selectedTransit) ? 'Final Landed Total' : 'Estimated Landed Total', getShipmentCosts(selectedTransit).basis, '#52e37e']
+              ['Goods Paid', getShipmentCosts(selectedTransit).goods, '#38bdf8'],
+              [checkIsArrived(selectedTransit) ? 'Calculated Shipping' : 'Shipping at Arrival', checkIsArrived(selectedTransit) ? getShipmentCosts(selectedTransit).actual : 0, '#ffca58'],
+              [checkIsArrived(selectedTransit) ? 'Final Landed Total' : 'Payment Recorded', checkIsArrived(selectedTransit) ? getShipmentCosts(selectedTransit).basis : getShipmentCosts(selectedTransit).goods, '#52e37e']
             ].map(([label, amount, color]) => (
               <div key={label} style={{ padding: 10, background: '#1c1c1c', border: '1px solid var(--line)', borderRadius: 4 }}>
                 <small style={{ color: 'var(--muted)', display: 'block' }}>{label}</small>
@@ -1558,36 +1663,27 @@ export default function TransitShipmentList({ onNavigateTab }) {
             <thead>
               <tr>
                 <th style={{ width: 40 }}>#</th>
-                <th>Product Description</th>
+                <th>Expected Product / Group</th>
+                <th style={{ width: 140 }}>Type</th>
                 <th style={{ width: 100, textAlign: 'center' }}>Quantity</th>
-                <th style={{ width: 120, textAlign: 'right' }}>Item / Unit</th>
-                <th style={{ width: 120, textAlign: 'right' }}>Shipping / Unit</th>
-                <th style={{ width: 130, textAlign: 'right' }}>Landed / Unit</th>
-                <th style={{ width: 140, textAlign: 'right' }}>Landed Total</th>
               </tr>
             </thead>
             <tbody>
               {(selectedTransit.items || []).map((it, idx) => {
                 const prod = products.find(p => p.id === it.product_id);
-                const itemCost = Number(it.unit_cost || it.foreign_unit_cost) || 0;
-                const shippingCost = Number(it.allocated_landed_lkr_per_unit) || 0;
-                const cost = Number(it.final_landed_unit_cost_lkr) || itemCost + shippingCost;
+                const group = transitGroups.find(candidate => candidate.id === it.transit_group_id);
+                const isGroup = it.line_type === 'group' || Boolean(it.transit_group_id);
                 const qty = it.shipped_qty || it.qty || 0;
 
                 return (
                   <tr key={idx}>
                     <td style={{ color: 'var(--muted)' }}>{idx + 1}</td>
                     <td>
-                      <div style={{ fontWeight: 700 }}>{prod?.name || 'Product'}</div>
-                      <small className="mono" style={{ color: 'var(--primary)' }}>{prod?.item_code || '-'}</small>
+                      <div style={{ fontWeight: 700 }}>{isGroup ? (group?.name || 'Unconfirmed group') : (prod?.name || 'Product')}</div>
+                      {!isGroup && <small className="mono" style={{ color: 'var(--primary)' }}>{prod?.item_code || '-'}</small>}
                     </td>
+                    <td style={{ color: isGroup ? '#ffca58' : '#52e37e' }}>{isGroup ? 'Unconfirmed Group' : 'Known Product'}</td>
                     <td className="mono" style={{ textAlign: 'center', fontWeight: 600 }}>{qty}</td>
-                    <td className="mono" style={{ textAlign: 'right' }}>{formatCurrency(itemCost)}</td>
-                    <td className="mono" style={{ textAlign: 'right', color: '#ffca58' }}>{formatCurrency(shippingCost)}</td>
-                    <td className="mono" style={{ textAlign: 'right' }}>{formatCurrency(cost)}</td>
-                    <td className="mono font-semibold" style={{ textAlign: 'right', color: 'var(--primary)' }}>
-                      {formatCurrency(qty * cost)}
-                    </td>
                   </tr>
                 );
               })}
@@ -1608,7 +1704,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
             <form onSubmit={handleConfirmArrival} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
               <div className="modal-body" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
                 <div style={{ background: '#1c1c1c', padding: 12, borderRadius: 4, marginBottom: 12, border: '1px solid var(--line)' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 }}>
                     <div>
                       <small style={{ color: 'var(--muted)' }}>SHIPMENT #</small>
                       <div className="mono font-semibold" style={{ color: 'var(--primary)' }}>{shipmentToReceive.shipment_no}</div>
@@ -1626,21 +1722,21 @@ export default function TransitShipmentList({ onNavigateTab }) {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, marginBottom: 12 }}>
                   <div className="panel-card" style={{ padding: 10 }}>
-                    <small style={{ color: 'var(--muted)' }}>GOODS COST</small>
+                    <small style={{ color: 'var(--muted)' }}>GOODS PAID AT DISPATCH</small>
                     <div className="mono font-semibold">{formatCurrency(getShipmentCosts(shipmentToReceive).goods)}</div>
                   </div>
                   <div className="panel-card" style={{ padding: 10 }}>
-                    <small style={{ color: 'var(--muted)' }}>CONFIRMED SHIPPING</small>
+                    <small style={{ color: 'var(--muted)' }}>CALCULATED SHIPPING</small>
                     <div className="mono font-semibold" style={{ color: '#ffca58' }}>{formatCurrency(arrivalShippingTotal)}</div>
                   </div>
                   <div className="panel-card" style={{ padding: 10 }}>
                     <small style={{ color: 'var(--muted)' }}>FINAL LANDED TOTAL</small>
-                    <div className="mono font-semibold" style={{ color: '#52e37e' }}>{formatCurrency(getShipmentCosts(shipmentToReceive).goods + arrivalShippingTotal)}</div>
+                    <div className="mono font-semibold" style={{ color: '#52e37e' }}>{formatCurrency(arrivalFinalValue)}</div>
                   </div>
                 </div>
 
                 <div style={{ marginBottom: 12, padding: 9, borderRadius: 4, background: 'rgba(255, 202, 88, 0.09)', border: '1px solid rgba(255, 202, 88, 0.4)', color: '#ffe2a0', fontSize: 12 }}>
-                  Confirm or edit Shipping / Unit below. It becomes part of landed cost and WAC only when this arrival is saved; its payment enters Cash Flow on the arrival date.
+                  Classify every group into actual products and enter each final landed unit cost (including shipping). Shipping is calculated as final classified value minus the goods payment already recorded.
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 12 }}>
@@ -1667,30 +1763,47 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 {/* Inspection Table with constrained height and sticky header */}
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                    <label style={{ margin: 0, fontWeight: 700 }}>VERIFY QUANTITIES, ITEM COST & SHIPPING COST</label>
+                    <label style={{ margin: 0, fontWeight: 700 }}>CLASSIFY ARRIVED PRODUCTS, QUANTITIES & FINAL LANDED COST</label>
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>{receivingItems.length} line items</span>
                   </div>
                   <div style={{ maxHeight: '38vh', overflowY: 'auto', overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 4 }}>
                     <table style={{ margin: 0, width: '100%' }}>
                       <thead style={{ position: 'sticky', top: 0, zIndex: 5, background: '#2a2a2a' }}>
                         <tr>
-                          <th>Product</th>
-                          <th style={{ width: 85, textAlign: 'center' }}>Shipped</th>
-                          <th style={{ width: 110, textAlign: 'center' }}>Sellable Recv</th>
+                          <th>Transit Source</th>
+                          <th style={{ minWidth: 210 }}>Actual Product</th>
+                          <th style={{ width: 80, textAlign: 'center' }}>Expected</th>
+                          <th style={{ width: 95, textAlign: 'center' }}>Sellable</th>
                           <th style={{ width: 90, textAlign: 'center' }}>Damaged</th>
-                          <th style={{ width: 120, textAlign: 'right' }}>Item / Unit</th>
-                          <th style={{ width: 130, textAlign: 'right' }}>Shipping / Unit</th>
-                          <th style={{ width: 130, textAlign: 'right' }}>Landed / Unit</th>
+                          <th style={{ width: 90, textAlign: 'center' }}>Missing</th>
+                          <th style={{ width: 145, textAlign: 'right' }}>Final Landed / Unit</th>
                           <th style={{ width: 130, textAlign: 'right' }}>Total (LKR)</th>
+                          <th style={{ width: 70 }}></th>
                         </tr>
                       </thead>
                       <tbody>
-                        {receivingItems.map((item, idx) => {
+                        {receivingItems.map((item) => {
                           const prod = products.find(p => p.id === item.product_id);
+                          const allowedProducts = item.source_line_type === 'group'
+                            ? products.filter(product => product.transit_group_id === item.transit_group_id)
+                            : products.filter(product => product.id === item.source_product_id);
+                          const sourceRows = receivingItems.filter(row => row.transit_shipment_item_id === item.transit_shipment_item_id);
+                          const accounted = sourceRows.reduce((sum, row) => sum + (Number(row.received_sellable_qty) || 0) + (Number(row.damaged_qty) || 0) + (Number(row.missing_qty) || 0), 0);
                           return (
-                            <tr key={idx}>
-                              <td style={{ fontWeight: 700, whiteSpace: 'normal', minWidth: 180 }}>{prod?.name || item.product_id}</td>
-                              <td className="mono" style={{ textAlign: 'center' }}>{item.shipped_qty}</td>
+                            <tr key={item.row_id}>
+                              <td style={{ fontWeight: 700, whiteSpace: 'normal', minWidth: 160 }}>
+                                <div>{item.source_label}</div>
+                                <small style={{ color: Math.abs(accounted - item.expected_qty) < 0.001 ? '#52e37e' : '#ffca58' }}>{accounted}/{item.expected_qty} accounted</small>
+                              </td>
+                              <td>
+                                {item.source_line_type === 'group' ? (
+                                  <select value={item.product_id} onChange={(event) => updateArrivalRow(item.row_id, { product_id: event.target.value })} required={(Number(item.received_sellable_qty) || 0) + (Number(item.damaged_qty) || 0) > 0}>
+                                    <option value="">Select actual product</option>
+                                    {allowedProducts.map(product => <option key={product.id} value={product.id}>{product.name} ({product.item_code})</option>)}
+                                  </select>
+                                ) : <div><strong>{prod?.name || item.source_label}</strong><small className="mono" style={{ display: 'block', color: 'var(--primary)' }}>{prod?.item_code}</small></div>}
+                              </td>
+                              <td className="mono" style={{ textAlign: 'center' }}>{item.expected_qty}</td>
                               <td>
                                 <input
                                   type="number"
@@ -1698,7 +1811,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                                   required
                                   className="mono table-number-input"
                                   value={item.received_sellable_qty}
-                                  onChange={(e) => setReceivingItems(prev => prev.map((x, i) => i === idx ? { ...x, received_sellable_qty: Number(e.target.value) || 0 } : x))}
+                                  onChange={(event) => updateArrivalRow(item.row_id, { received_sellable_qty: Number(event.target.value) || 0 })}
                                   style={{ width: 85, fontWeight: 700, textAlign: 'center' }}
                                 />
                               </td>
@@ -1708,33 +1821,33 @@ export default function TransitShipmentList({ onNavigateTab }) {
                                   min="0"
                                   className="mono table-number-input"
                                   value={item.damaged_qty}
-                                  onChange={(e) => setReceivingItems(prev => prev.map((x, i) => i === idx ? { ...x, damaged_qty: Number(e.target.value) || 0 } : x))}
+                                  onChange={(event) => updateArrivalRow(item.row_id, { damaged_qty: Number(event.target.value) || 0 })}
                                   style={{ width: 75, color: '#ff8e8e', textAlign: 'center' }}
                                 />
                               </td>
-                              <td className="mono" style={{ textAlign: 'right' }}>{formatCurrency(item.goods_unit_cost_lkr)}</td>
-                              <td style={{ textAlign: 'right' }}>
+                              <td>
                                 <input
                                   type="number"
                                   min="0"
-                                  step="0.01"
                                   className="mono table-number-input"
-                                  value={item.shipping_unit_cost_lkr}
-                                  disabled={arrivalShippingAlreadyRecorded}
-                                  onChange={(e) => setReceivingItems(prev => prev.map((x, i) => i === idx ? {
-                                    ...x,
-                                    shipping_unit_cost_lkr: Number(e.target.value) || 0,
-                                    allocated_landed_lkr_per_unit: Number(e.target.value) || 0,
-                                    unit_cost_lkr: (Number(x.goods_unit_cost_lkr) || 0) + (Number(e.target.value) || 0),
-                                    final_landed_unit_cost_lkr: (Number(x.goods_unit_cost_lkr) || 0) + (Number(e.target.value) || 0)
-                                  } : x))}
-                                  style={{ width: 125, textAlign: 'right' }}
-                                  title={arrivalShippingAlreadyRecorded ? 'This shipping cost was already recorded in Cash Flow' : 'Confirmed shipping, clearing and delivery cost per unit'}
+                                  value={item.missing_qty}
+                                  onChange={(event) => updateArrivalRow(item.row_id, { missing_qty: Number(event.target.value) || 0 })}
+                                  style={{ width: 75, color: '#ffca58', textAlign: 'center' }}
                                 />
                               </td>
-                              <td className="mono font-semibold" style={{ textAlign: 'right', color: '#ffca58' }}>{formatCurrency(item.final_landed_unit_cost_lkr)}</td>
+                              <td style={{ textAlign: 'right' }}>
+                                <input type="number" min="0" step="0.01" className="mono table-number-input" value={item.final_landed_unit_cost_lkr} onChange={(event) => updateArrivalRow(item.row_id, { final_landed_unit_cost_lkr: Number(event.target.value) || 0 })} style={{ width: 130, textAlign: 'right' }} disabled={arrivalShippingAlreadyRecorded} />
+                              </td>
                               <td className="mono font-semibold" style={{ textAlign: 'right', color: '#52e37e' }}>
-                                {formatCurrency((item.received_sellable_qty || 0) * (item.unit_cost_lkr || 0))}
+                                {formatCurrency(((Number(item.received_sellable_qty) || 0) + (Number(item.damaged_qty) || 0)) * (Number(item.final_landed_unit_cost_lkr) || 0))}
+                              </td>
+                              <td>
+                                {item.source_line_type === 'group' && (
+                                  <div style={{ display: 'flex', gap: 4 }}>
+                                    <button type="button" className="secondary-button small-button" onClick={() => addArrivalSplit(item)} title="Split into another product">+</button>
+                                    {sourceRows.length > 1 && <button type="button" className="secondary-button small-button" onClick={() => removeArrivalRow(item.row_id)} title="Remove split">×</button>}
+                                  </div>
+                                )}
                               </td>
                             </tr>
                           );

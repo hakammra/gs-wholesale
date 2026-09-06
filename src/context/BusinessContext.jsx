@@ -118,6 +118,7 @@ export function BusinessProvider({ children }) {
   const [currencies, setCurrencies] = useState(() => safeGet('gs_wholesale_currencies', INITIAL_CURRENCIES));
   const [categories, setCategories] = useState(() => safeGet('gs_wholesale_categories', INITIAL_CATEGORIES));
   const [brands, setBrands] = useState(() => safeGet('gs_wholesale_brands', INITIAL_BRANDS));
+  const [transitGroups, setTransitGroups] = useState(() => safeGet('gs_wholesale_transit_groups', []));
   const [products, setProducts] = useState(() => safeGet('gs_wholesale_products', []));
   const [stockBalances, setStockBalances] = useState(() => safeGet('gs_wholesale_stock', {}));
   const [customers, setCustomers] = useState(() => safeGet('gs_wholesale_customers', []));
@@ -137,6 +138,7 @@ export function BusinessProvider({ children }) {
   useEffect(() => { localStorage.setItem('gs_wholesale_currencies', JSON.stringify(currencies)); }, [currencies]);
   useEffect(() => { localStorage.setItem('gs_wholesale_categories', JSON.stringify(categories)); }, [categories]);
   useEffect(() => { localStorage.setItem('gs_wholesale_brands', JSON.stringify(brands)); }, [brands]);
+  useEffect(() => { localStorage.setItem('gs_wholesale_transit_groups', JSON.stringify(transitGroups)); }, [transitGroups]);
   useEffect(() => { localStorage.setItem('gs_wholesale_products', JSON.stringify(products)); }, [products]);
   useEffect(() => { localStorage.setItem('gs_wholesale_stock', JSON.stringify(stockBalances)); }, [stockBalances]);
   useEffect(() => { localStorage.setItem('gs_wholesale_customers', JSON.stringify(customers)); }, [customers]);
@@ -171,9 +173,10 @@ export function BusinessProvider({ children }) {
         const queryEntries = await Promise.all([
           supabase.from('categories').select('*').order('sort_order', { ascending: true }),
           supabase.from('brands').select('*').order('name', { ascending: true }),
+          supabase.from('transit_product_groups').select('*').order('name', { ascending: true }),
           supabase.from('products').select('*').order('created_at', { ascending: false }),
           supabase.from('stock_balances').select('*'),
-          supabase.from('sales_documents').select('*, items:sales_document_items(*, product:products(name, item_code)), customer:customers(business_name, billing_address, phone, whatsapp)').order('created_at', { ascending: false }),
+          supabase.from('sales_documents').select('*, items:sales_document_items(*, product:products(name, item_code), transit_group:transit_product_groups(name)), customer:customers(business_name, billing_address, phone, whatsapp)').order('created_at', { ascending: false }),
           supabase.from('customers').select('*').order('business_name', { ascending: true }),
           supabase.from('suppliers').select('*').order('name', { ascending: true }),
           supabase.from('bank_accounts').select('*').order('created_at', { ascending: true }),
@@ -190,7 +193,7 @@ export function BusinessProvider({ children }) {
         ]);
 
         const labels = [
-          'categories', 'brands', 'products', 'stock balances', 'sales documents',
+          'categories', 'brands', 'transit product groups', 'products', 'stock balances', 'sales documents',
           'customers', 'suppliers', 'bank accounts', 'purchase receipts',
           'transit shipments', 'cheques', 'payments', 'currencies',
           'company settings', 'company logo', 'supplier orders',
@@ -201,7 +204,7 @@ export function BusinessProvider({ children }) {
           .filter(Boolean);
 
         const [
-          catRes, brandRes, prodRes, stockRes, docRes, custRes, suppRes,
+          catRes, brandRes, transitGroupRes, prodRes, stockRes, docRes, custRes, suppRes,
           bankRes, grnRes, trnRes, chqRes, payRes, currRes, compRes,
           logoRes, orderRes, advanceRes, movementRes
         ] = queryEntries;
@@ -212,6 +215,7 @@ export function BusinessProvider({ children }) {
 
         if (!catRes.error) setCategories(catRes.data || []);
         if (!brandRes.error) setBrands(brandRes.data || []);
+        if (!transitGroupRes.error) setTransitGroups(transitGroupRes.data || []);
 
         if (prodData) {
           const remoteReceiptItems = (grnData || []).flatMap(receipt => receipt.items || []);
@@ -280,9 +284,15 @@ export function BusinessProvider({ children }) {
                 discount_amount: Number(item.line_discount) || 0,
                 is_warranty_replacement: String(item.notes || '').toLowerCase().includes('warranty replacement'),
                 warranty_note: String(item.notes || '').toLowerCase().includes('warranty replacement') ? item.notes : '',
-                product_name: item.product?.name || 'Product Item',
-                item_code: item.product?.item_code || '',
-                product: item.product || null
+                product_name: item.product?.name || item.transit_group?.name || 'Product Item',
+                item_code: item.product?.item_code || (item.transit_group_id ? 'GROUP' : ''),
+                product: item.product || (item.transit_group_id ? {
+                  id: `transit-group:${item.transit_group_id}`,
+                  transit_group_id: item.transit_group_id,
+                  is_transit_group: true,
+                  name: item.transit_group?.name || 'Unconfirmed group',
+                  item_code: 'GROUP'
+                } : null)
               }))
             };
           }));
@@ -333,6 +343,7 @@ export function BusinessProvider({ children }) {
             .filter(shipment => !shipment.shipment_no?.startsWith('DIR-TRN-') && !shipment.notes?.includes('Direct purchase companion'))
             .map(shipment => ({
               ...shipment,
+              goods_amount_paid_lkr: Number(shipment.goods_amount_paid_lkr) || ((Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1)),
               estimated_landed_expenses_lkr: Math.max(0,
                 (Number(shipment.total_estimated_cost_lkr) || 0) -
                 ((Number(shipment.foreign_items_subtotal) || 0) * (Number(shipment.exchange_rate_snapshot) || 1))
@@ -341,8 +352,14 @@ export function BusinessProvider({ children }) {
                 ? 'draft'
                 : (shipment.status === 'received' || receivedTransitIds.has(shipment.id) ? 'arrived' : shipment.status),
               supplier_name: shipment.supplier?.name || 'Supplier',
+              departure_date: shipment.shipping_date,
+              estimated_arrival_date: shipment.expected_arrival_date,
+              shipping_line_carrier: shipment.courier_freight_company || '',
+              bill_of_lading_no: shipment.tracking_or_bl_no || shipment.supplier_invoice_ref || '',
               items: (shipment.items || []).map(item => ({
                 ...item,
+                line_type: item.line_type || (item.transit_group_id ? 'group' : 'known_product'),
+                transit_group_name: (transitGroupRes.data || []).find(group => group.id === item.transit_group_id)?.name || '',
                 qty: Number(item.shipped_qty) || 0,
                 unit_cost: Number(item.foreign_unit_cost) || 0
               }))
@@ -886,11 +903,63 @@ export function BusinessProvider({ children }) {
     notifySuccess('Brand removed');
   };
 
+  const saveTransitGroup = async (groupData) => {
+    const groupId = isValidUUID(groupData.id) ? groupData.id : generateUUID();
+    const name = String(groupData.name || '').trim();
+    if (!name) throw new Error('Transit group name is required.');
+    const productIds = Array.from(new Set((groupData.product_ids || []).filter(isValidUUID)));
+    if (!productIds.length) throw new Error('Select at least one actual product for this transit group.');
+    const payload = {
+      id: groupId,
+      name,
+      description: String(groupData.description || '').trim() || null,
+      is_active: groupData.is_active !== false,
+      updated_at: new Date().toISOString()
+    };
+    await runCloudWrite(groupData.id ? 'Updating transit group' : 'Creating transit group', () => (
+      supabase.from('transit_product_groups').upsert(payload)
+    ));
+
+    const membershipWrites = products.map(product => {
+      const shouldBelong = productIds.includes(product.id);
+      const currentlyBelongs = product.transit_group_id === groupId;
+      if (shouldBelong === currentlyBelongs) return null;
+      if (!shouldBelong && !currentlyBelongs) return null;
+      return supabase.from('products').update({
+        transit_group_id: shouldBelong ? groupId : null,
+        updated_at: new Date().toISOString()
+      }).eq('id', product.id);
+    }).filter(Boolean);
+    if (membershipWrites.length) await runCloudBatch('Updating transit group products', membershipWrites);
+
+    setTransitGroups(prev => [{ ...payload, created_at: prev.find(group => group.id === groupId)?.created_at || new Date().toISOString() }, ...prev.filter(group => group.id !== groupId)]);
+    setProducts(prev => prev.map(product => {
+      if (productIds.includes(product.id)) return { ...product, transit_group_id: groupId };
+      if (product.transit_group_id === groupId) return { ...product, transit_group_id: null };
+      return product;
+    }));
+    notifySuccess(`Transit group "${name}" saved`);
+    return { ...payload, product_ids: productIds };
+  };
+
+  const deleteTransitGroup = async (groupId) => {
+    const activeUse = transitShipments.some(shipment =>
+      shipment.status !== 'arrived' && shipment.status !== 'received' &&
+      (shipment.items || []).some(item => item.transit_group_id === groupId)
+    );
+    if (activeUse) throw new Error('This group is used by an active transit document and cannot be deleted.');
+    await runCloudWrite('Deleting transit group', () => supabase.from('transit_product_groups').delete().eq('id', groupId));
+    setTransitGroups(prev => prev.filter(group => group.id !== groupId));
+    setProducts(prev => prev.map(product => product.transit_group_id === groupId ? { ...product, transit_group_id: null } : product));
+    notifySuccess('Transit group deleted');
+  };
+
   // Product CRUD (Zero initial stock; stock increases via Purchases only)
   const saveProduct = async (productData) => {
     const targetId = productData.id || generateUUID();
     const sanitizedCategoryId = isValidUUID(productData.category_id) ? productData.category_id : null;
     const sanitizedBrandId = isValidUUID(productData.brand_id) ? productData.brand_id : null;
+    const sanitizedTransitGroupId = isValidUUID(productData.transit_group_id) ? productData.transit_group_id : null;
 
     if (productData.id) {
       setProducts(prev => prev.map(p => p.id === productData.id ? {
@@ -898,6 +967,7 @@ export function BusinessProvider({ children }) {
         ...productData,
         category_id: sanitizedCategoryId,
         brand_id: sanitizedBrandId,
+        transit_group_id: sanitizedTransitGroupId,
         updated_at: new Date().toISOString()
       } : p));
 
@@ -908,6 +978,7 @@ export function BusinessProvider({ children }) {
         model: productData.model || null,
         category_id: sanitizedCategoryId,
         brand_id: sanitizedBrandId,
+        transit_group_id: sanitizedTransitGroupId,
         wholesale_price: Number(productData.wholesale_price) || 0,
         dealer_price: Number(productData.dealer_price) || 0,
         weighted_cost_lkr: Number(productData.weighted_cost_lkr) || 0,
@@ -916,13 +987,14 @@ export function BusinessProvider({ children }) {
         updated_at: new Date().toISOString()
       }).eq('id', productData.id));
       notifySuccess('Product updated successfully');
-      return { ...productData, id: productData.id, category_id: sanitizedCategoryId, brand_id: sanitizedBrandId };
+      return { ...productData, id: productData.id, category_id: sanitizedCategoryId, brand_id: sanitizedBrandId, transit_group_id: sanitizedTransitGroupId };
     } else {
       const newProd = {
         ...productData,
         id: targetId,
         category_id: sanitizedCategoryId,
         brand_id: sanitizedBrandId,
+        transit_group_id: sanitizedTransitGroupId,
         item_code: productData.item_code || `PRD-${Date.now().toString().slice(-4)}`,
         weighted_cost_lkr: Number(productData.weighted_cost_lkr) || 0,
         last_landed_cost_lkr: Number(productData.last_landed_cost_lkr) || 0,
@@ -950,6 +1022,7 @@ export function BusinessProvider({ children }) {
         model: newProd.model || null,
         category_id: newProd.category_id,
         brand_id: newProd.brand_id,
+        transit_group_id: newProd.transit_group_id,
         wholesale_price: newProd.wholesale_price,
         dealer_price: newProd.dealer_price,
         weighted_cost_lkr: newProd.weighted_cost_lkr,
@@ -1690,13 +1763,58 @@ export function BusinessProvider({ children }) {
     return newAdv;
   };
 
+  const assertTransitReservationsRemainCovered = (excludedShipmentId, replacementItems = [], replacementActive = false) => {
+    const remainingActiveShipments = transitShipments.filter(shipment =>
+      shipment.id !== excludedShipmentId && shipment.status === 'in_transit'
+    );
+    const allItems = [
+      ...remainingActiveShipments.flatMap(shipment => shipment.items || []),
+      ...(replacementActive ? replacementItems : [])
+    ];
+    const activeReservationItems = salesDocuments
+      .filter(document =>
+        (document.doc_type === 'reserved_order' || document.doc_type === 'sales_order') &&
+        (document.status === 'reserved' || document.status === 'confirmed')
+      )
+      .flatMap(document => document.items || []);
+
+    const groupIds = new Set(activeReservationItems.map(item => item.transit_group_id).filter(isValidUUID));
+    for (const groupId of groupIds) {
+      const incoming = allItems
+        .filter(item => item.transit_group_id === groupId)
+        .reduce((sum, item) => sum + (Number(item.shipped_qty || item.qty) || 0), 0);
+      const reserved = activeReservationItems
+        .filter(item => item.transit_group_id === groupId)
+        .reduce((sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0), 0);
+      if (incoming + 0.001 < reserved) {
+        const groupName = transitGroups.find(group => group.id === groupId)?.name || 'transit group';
+        throw new Error(`Cannot reduce ${groupName}: ${reserved} units are already reserved but only ${incoming} would remain in transit.`);
+      }
+    }
+
+    const productIds = new Set(Object.entries(stockBalances)
+      .filter(([, balance]) => (Number(balance.qty_in_transit_reserved) || 0) > 0)
+      .map(([productId]) => productId));
+    for (const productId of productIds) {
+      const incoming = allItems
+        .filter(item => item.product_id === productId)
+        .reduce((sum, item) => sum + (Number(item.shipped_qty || item.qty) || 0), 0);
+      const reserved = Number(stockBalances[productId]?.qty_in_transit_reserved) || 0;
+      if (incoming + 0.001 < reserved) {
+        const productName = products.find(product => product.id === productId)?.name || 'product';
+        throw new Error(`Cannot reduce ${productName}: ${reserved} units are already reserved from incoming stock but only ${incoming} would remain in transit.`);
+      }
+    }
+  };
+
   // Create Stock in Transit Shipment
   const createTransitShipment = async (shipmentData) => {
     const shpNo = `TRN-SHP-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(100 + Math.random() * 900)}`;
-    const foreignSubtotal = (shipmentData.items || []).reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
     const rate = Number(shipmentData.exchange_rate_snapshot) || 305.5;
-    const lkrFob = foreignSubtotal * rate;
-    const estimatedLandedExpenses = Math.max(0, Number(shipmentData.estimated_landed_expenses_lkr) || 0);
+    const legacyLineSubtotal = (shipmentData.items || []).reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
+    const lkrFob = Math.max(0, Number(shipmentData.goods_amount_paid_lkr) || (legacyLineSubtotal * rate));
+    const foreignSubtotal = rate > 0 ? lkrFob / rate : lkrFob;
+    const estimatedLandedExpenses = 0;
     const isDraft = shipmentData.status === 'draft';
     const trnId = shipmentData.id || generateUUID();
 
@@ -1706,6 +1824,7 @@ export function BusinessProvider({ children }) {
       shipment_no: shpNo,
       status: isDraft ? 'draft' : (shipmentData.status || 'in_transit'),
       foreign_items_subtotal: foreignSubtotal,
+      goods_amount_paid_lkr: lkrFob,
       total_landed_expenses_lkr: 0,
       total_estimated_cost_lkr: lkrFob + estimatedLandedExpenses,
       landed_expenses: [],
@@ -1714,10 +1833,13 @@ export function BusinessProvider({ children }) {
         id: isValidUUID(it.id) ? it.id : generateUUID(),
         shipped_qty: Number(it.shipped_qty || it.qty) || 1,
         qty: Number(it.shipped_qty || it.qty) || 1,
-        foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0,
-        unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0,
-        allocated_landed_lkr_per_unit: Number(it.allocated_landed_lkr_per_unit) || 0,
-        final_landed_unit_cost_lkr: ((Number(it.foreign_unit_cost || it.unit_cost) || 0) * rate) + (Number(it.allocated_landed_lkr_per_unit) || 0)
+        line_type: it.line_type === 'group' ? 'group' : 'known_product',
+        product_id: it.line_type === 'group' ? null : it.product_id,
+        transit_group_id: it.line_type === 'group' ? it.transit_group_id : null,
+        foreign_unit_cost: 0,
+        unit_cost: 0,
+        allocated_landed_lkr_per_unit: 0,
+        final_landed_unit_cost_lkr: 0
       })),
       created_at: new Date().toISOString()
     };
@@ -1740,6 +1862,7 @@ export function BusinessProvider({ children }) {
       currency: shipmentData.currency || 'USD',
       exchange_rate_snapshot: rate,
       foreign_items_subtotal: foreignSubtotal,
+      goods_amount_paid_lkr: lkrFob,
       total_landed_expenses_lkr: 0,
       total_estimated_cost_lkr: lkrFob + estimatedLandedExpenses,
       payment_type: shipmentData.payment_type || 'cash',
@@ -1750,20 +1873,24 @@ export function BusinessProvider({ children }) {
     const transitItems = newShp.items.map(item => ({
       id: item.id,
       transit_shipment_id: trnId,
-      product_id: item.product_id || item.id,
+      product_id: item.line_type === 'group' ? null : item.product_id,
+      transit_group_id: item.line_type === 'group' ? item.transit_group_id : null,
+      line_type: item.line_type === 'group' ? 'group' : 'known_product',
       shipped_qty: Number(item.shipped_qty || item.qty) || 1,
       foreign_unit_cost: Number(item.foreign_unit_cost || item.unit_cost) || 0,
       allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
       final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr) || 0,
       weight_kg: Number(item.weight_kg) || 0,
       volume_cbm: Number(item.volume_cbm) || 0
-    })).filter(item => isValidUUID(item.product_id));
+    })).filter(item => (
+      item.line_type === 'group' ? isValidUUID(item.transit_group_id) : isValidUUID(item.product_id)
+    ));
     if (transitItems.length) {
       await runCloudWrite('Saving transit shipment items', () => supabase.from('transit_shipment_items').insert(transitItems));
     }
 
     if (!isDraft) {
-      const stockWrites = transitItems.map(item => {
+      const stockWrites = transitItems.filter(item => isValidUUID(item.product_id)).map(item => {
         return supabase.rpc('rpc_adjust_stock_balance', {
           p_product_id: item.product_id,
           p_qty_on_hand_delta: 0,
@@ -1847,7 +1974,7 @@ export function BusinessProvider({ children }) {
     if (!isDraft) {
       setStockBalances(prev => {
         const updated = { ...prev };
-        transitItems.forEach(item => {
+        transitItems.filter(item => isValidUUID(item.product_id)).forEach(item => {
           const current = updated[item.product_id] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
           updated[item.product_id] = { ...current, qty_in_transit: (Number(current.qty_in_transit) || 0) + item.shipped_qty };
         });
@@ -1869,40 +1996,34 @@ export function BusinessProvider({ children }) {
     const oldItems = existingShp.items || [];
     const newItems = updatedData.items || oldItems;
     const rate = Number(updatedData.exchange_rate_snapshot || existingShp.exchange_rate_snapshot) || 1.0;
-    const foreignSubtotal = newItems.reduce((sum, it) => sum + ((Number(it.shipped_qty || it.qty) || 0) * (Number(it.foreign_unit_cost || it.unit_cost) || 0)), 0);
-    const lkrFob = foreignSubtotal * rate;
-    const estimatedLandedExpenses = Math.max(0, Number(
-      updatedData.estimated_landed_expenses_lkr ?? existingShp.estimated_landed_expenses_lkr ??
-      ((Number(existingShp.total_estimated_cost_lkr) || 0) - ((Number(existingShp.foreign_items_subtotal) || 0) * (Number(existingShp.exchange_rate_snapshot) || 1)))
-    ) || 0);
+    const oldGoodsAmount = Number(existingShp.goods_amount_paid_lkr) || ((Number(existingShp.foreign_items_subtotal) || 0) * (Number(existingShp.exchange_rate_snapshot) || 1));
+    const lkrFob = Math.max(0, Number(updatedData.goods_amount_paid_lkr ?? oldGoodsAmount) || 0);
+    const foreignSubtotal = rate > 0 ? lkrFob / rate : lkrFob;
+    const estimatedLandedExpenses = 0;
     const totalCostLkr = lkrFob + estimatedLandedExpenses;
-    const actualLandedExpenses = Math.max(0, Number(existingShp.total_landed_expenses_lkr) || 0);
-    const hasExplicitItemShipping = newItems.some(it => (
-      it.allocated_landed_lkr_per_unit !== undefined && it.allocated_landed_lkr_per_unit !== null
-    ));
-
     const formattedItems = newItems.map(it => {
       const shippedQty = Number(it.shipped_qty || it.qty) || 1;
-      const unitCost = Number(it.foreign_unit_cost || it.unit_cost) || 0;
-      const valueRatio = foreignSubtotal > 0 ? (shippedQty * unitCost) / foreignSubtotal : 0;
-      const allocatedPerUnit = hasExplicitItemShipping
-        ? Math.max(0, Number(it.allocated_landed_lkr_per_unit) || 0)
-        : (actualLandedExpenses > 0 ? (actualLandedExpenses * valueRatio) / shippedQty : 0);
+      const lineType = it.line_type === 'group' || (!it.product_id && it.transit_group_id) ? 'group' : 'known_product';
       return {
         ...it,
         id: isValidUUID(it.id) ? it.id : generateUUID(),
         shipped_qty: shippedQty,
         qty: shippedQty,
-        foreign_unit_cost: unitCost,
-        unit_cost: unitCost,
-        allocated_landed_lkr_per_unit: allocatedPerUnit,
-        final_landed_unit_cost_lkr: (unitCost * rate) + allocatedPerUnit
+        line_type: lineType,
+        product_id: lineType === 'group' ? null : it.product_id,
+        transit_group_id: lineType === 'group' ? it.transit_group_id : null,
+        foreign_unit_cost: 0,
+        unit_cost: 0,
+        allocated_landed_lkr_per_unit: 0,
+        final_landed_unit_cost_lkr: 0
       };
     });
 
     const wasDraft = existingShp.status === 'draft';
     const newStatus = updatedData.status || existingShp.status;
     const isNowDraft = newStatus === 'draft';
+
+    assertTransitReservationsRemainCovered(shipmentId, formattedItems, newStatus === 'in_transit');
 
     const updatedShipment = {
       ...existingShp,
@@ -1911,6 +2032,7 @@ export function BusinessProvider({ children }) {
       shipment_no: existingShp.shipment_no,
       status: newStatus,
       foreign_items_subtotal: foreignSubtotal,
+      goods_amount_paid_lkr: lkrFob,
       estimated_landed_expenses_lkr: estimatedLandedExpenses,
       total_estimated_cost_lkr: totalCostLkr,
       items: formattedItems,
@@ -1924,7 +2046,7 @@ export function BusinessProvider({ children }) {
       const allProductIds = Array.from(new Set([
         ...oldItems.map(it => it.product_id),
         ...formattedItems.map(it => it.product_id)
-      ]));
+      ].filter(isValidUUID)));
 
       setStockBalances(prev => {
         const updated = { ...prev };
@@ -1947,7 +2069,7 @@ export function BusinessProvider({ children }) {
       // Promoting from draft to in_transit
       setStockBalances(prev => {
         const updated = { ...prev };
-        formattedItems.forEach(it => {
+        formattedItems.filter(it => isValidUUID(it.product_id)).forEach(it => {
           const pId = it.product_id;
           const qty = Number(it.shipped_qty || it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -1963,7 +2085,7 @@ export function BusinessProvider({ children }) {
       // Demoting from in_transit to draft
       setStockBalances(prev => {
         const updated = { ...prev };
-        oldItems.forEach(it => {
+        oldItems.filter(it => isValidUUID(it.product_id)).forEach(it => {
           const pId = it.product_id;
           const qty = Number(it.shipped_qty || it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -1986,6 +2108,7 @@ export function BusinessProvider({ children }) {
       currency: updatedData.currency || existingShp.currency,
       exchange_rate_snapshot: rate,
       foreign_items_subtotal: foreignSubtotal,
+      goods_amount_paid_lkr: lkrFob,
       total_estimated_cost_lkr: totalCostLkr,
       payment_type: updatedShipment.payment_type || existingShp.payment_type || 'cash',
       notes: updatedData.notes || existingShp.notes,
@@ -1996,19 +2119,23 @@ export function BusinessProvider({ children }) {
     const cloudItems = formattedItems.map(item => ({
       id: item.id,
       transit_shipment_id: shipmentId,
-      product_id: item.product_id,
+      product_id: item.line_type === 'group' ? null : item.product_id,
+      transit_group_id: item.line_type === 'group' ? item.transit_group_id : null,
+      line_type: item.line_type === 'group' ? 'group' : 'known_product',
       shipped_qty: Number(item.shipped_qty) || 0,
       foreign_unit_cost: Number(item.foreign_unit_cost) || 0,
       allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
       final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr) || 0,
       weight_kg: Number(item.weight_kg) || 0,
       volume_cbm: Number(item.volume_cbm) || 0
-    })).filter(item => isValidUUID(item.product_id) && item.shipped_qty > 0);
+    })).filter(item => item.shipped_qty > 0 && (
+      item.line_type === 'group' ? isValidUUID(item.transit_group_id) : isValidUUID(item.product_id)
+    ));
     if (cloudItems.length) {
       await runCloudWrite('Saving updated transit items', () => supabase.from('transit_shipment_items').insert(cloudItems));
     }
 
-    const affectedProductIds = Array.from(new Set([...oldItems, ...formattedItems].map(item => item.product_id).filter(Boolean)));
+    const affectedProductIds = Array.from(new Set([...oldItems, ...formattedItems].map(item => item.product_id).filter(isValidUUID)));
     const oldWasActive = existingShp.status === 'in_transit';
     const newIsActive = newStatus === 'in_transit';
     const stockWrites = affectedProductIds.map(productId => {
@@ -2115,7 +2242,7 @@ export function BusinessProvider({ children }) {
     const oldSupplierId = existingShp.supplier_id;
     const nextSupplierId = updatedShipment.supplier_id;
     const oldPayable = oldWasActive && (existingShp.payment_type || 'credit') === 'credit'
-      ? (Number(existingShp.foreign_items_subtotal) || 0) * (Number(existingShp.exchange_rate_snapshot) || 1)
+      ? oldGoodsAmount
       : 0;
     const nextPayable = newIsActive && (updatedShipment.payment_type || 'credit') === 'credit'
       ? lkrFob
@@ -2291,11 +2418,13 @@ export function BusinessProvider({ children }) {
     const shp = transitShipments.find(s => s.id === shipmentId);
     if (!shp) return;
 
+    assertTransitReservationsRemainCovered(shipmentId, [], false);
+
     const linkedPayments = payments.filter(payment => payment.transit_shipment_id === shipmentId || payment.reference === shp.shipment_no);
     for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing transit payment');
 
     if (shp.status === 'in_transit' && shp.payment_type === 'credit' && shp.supplier_id) {
-      const goodsPayable = (Number(shp.foreign_items_subtotal) || 0) * (Number(shp.exchange_rate_snapshot) || 1);
+      const goodsPayable = Number(shp.goods_amount_paid_lkr) || ((Number(shp.foreign_items_subtotal) || 0) * (Number(shp.exchange_rate_snapshot) || 1));
       await adjustSupplierBalance('Reversing transit supplier payable', shp.supplier_id, -goodsPayable, 0);
     }
 
@@ -2317,7 +2446,7 @@ export function BusinessProvider({ children }) {
     if (shp.status === 'in_transit') {
       setStockBalances(prev => {
         const updated = { ...prev };
-        (shp.items || []).forEach(it => {
+        (shp.items || []).filter(it => isValidUUID(it.product_id)).forEach(it => {
           const pId = it.product_id;
           const qty = Number(it.shipped_qty || it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -2375,18 +2504,18 @@ export function BusinessProvider({ children }) {
         missing_qty: Number(it.missing_qty) || 0,
         unit_cost_lkr: unitCost,
         final_landed_unit_cost_lkr: unitCost,
-        line_total_lkr: receivedQty * unitCost
+        line_total_lkr: (receivedQty + (Number(it.damaged_qty) || 0)) * unitCost
       };
     });
 
     const totalLandedLkr = items.reduce((sum, it) => {
-      const qty = Number(it.received_sellable_qty) || 0;
+      const qty = (Number(it.received_sellable_qty) || 0) + (Number(it.damaged_qty) || 0);
       const cost = Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr) || 0;
       return sum + (qty * cost);
     }, 0);
     const receiptExchangeRate = Number(shp?.exchange_rate_snapshot || receiptData.exchange_rate_snapshot) || 1;
     const goodsItemsLkr = items.reduce((sum, item) => (
-      sum + ((Number(item.received_sellable_qty) || 0) * (Number(item.foreign_unit_cost) || 0) * receiptExchangeRate)
+      sum + (((Number(item.received_sellable_qty) || 0) + (Number(item.damaged_qty) || 0)) * (Number(item.foreign_unit_cost) || 0) * receiptExchangeRate)
     ), 0);
     const allocatedLandedLkr = Math.max(0, totalLandedLkr - goodsItemsLkr);
 
@@ -2440,11 +2569,13 @@ export function BusinessProvider({ children }) {
       const receivedStockTotals = new Map();
       items.forEach(item => {
         const productId = item.product_id;
-        const current = receivedStockTotals.get(productId) || { sellable: 0, shipped: 0, damaged: 0 };
+        const current = receivedStockTotals.get(productId) || { sellable: 0, shipped: 0, damaged: 0, fromGroup: true };
         const sellable = Number(item.received_sellable_qty) || 0;
         current.sellable += sellable;
-        current.shipped += isDirect ? 0 : (Number(item.shipped_qty) || sellable);
+        const fromGroup = item.source_line_type === 'group';
+        current.shipped += isDirect || fromGroup ? 0 : (Number(item.shipped_qty) || sellable);
         current.damaged += Number(item.damaged_qty) || 0;
+        current.fromGroup = current.fromGroup && fromGroup;
         receivedStockTotals.set(productId, current);
       });
 
@@ -2601,7 +2732,7 @@ export function BusinessProvider({ children }) {
             }
 
             const transitItemUpdates = items
-              .filter(item => isValidUUID(item.transit_shipment_item_id))
+              .filter(item => item.source_line_type !== 'group' && isValidUUID(item.transit_shipment_item_id))
               .map(item => supabase.from('transit_shipment_items').update({
                 allocated_landed_lkr_per_unit: Number(item.allocated_landed_lkr_per_unit) || 0,
                 final_landed_unit_cost_lkr: Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr) || 0
@@ -2614,7 +2745,15 @@ export function BusinessProvider({ children }) {
               if (isValidUUID(it.product_id)) {
                 const sellable = Number(it.received_sellable_qty) || 0;
                 const shipped = isDirect ? 0 : (Number(it.shipped_qty) || sellable);
-                if (isDirect) {
+                if (it.source_line_type === 'group') {
+                  await runCloudWrite('Receiving classified group inventory and allocating reservations', () => supabase.rpc('rpc_receive_group_product_and_allocate_reservations', {
+                    p_transit_group_id: it.transit_group_id,
+                    p_product_id: it.product_id,
+                    p_sellable_qty: sellable,
+                    p_damaged_qty: Number(it.damaged_qty) || 0,
+                    p_unit_cost_lkr: Number(it.final_landed_unit_cost_lkr || it.unit_cost_lkr) || 0
+                  }));
+                } else if (isDirect) {
                   await runCloudWrite('Updating received inventory', () => supabase.rpc('rpc_adjust_stock_balance', {
                     p_product_id: it.product_id,
                     p_qty_on_hand_delta: sellable,
@@ -2808,6 +2947,10 @@ export function BusinessProvider({ children }) {
       }
 
       setPayments(prev => [{ ...payment, supplier_name: supplierName, created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== payment.source_key)]);
+    }
+
+    if (!isDraft && items.some(item => item.source_line_type === 'group')) {
+      await fetchSupabaseData();
     }
 
     return newPurchaseDoc;
@@ -3194,6 +3337,7 @@ export function BusinessProvider({ children }) {
       currencies,
       categories,
       brands,
+      transitGroups,
       products,
       stockBalances,
       customers,
@@ -3231,6 +3375,7 @@ export function BusinessProvider({ children }) {
       if (backupPayload.currencies) setCurrencies(backupPayload.currencies);
       if (backupPayload.categories) setCategories(backupPayload.categories);
       if (backupPayload.brands) setBrands(backupPayload.brands);
+      if (backupPayload.transitGroups) setTransitGroups(backupPayload.transitGroups);
       if (backupPayload.products) setProducts(backupPayload.products);
       if (backupPayload.stockBalances) setStockBalances(backupPayload.stockBalances);
       if (backupPayload.customers) setCustomers(backupPayload.customers);
@@ -3251,6 +3396,7 @@ export function BusinessProvider({ children }) {
         gs_wholesale_currencies: backupPayload.currencies,
         gs_wholesale_categories: backupPayload.categories,
         gs_wholesale_brands: backupPayload.brands,
+        gs_wholesale_transit_groups: backupPayload.transitGroups,
         gs_wholesale_products: backupPayload.products,
         gs_wholesale_stock: backupPayload.stockBalances,
         gs_wholesale_customers: backupPayload.customers,
@@ -3321,7 +3467,15 @@ export function BusinessProvider({ children }) {
         });
       }
 
-      // 3. Sync Products & Stock Balances
+      // 3. Sync transit groups, Products & Stock Balances
+      for (const group of transitGroups) {
+        await supabase.from('transit_product_groups').upsert({
+          id: group.id,
+          name: group.name,
+          description: group.description || null,
+          is_active: group.is_active !== false
+        });
+      }
       const productIdMap = {};
       for (const p of products) {
         const pId = isValidUUID(p.id) ? p.id : generateUUID();
@@ -3338,6 +3492,7 @@ export function BusinessProvider({ children }) {
           retail_price: Number(p.retail_price) || 0,
           dealer_price: Number(p.dealer_price) || 0,
           weighted_cost_lkr: Number(p.weighted_cost_lkr || p.cost_price || p.cost) || 0,
+          transit_group_id: isValidUUID(p.transit_group_id) ? p.transit_group_id : null,
           is_active: true
         });
 
@@ -3403,6 +3558,7 @@ export function BusinessProvider({ children }) {
           currency: shp.currency || 'USD',
           exchange_rate_snapshot: Number(shp.exchange_rate_snapshot) || 300,
           foreign_items_subtotal: Number(shp.foreign_items_subtotal) || 0,
+          goods_amount_paid_lkr: Number(shp.goods_amount_paid_lkr) || ((Number(shp.foreign_items_subtotal) || 0) * (Number(shp.exchange_rate_snapshot) || 1)),
           total_landed_expenses_lkr: Number(shp.total_landed_expenses_lkr) || 0,
           total_estimated_cost_lkr: Number(shp.total_estimated_cost_lkr) || 0,
           status: dbStatus,
@@ -3411,13 +3567,20 @@ export function BusinessProvider({ children }) {
 
         if (shp.items && shp.items.length > 0) {
           const itemsToUpsert = shp.items.map(it => {
+            const lineType = it.line_type === 'group' || it.transit_group_id ? 'group' : 'known_product';
             const rawPId = it.product_id || it.id;
-            const prodId = productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId);
-            if (!isValidUUID(prodId)) return null;
+            const prodId = lineType === 'known_product'
+              ? (productIdMap[rawPId] || (isValidUUID(rawPId) ? rawPId : defaultProductId))
+              : null;
+            const groupId = lineType === 'group' && isValidUUID(it.transit_group_id) ? it.transit_group_id : null;
+            if (lineType === 'known_product' && !isValidUUID(prodId)) return null;
+            if (lineType === 'group' && !groupId) return null;
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
               transit_shipment_id: sId,
-              product_id: prodId,
+              product_id: lineType === 'known_product' ? prodId : null,
+              transit_group_id: groupId,
+              line_type: lineType,
               shipped_qty: Number(it.shipped_qty || it.qty) || 1,
               foreign_unit_cost: Number(it.foreign_unit_cost || it.unit_cost) || 0
             };
@@ -3516,11 +3679,15 @@ export function BusinessProvider({ children }) {
         if (doc.items && doc.items.length > 0) {
           const docItems = doc.items.map(it => {
             const pId = it.product?.id || it.product_id;
-            if (!isValidUUID(pId)) return null;
+            const groupId = it.product?.transit_group_id || it.transit_group_id;
+            const isGroupReservation = Boolean(it.product?.is_transit_group || (!isValidUUID(pId) && isValidUUID(groupId)));
+            if (!isGroupReservation && !isValidUUID(pId)) return null;
+            if (isGroupReservation && !isValidUUID(groupId)) return null;
             return {
               id: isValidUUID(it.id) ? it.id : generateUUID(),
               sales_document_id: dId,
-              product_id: pId,
+              product_id: isGroupReservation ? null : pId,
+              transit_group_id: isGroupReservation ? groupId : null,
               qty: Number(it.qty) || 1,
               unit_price: Number(it.unit_price) || 0,
               line_total: Number(it.line_total) || (Number(it.qty || 1) * Number(it.unit_price || 0)),
@@ -3562,6 +3729,7 @@ export function BusinessProvider({ children }) {
   // Clean Reset: Wipe All Added Data
   const resetAllData = async () => {
     setProducts([]);
+    setTransitGroups([]);
     setStockBalances({});
     setStockMovements([]);
     setTransitShipments([]);
@@ -3577,6 +3745,7 @@ export function BusinessProvider({ children }) {
 
     const keysToRemove = [
       'gs_wholesale_products',
+      'gs_wholesale_transit_groups',
       'gs_wholesale_stock',
       'gs_wholesale_stock_movements',
       'gs_wholesale_transit',
@@ -3603,6 +3772,7 @@ export function BusinessProvider({ children }) {
         await supabase.from('purchase_receipts').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('stock_balances').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('products').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('transit_product_groups').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('customers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('suppliers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('payments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
@@ -3694,11 +3864,25 @@ export function BusinessProvider({ children }) {
       const pools = new Map();
       const allocatedItems = (docData.items || []).map(item => {
         const productId = item.product?.id || item.product_id || item.id;
+        const transitGroupId = item.product?.transit_group_id || item.transit_group_id;
+        const isTransitGroup = Boolean(item.product?.is_transit_group || transitGroupId);
         if (!pools.has(productId)) {
           const stock = stockBalances[productId] || {};
+          const groupIncoming = isTransitGroup ? transitShipments
+            .filter(shipment => shipment.status === 'in_transit')
+            .flatMap(shipment => shipment.items || [])
+            .filter(transitItem => transitItem.transit_group_id === transitGroupId)
+            .reduce((sum, transitItem) => sum + (Number(transitItem.shipped_qty || transitItem.qty) || 0), 0) : 0;
+          const groupReserved = isTransitGroup ? salesDocuments
+            .filter(document => (document.doc_type === 'reserved_order' || document.doc_type === 'sales_order') && (document.status === 'reserved' || document.status === 'confirmed'))
+            .flatMap(document => document.items || [])
+            .filter(reservedItem => reservedItem.transit_group_id === transitGroupId)
+            .reduce((sum, reservedItem) => sum + (Number(reservedItem.reserved_in_transit_qty) || 0), 0) : 0;
           pools.set(productId, {
-            onHand: Math.max(0, Number(stock.qty_available) || 0),
-            incoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
+            onHand: isTransitGroup ? 0 : Math.max(0, Number(stock.qty_available) || 0),
+            incoming: isTransitGroup
+              ? Math.max(0, groupIncoming - groupReserved)
+              : Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
           });
         }
         const pool = pools.get(productId);
@@ -3707,12 +3891,14 @@ export function BusinessProvider({ children }) {
         const onHandQty = qty - incomingQty;
         if (onHandQty > pool.onHand || incomingQty > pool.incoming) {
           const product = products.find(entry => entry.id === productId);
-          throw new Error(`Not enough unreserved current and incoming stock for ${product?.name || 'this item'}.`);
+          const group = transitGroups.find(entry => entry.id === transitGroupId);
+          throw new Error(`Not enough unreserved current and incoming stock for ${group?.name || product?.name || 'this item'}.`);
         }
         pool.onHand -= onHandQty;
         pool.incoming -= incomingQty;
         return {
           ...item,
+          transit_group_id: isTransitGroup ? transitGroupId : null,
           reserved_on_hand_qty: onHandQty,
           reserved_in_transit_qty: incomingQty
         };
@@ -3830,6 +4016,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (docData.items || []).forEach(it => {
+          if (it.product?.is_transit_group || it.transit_group_id) return;
           const pId = it.product?.id || it.product_id;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
           const onHandQty = Number(it.reserved_on_hand_qty) || 0;
@@ -3960,6 +4147,8 @@ export function BusinessProvider({ children }) {
 
     const itemsToInsert = (docData.items || []).map(item => {
       const productId = item.product?.id || item.product_id;
+      const transitGroupId = item.product?.transit_group_id || item.transit_group_id || null;
+      const isTransitGroup = Boolean(item.product?.is_transit_group || transitGroupId);
       const unitPrice = item.is_warranty_replacement ? 0 : (Number(item.unit_price) || 0);
       const qty = Number(item.qty) || 1;
       const lineDiscount = item.is_warranty_replacement ? 0 : (Number(item.discount_amount) || 0);
@@ -3969,7 +4158,8 @@ export function BusinessProvider({ children }) {
       return {
         id: generateUUID(),
         sales_document_id: docId,
-        product_id: productId,
+        product_id: isTransitGroup ? null : productId,
+        transit_group_id: isTransitGroup ? transitGroupId : null,
         qty,
         unit_type: item.unit_type || 'unit',
         conversion_factor: 1,
@@ -3986,7 +4176,7 @@ export function BusinessProvider({ children }) {
         reserved_in_transit_qty: isReservation ? Number(item.reserved_in_transit_qty) || 0 : 0,
         notes: item.warranty_note || item.notes || (item.is_warranty_replacement ? 'Warranty Replacement (Rs. 0)' : null)
       };
-    }).filter(item => isValidUUID(item.product_id));
+    }).filter(item => isValidUUID(item.product_id) || isValidUUID(item.transit_group_id));
     if (itemsToInsert.length) {
       await runCloudWrite('Saving sales document items', () => supabase.from('sales_document_items').insert(itemsToInsert));
     }
@@ -3994,6 +4184,7 @@ export function BusinessProvider({ children }) {
     if (docData.doc_type === 'sales_invoice' || isReservation) {
       const stockWrites = (docData.items || []).map(item => {
         const productId = item.product?.id || item.product_id;
+        if (item.product?.is_transit_group || item.transit_group_id) return null;
         if (!isValidUUID(productId)) return null;
         const qty = Number(item.qty) || 1;
         if (isReservation) {
@@ -4130,6 +4321,9 @@ export function BusinessProvider({ children }) {
     if (!isValidUUID(existingDoc.id)) throw new Error('This sales document has an invalid cloud identifier.');
     if (['cancelled', 'converted_to_sale', 'returned'].includes(existingDoc.status)) {
       throw new Error('Cancelled, returned, or converted documents cannot be edited.');
+    }
+    if ((existingDoc.items || []).some(item => item.transit_group_id)) {
+      throw new Error('An unconfirmed-group reservation cannot be edited until arrival classifies it into actual products. Cancel and recreate it if the customer changes the reservation.');
     }
 
     const isReservation = existingDoc.doc_type === 'reserved_order' || existingDoc.doc_type === 'sales_order';
@@ -4509,6 +4703,7 @@ export function BusinessProvider({ children }) {
     }).eq('id', docId));
 
     const stockWrites = (doc.items || []).map(item => {
+      if (item.product?.is_transit_group || item.transit_group_id) return null;
       const productId = item.product?.id || item.product_id;
       const qty = Number(item.qty) || 0;
       const onHandReserved = item.reserved_on_hand_qty == null ? qty : Number(item.reserved_on_hand_qty) || 0;
@@ -4518,7 +4713,7 @@ export function BusinessProvider({ children }) {
         p_on_hand_reserved_delta: -onHandReserved,
         p_in_transit_reserved_delta: -incomingReserved
       });
-    });
+    }).filter(Boolean);
     if (stockWrites.length) await runCloudBatch('Releasing reserved stock', stockWrites);
 
     for (const payment of linkedPayments) {
@@ -4542,6 +4737,7 @@ export function BusinessProvider({ children }) {
     setStockBalances(prev => {
       const updated = { ...prev };
       (doc.items || []).forEach(it => {
+        if (it.product?.is_transit_group || it.transit_group_id) return;
         const pId = it.product?.id || it.product_id;
         const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
         const qty = Number(it.qty) || 1;
@@ -4636,6 +4832,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (doc.items || []).forEach(it => {
+          if (it.product?.is_transit_group || it.transit_group_id) return;
           const pId = it.product_id;
           const qty = Number(it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -4651,6 +4848,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (doc.items || []).forEach(it => {
+          if (it.product?.is_transit_group || it.transit_group_id) return;
           const pId = it.product_id;
           const qty = Number(it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -4818,6 +5016,7 @@ export function BusinessProvider({ children }) {
       currencies, setCurrencies,
       categories, setCategories, saveCategory, deleteCategory, deleteAllCategories, getCategoryPath,
       brands, setBrands, saveBrand, deleteBrand,
+      transitGroups, setTransitGroups, saveTransitGroup, deleteTransitGroup,
       products, setProducts, saveProduct, deleteProduct, importProductsFromExcel,
       stockBalances, setStockBalances, markProductAsDamaged,
       stockMovements, setStockMovements,

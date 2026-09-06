@@ -3,9 +3,10 @@ import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency, calculateWholesaleItemPrice } from '../../lib/formatters';
 
 export default function ProductSearchGrid({ onAddToCart, customer }) {
-  const { products = [], categories = [], stockBalances = {}, getCategoryPath } = useBusiness();
+  const { products = [], categories = [], transitGroups = [], transitShipments = [], salesDocuments = [], stockBalances = {}, getCategoryPath } = useBusiness();
   const [searchTerm, setSearchTerm] = useState('');
   const [currentFolderId, setCurrentFolderId] = useState(null); // null = root
+  const [stockView, setStockView] = useState('on_hand');
   const inputRef = useRef(null);
 
   // Focus shortcut '/'
@@ -72,6 +73,12 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
   // Products filter
   const visibleProducts = useMemo(() => {
     return products.filter(p => {
+      const stock = stockBalances[p.id] || {};
+      const onHandAvailable = Math.max(0, Number(stock.qty_available) || 0);
+      const incomingAvailable = Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0));
+      if (stockView === 'on_hand' && onHandAvailable <= 0) return false;
+      if (stockView === 'incoming' && incomingAvailable <= 0) return false;
+
       // If folder selected and not searching globally, filter by folder subtree
       if (currentFolderId && !searchTerm) {
         const subtreeIds = getAllDescendantCatIds(currentFolderId);
@@ -87,7 +94,35 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
         p.model?.toLowerCase().includes(term)
       );
     });
-  }, [products, currentFolderId, searchTerm, categories]);
+  }, [products, currentFolderId, searchTerm, categories, stockBalances, stockView]);
+
+  const visibleIncomingGroups = useMemo(() => stockView === 'incoming' ? transitGroups.map(group => {
+    const incoming = transitShipments
+      .filter(shipment => shipment.status === 'in_transit')
+      .flatMap(shipment => shipment.items || [])
+      .filter(item => item.transit_group_id === group.id)
+      .reduce((sum, item) => sum + (Number(item.shipped_qty || item.qty) || 0), 0);
+    const reserved = salesDocuments
+      .filter(document => (document.doc_type === 'reserved_order' || document.doc_type === 'sales_order') && (document.status === 'reserved' || document.status === 'confirmed'))
+      .flatMap(document => document.items || [])
+      .filter(item => item.transit_group_id === group.id)
+      .reduce((sum, item) => sum + (Number(item.reserved_in_transit_qty) || 0), 0);
+    return {
+      ...group,
+      id: `transit-group:${group.id}`,
+      transit_group_id: group.id,
+      is_transit_group: true,
+      item_code: 'GROUP',
+      wholesale_price: 0,
+      dealer_price: 0,
+      weighted_cost_lkr: 0,
+      qty_in_transit: incoming,
+      qty_in_transit_reserved: reserved,
+      incoming_available: Math.max(0, incoming - reserved)
+    };
+  }).filter(group => group.incoming_available > 0 && (
+    !searchTerm || group.name.toLowerCase().includes(searchTerm.toLowerCase())
+  )) : [], [transitGroups, transitShipments, salesDocuments, searchTerm, stockView]);
 
   return (
     <div className="product-search-panel" style={{ padding: 10 }}>
@@ -103,6 +138,25 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           style={{ padding: '8px 10px', fontSize: 13 }}
         />
         <span style={{ fontSize: 20 }}>⌕</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8, borderBottom: '1px solid var(--line)', paddingBottom: 6 }}>
+        <button
+          type="button"
+          className={`secondary-button ${stockView === 'on_hand' ? 'active' : ''}`}
+          onClick={() => setStockView('on_hand')}
+          style={{ flex: 1, fontWeight: 800, borderColor: stockView === 'on_hand' ? '#52e37e' : undefined, color: stockView === 'on_hand' ? '#52e37e' : undefined }}
+        >
+          In Stock
+        </button>
+        <button
+          type="button"
+          className={`secondary-button ${stockView === 'incoming' ? 'active' : ''}`}
+          onClick={() => setStockView('incoming')}
+          style={{ flex: 1, fontWeight: 800, borderColor: stockView === 'incoming' ? '#ffca58' : undefined, color: stockView === 'incoming' ? '#ffca58' : undefined }}
+        >
+          In Transit · Reserve Only
+        </button>
       </div>
 
       {/* Category Folders Filter Pills (Fully displayed without scrollbar) */}
@@ -196,6 +250,21 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
 
       {/* Product Results Grid (Shop-POS Product Tiles Style) */}
       <div className="pos-product-tiles">
+        {visibleIncomingGroups.map(group => (
+          <div key={group.id} className="product-tile in-transit-tile" onClick={() => onAddToCart(group, 1, false)}>
+            <div>
+              <div className="pos-product-name" title={group.name}>Any {group.name}</div>
+              <div className="pos-product-code" style={{ color: '#ffca58' }}>UNCONFIRMED TRANSIT GROUP</div>
+            </div>
+            <div>
+              <div className="pos-product-price" style={{ color: 'var(--muted)' }}>Set reservation price</div>
+              <div className="pos-product-footer">
+                <span className="pos-product-stock" style={{ color: '#ffca58' }}>● {group.incoming_available} Transit Available</span>
+                <button type="button" onClick={(event) => { event.stopPropagation(); onAddToCart(group, 1, false); }} className="secondary-button small-button" style={{ padding: '2px 6px', fontSize: 11, fontWeight: 700 }}>+</button>
+              </div>
+            </div>
+          </div>
+        ))}
         {visibleProducts.map(p => {
           const stock = stockBalances[p.id] || { qty_available: 0, qty_in_transit: 0 };
           const price = calculateWholesaleItemPrice(p, 1, customer);
@@ -208,7 +277,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
             <div
               key={p.id}
               className={`product-tile ${!hasAvailable ? (hasTransit ? 'in-transit-tile' : 'out-of-stock') : ''}`}
-              onClick={() => onAddToCart(p, 1, false)}
+              onClick={() => onAddToCart(stockView === 'incoming' ? { ...p, pos_transit_only: true } : p, 1, false)}
             >
               <div>
                 <div className="pos-product-name" title={p.name}>
@@ -235,22 +304,22 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
                     className="pos-product-stock"
                     style={{ color: hasAvailable ? '#52e37e' : (hasTransit ? '#ffca58' : '#ef4444') }}
                   >
-                    {hasAvailable
-                      ? `● ${stock.qty_available} Avail${hasTransit ? ` (+${incomingAvailable} transit)` : ''}`
-                      : (hasTransit ? `● ${incomingAvailable} Transit Available` : '● Out of Stock')}
+                    {stockView === 'incoming'
+                      ? `● ${incomingAvailable} Transit Available`
+                      : `● ${stock.qty_available} Available${hasTransit ? ` (+${incomingAvailable} transit)` : ''}`}
                   </span>
 
                   <div style={{ display: 'flex', gap: 4 }}>
                     <button
                       type="button"
-                      onClick={(e) => { e.stopPropagation(); onAddToCart(p, 1, false); }}
+                      onClick={(e) => { e.stopPropagation(); onAddToCart(stockView === 'incoming' ? { ...p, pos_transit_only: true } : p, 1, false); }}
                       className="secondary-button small-button"
                       style={{ padding: '2px 6px', fontSize: 11, fontWeight: 700 }}
                       title="Add to Bill"
                     >
                       +
                     </button>
-                    <button
+                    {stockView === 'on_hand' && <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); onAddToCart(p, 1, true); }}
                       className="secondary-button small-button"
@@ -258,7 +327,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
                       title="Add as 0-Price Warranty Replacement"
                     >
                       🛡️
-                    </button>
+                    </button>}
                   </div>
                 </div>
               </div>
@@ -266,7 +335,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           );
         })}
 
-        {visibleProducts.length === 0 && (
+        {visibleProducts.length === 0 && visibleIncomingGroups.length === 0 && (
           <div style={{
             gridColumn: '1 / -1',
             textAlign: 'center',
@@ -279,7 +348,9 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           }}>
             {searchTerm
               ? `No products found matching "${searchTerm}"`
-              : (currentCategory ? `No products inside "${currentCategory.name}" folder.` : 'No products found. Add products to start selling.')}
+              : (currentCategory
+                ? `No ${stockView === 'incoming' ? 'in-transit' : 'in-stock'} products inside "${currentCategory.name}" folder.`
+                : `No ${stockView === 'incoming' ? 'unreserved in-transit' : 'available in-stock'} products found.`)}
           </div>
         )}
       </div>

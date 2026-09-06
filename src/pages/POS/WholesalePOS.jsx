@@ -305,9 +305,12 @@ export default function WholesalePOS() {
       const productId = item.product?.id || item.product_id || item.id;
       if (!pools.has(productId)) {
         const stock = stockBalances[productId] || {};
+        const isTransitGroup = Boolean(item.product?.is_transit_group || item.transit_group_id);
         pools.set(productId, {
-          onHand: Math.max(0, Number(stock.qty_available) || 0),
-          incoming: Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
+          onHand: isTransitGroup ? 0 : Math.max(0, Number(stock.qty_available) || 0),
+          incoming: isTransitGroup
+            ? Math.max(0, Number(item.product?.incoming_available ?? item.product?.qty_in_transit) || 0)
+            : Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0))
         });
       }
       const pool = pools.get(productId);
@@ -323,6 +326,7 @@ export default function WholesalePOS() {
       pool.incoming = Math.max(0, pool.incoming - reservedInTransit);
       return {
         ...item,
+        transit_group_id: item.product?.transit_group_id || item.transit_group_id || null,
         reserved_on_hand_qty: reservedOnHand,
         reserved_in_transit_qty: reservedInTransit
       };
@@ -476,6 +480,10 @@ export default function WholesalePOS() {
       notifyWarning('Cannot checkout an empty bill');
       return;
     }
+    if (!currentTab.source_reserved_doc_id && currentTab.items.some(item => item.product?.pos_transit_only || item.product?.is_transit_group)) {
+      notifyWarning('Items selected from the In Transit tab cannot be invoiced yet. Use Reserve Stock, then convert the reservation after arrival.');
+      return;
+    }
 
     // Check minimum profit margin protection (5.0%)
     const lowMarginItems = [];
@@ -507,6 +515,9 @@ export default function WholesalePOS() {
 
   const handleCompleteSale = async (paymentData) => {
     try {
+      if (!currentTab.source_reserved_doc_id && currentTab.items.some(item => item.product?.pos_transit_only || item.product?.is_transit_group)) {
+        throw new Error('In-transit items must be reserved and received before invoicing.');
+      }
       const docPayload = {
         doc_type: 'sales_invoice',
         source_reserved_doc_id: currentTab.source_reserved_doc_id || null,

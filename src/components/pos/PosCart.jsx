@@ -55,7 +55,10 @@ export default function PosCart({
       p?.qty_in_transit !== undefined ? p.qty_in_transit :
       0
     );
-    const inTransit = Math.max(0, inTransitTotal - (Number(sb.qty_in_transit_reserved) || 0));
+    const inTransitReserved = sb.qty_in_transit_reserved !== undefined
+      ? Number(sb.qty_in_transit_reserved) || 0
+      : Number(p?.qty_in_transit_reserved) || 0;
+    const inTransit = Math.max(0, inTransitTotal - inTransitReserved);
 
     return { onHand, inTransit, total: onHand + inTransit };
   };
