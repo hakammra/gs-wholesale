@@ -1225,9 +1225,7 @@ export function BusinessProvider({ children }) {
     const paymentDate = settlementData.payment_date || new Date().toISOString().slice(0, 10);
     const paymentId = generateUUID();
     const paymentNo = `SETTLE-${Date.now().toString().slice(-6)}`;
-    const effectiveBankId = isValidUUID(settlementData.bank_account_id)
-      ? settlementData.bank_account_id
-      : (settlementData.payment_method === 'bank' && isValidUUID(bankAccounts[0]?.id) ? bankAccounts[0].id : null);
+    const effectiveBankId = null;
     const paymentReference = settlementData.reference || (settlementData.cheque_no ? `Cheque #${settlementData.cheque_no}` : 'Customer Credit Settlement');
 
     const customerDocuments = salesDocuments
@@ -1318,11 +1316,6 @@ export function BusinessProvider({ children }) {
       await runCloudWrite('Linking settlement cheque', () => supabase.from('payments').update({ cheque_id: newCheque.id }).eq('id', paymentId));
     }
 
-    const bankAccount = bankAccounts.find(item => item.id === effectiveBankId);
-    if (bankAccount) {
-      await adjustBankBalance('Updating bank balance', bankAccount.id, amount);
-    }
-
     const newPayment = {
       id: paymentId,
       payment_no: paymentNo,
@@ -1382,15 +1375,11 @@ export function BusinessProvider({ children }) {
 
     const amt = Number(amount) || 0;
     if (amt <= 0) throw new Error('Expense amount must be greater than 0');
-    if (payment_method === 'bank' && !isValidUUID(bank_account_id)) {
-      throw new Error('Select the bank account used for this expense.');
-    }
     if (payment_method === 'cheque' && (!cheque_no || !cheque_date || !cheque_bank)) {
       throw new Error('Cheque number, cheque date and bank are required.');
     }
 
-    const effectiveBankId = payment_method === 'bank' ? bank_account_id : null;
-    const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
+    const validBankId = null;
     const expNo = `EXP-${Date.now().toString().slice(-6)}`;
     const paymentId = generateUUID();
     const chequeId = payment_method === 'cheque' ? generateUUID() : null;
@@ -1459,13 +1448,6 @@ export function BusinessProvider({ children }) {
       setCheques(prev => [{ ...expenseCheque, party_name: payeeName }, ...prev.filter(cheque => cheque.id !== chequeId)]);
     }
 
-    if (validBankId && amt > 0) {
-      const account = bankAccounts.find(item => item.id === validBankId);
-      if (account) {
-        await adjustBankBalance('Updating bank balance', validBankId, -amt);
-      }
-    }
-
     setPayments(prev => [newPayment, ...prev]);
 
     notifySuccess(`Expense of Rs. ${amt.toLocaleString()} recorded`);
@@ -1487,12 +1469,7 @@ export function BusinessProvider({ children }) {
 
     const amt = Number(amount) || 0;
     if (amt <= 0) throw new Error('Inflow amount must be greater than 0');
-    if (payment_method === 'bank' && !isValidUUID(bank_account_id)) {
-      throw new Error('Select the bank account receiving this inflow.');
-    }
-
-    const effectiveBankId = payment_method === 'bank' ? bank_account_id : null;
-    const validBankId = isValidUUID(effectiveBankId) ? effectiveBankId : null;
+    const validBankId = null;
     const incNo = `CAP-${Date.now().toString().slice(-6)}`;
     const paymentId = generateUUID();
     const categoryName = income_category || "Owner's Capital Investment (Initial)";
@@ -1537,13 +1514,6 @@ export function BusinessProvider({ children }) {
       reference: combinedReference,
       notes: combinedNotes
     }));
-
-    if (validBankId && amt > 0) {
-      const account = bankAccounts.find(item => item.id === validBankId);
-      if (account) {
-        await adjustBankBalance('Updating bank balance', validBankId, amt);
-      }
-    }
 
     setPayments(prev => [newPayment, ...prev]);
 
@@ -1681,9 +1651,6 @@ export function BusinessProvider({ children }) {
     const chequeId = advanceData.payment_method === 'cheque' ? generateUUID() : null;
     const paymentNo = `PAY-ADV-${Date.now().toString().slice(-6)}`;
     const supplier = suppliers.find(item => item.id === advanceData.supplier_id);
-    const bankAccount = advanceData.payment_method === 'bank'
-      ? bankAccounts.find(item => item.id === advanceData.bank_account_id)
-      : null;
 
     await runCloudWrite('Recording supplier advance', () => supabase.from('supplier_advances').insert({
       id: newAdv.id,
@@ -1696,7 +1663,7 @@ export function BusinessProvider({ children }) {
       exchange_rate: Number(advanceData.exchange_rate) || 1,
       lkr_amount: lkrAmount,
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: bankAccount && isValidUUID(bankAccount.id) ? bankAccount.id : null,
+      bank_account_id: null,
       bank_ref: advanceData.reference || null,
       allocated_lkr_amount: 0,
       unallocated_lkr_amount: lkrAmount,
@@ -1712,7 +1679,7 @@ export function BusinessProvider({ children }) {
       party_id: advanceData.supplier_id,
       amount: lkrAmount,
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: bankAccount && isValidUUID(bankAccount.id) ? bankAccount.id : null,
+      bank_account_id: null,
       cheque_id: null,
       supplier_advance_id: newAdv.id,
       source_key: `supplier-advance:${newAdv.id}:payment`,
@@ -1746,10 +1713,6 @@ export function BusinessProvider({ children }) {
       await adjustSupplierBalance('Updating supplier advance balance', supplier.id, 0, lkrAmount);
     }
 
-    if (bankAccount) {
-      await adjustBankBalance('Updating bank balance', bankAccount.id, -lkrAmount);
-    }
-
     setSupplierAdvances(prev => [newAdv, ...prev]);
 
     setPayments(prev => [{
@@ -1762,7 +1725,7 @@ export function BusinessProvider({ children }) {
       amount: lkrAmount,
       currency: 'LKR',
       payment_method: advanceData.payment_method || 'bank',
-      bank_account_id: bankAccount?.id || null,
+      bank_account_id: null,
       cheque_id: advanceCheque?.id || null,
       supplier_advance_id: newAdv.id,
       source_key: `supplier-advance:${newAdv.id}:payment`,
@@ -1925,8 +1888,6 @@ export function BusinessProvider({ children }) {
         const paymentId = generateUUID();
         const chequeId = payType === 'cheque' ? generateUUID() : null;
         const paymentNo = `PAY-TRN-${Date.now().toString().slice(-6)}`;
-        const requestedBankId = shipmentData.payment_details?.bank_account_id;
-        const bankAccount = payType === 'bank' ? bankAccounts.find(account => account.id === requestedBankId) : null;
         const payment = {
           id: paymentId,
           payment_no: paymentNo,
@@ -1936,7 +1897,7 @@ export function BusinessProvider({ children }) {
           party_id: suppId,
           amount: lkrFob,
           payment_method: payType,
-          bank_account_id: isValidUUID(bankAccount?.id) ? bankAccount.id : null,
+          bank_account_id: null,
           cheque_id: null,
           transit_shipment_id: trnId,
           source_key: `transit:${trnId}:payment`,
@@ -1971,9 +1932,6 @@ export function BusinessProvider({ children }) {
         }
 
         setPayments(prev => [{ ...payment, created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== payment.source_key)]);
-        if (bankAccount) {
-          await adjustBankBalance('Updating bank balance', bankAccount.id, -lkrFob);
-        }
       } else {
         const supplier = suppliers.find(item => item.id === suppId);
         if (supplier) {
@@ -2174,9 +2132,7 @@ export function BusinessProvider({ children }) {
     const shouldRecordGoodsPayment = newIsActive && nextPaymentType !== 'credit' && lkrFob > 0;
 
     if (shouldRecordGoodsPayment) {
-      const requestedBankId = updatedData.payment_details?.bank_account_id || existingGoodsPayment?.bank_account_id;
-      const nextBankId = nextPaymentType === 'bank' && isValidUUID(requestedBankId) ? requestedBankId : null;
-      if (nextPaymentType === 'bank' && !nextBankId) throw new Error('Select the bank account used for the goods payment.');
+      const nextBankId = null;
 
       const existingCheque = existingGoodsPayment
         ? cheques.find(cheque => cheque.id === existingGoodsPayment.cheque_id || cheque.payment_id === existingGoodsPayment.id)
@@ -2234,14 +2190,6 @@ export function BusinessProvider({ children }) {
         setCheques(prev => prev.filter(cheque => cheque.id !== existingCheque.id));
       }
 
-      const oldBankId = isValidUUID(existingGoodsPayment?.bank_account_id) ? existingGoodsPayment.bank_account_id : null;
-      const oldAmount = Number(existingGoodsPayment?.amount) || 0;
-      if (oldBankId && oldBankId === nextBankId) {
-        await adjustBankBalance('Readjusting transit goods bank payment', nextBankId, oldAmount - lkrFob);
-      } else {
-        if (existingGoodsPayment) await reversePaymentBalance(existingGoodsPayment, 'Reversing previous transit goods payment');
-        if (nextBankId) await adjustBankBalance('Updating transit goods bank payment', nextBankId, -lkrFob);
-      }
       setPayments(prev => [{ ...goodsPayment, created_at: existingGoodsPayment?.created_at || new Date().toISOString() }, ...prev.filter(payment => payment.source_key !== goodsPaymentSourceKey)]);
     } else if (existingGoodsPayment) {
       await reversePaymentBalance(existingGoodsPayment, 'Reversing transit goods payment');
@@ -2318,7 +2266,7 @@ export function BusinessProvider({ children }) {
       lkr_amount: expenseLkr,
       payment_date: expenseData.payment_date || new Date().toISOString().slice(0, 10),
       payment_method: expenseData.paid_by || expenseData.payment_method || 'bank',
-      bank_account_id: isValidUUID(expenseData.bank_account_id) ? expenseData.bank_account_id : null,
+      bank_account_id: null,
       reference: expenseData.reference || null,
       allocation_method: 'value',
       notes: [expenseData.expense_type, expenseData.notes].filter(Boolean).join(' | ') || null
@@ -2339,7 +2287,7 @@ export function BusinessProvider({ children }) {
     const paymentMethod = expenseData.paid_by || expenseData.payment_method || 'bank';
     const paymentId = generateUUID();
     const chequeId = paymentMethod === 'cheque' ? generateUUID() : null;
-    const paymentBankId = paymentMethod === 'bank' && isValidUUID(expenseData.bank_account_id) ? expenseData.bank_account_id : null;
+    const paymentBankId = null;
     const landedPayment = {
       id: paymentId,
       payment_no: `PAY-${newExpense.cost_no}`,
@@ -2384,11 +2332,6 @@ export function BusinessProvider({ children }) {
     }
 
     setPayments(prev => [{ ...landedPayment, payee_name: expenseData.payee || 'Landed cost payee', expense_category: 'Landed Cost', created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== landedPayment.source_key)]);
-
-    const bankAccount = bankAccounts.find(account => account.id === paymentBankId);
-    if (bankAccount) {
-      await adjustBankBalance('Updating bank balance', bankAccount.id, -expenseLkr);
-    }
 
     // Costs can arrive after the goods. Revalue the linked purchase and current
     // on-hand inventory without adding the received quantities a second time.
@@ -2800,9 +2743,7 @@ export function BusinessProvider({ children }) {
         if (existingCostResult.error) throw existingCostResult.error;
         const landedCostId = existingCostResult.data?.id || generateUUID();
         const paymentMethod = shippingPaymentData.method || 'cash';
-        const bankId = paymentMethod === 'bank' && isValidUUID(shippingPaymentData.bank_account_id)
-          ? shippingPaymentData.bank_account_id
-          : null;
+        const bankId = null;
         const costPayload = {
           transit_shipment_id: linkTransitId,
           expense_type: 'freight',
@@ -2876,7 +2817,6 @@ export function BusinessProvider({ children }) {
           setCheques(prev => [{ ...shippingCheque, party_name: shippingPaymentData.payee || 'Shipping / Clearing' }, ...prev]);
         }
 
-        if (bankId) await adjustBankBalance('Updating shipping bank payment', bankId, -shippingPaymentAmount);
         setPayments(prev => [{
           ...shippingPayment,
           payee_name: shippingPaymentData.payee || 'Shipping / Clearing',
@@ -2907,8 +2847,7 @@ export function BusinessProvider({ children }) {
     if (!isDraft && isDirect && newPurchaseDoc.payment_type !== 'credit') {
       const paymentId = generateUUID();
       const chequeId = newPurchaseDoc.payment_type === 'cheque' ? generateUUID() : null;
-      const requestedBankId = newPurchaseDoc.payment_details?.bank_account_id;
-      const bankId = newPurchaseDoc.payment_type === 'bank' && isValidUUID(requestedBankId) ? requestedBankId : null;
+      const bankId = null;
       const payment = {
         id: paymentId,
         payment_no: `PAY-${grnNo}`,
@@ -2949,13 +2888,6 @@ export function BusinessProvider({ children }) {
         await runCloudWrite('Linking purchase cheque', () => supabase.from('payments').update({ cheque_id: chequeId }).eq('id', paymentId));
         payment.cheque_id = chequeId;
         setCheques(prev => [{ ...cheque, party_name: supplierName }, ...prev.filter(item => item.id !== chequeId)]);
-      }
-
-      if (bankId) {
-        const account = bankAccounts.find(item => item.id === bankId);
-        if (account) {
-          await adjustBankBalance('Updating purchase bank balance', bankId, -totalLandedLkr);
-        }
       }
 
       setPayments(prev => [{ ...payment, supplier_name: supplierName, created_at: new Date().toISOString() }, ...prev.filter(item => item.source_key !== payment.source_key)]);
@@ -4238,7 +4170,7 @@ export function BusinessProvider({ children }) {
       const paymentId = generateUUID();
       const paymentNo = `PAY-${docNo}-${index + 1}`;
       const chequeId = line.method === 'cheque' ? generateUUID() : null;
-      const bankId = line.method === 'bank' && isValidUUID(line.bank_account_id) ? line.bank_account_id : null;
+      const bankId = null;
       const payment = {
         id: paymentId,
         payment_no: paymentNo,
@@ -4257,13 +4189,6 @@ export function BusinessProvider({ children }) {
       };
 
       await runCloudWrite('Recording sales payment', () => supabase.from('payments').upsert(payment, { onConflict: 'source_key' }));
-
-      if (line.method === 'bank' && bankId) {
-        const account = bankAccounts.find(item => item.id === bankId);
-        if (account) {
-          await adjustBankBalance('Updating sales bank balance', bankId, Number(line.amount));
-        }
-      }
 
       if (line.method === 'cheque') {
         const details = line.cheque_details || docData.cheque_details;
@@ -4450,15 +4375,6 @@ export function BusinessProvider({ children }) {
       paymentDelta = grandTotal - (Number(adjustablePayment.amount) || 0);
       paidAmount = grandTotal;
       if (grandTotal <= 0) throw new Error('A paid document cannot be reduced to zero. Remove or replace the payment first.');
-      if (paymentDelta && adjustablePayment.payment_method === 'bank' && !isValidUUID(adjustablePayment.bank_account_id)) {
-        throw new Error('The linked bank payment has no valid bank account and cannot be adjusted safely.');
-      }
-      if (paymentDelta && adjustablePayment.payment_method === 'cheque') {
-        const cheque = cheques.find(entry => entry.id === adjustablePayment.cheque_id || entry.payment_id === adjustablePayment.id);
-        if (cheque?.status === 'cleared' && !isValidUUID(cheque.deposit_bank_account_id)) {
-          throw new Error('The cleared cheque has no deposit account and cannot be adjusted safely.');
-        }
-      }
     } else if (grandTotal + 0.01 < paidAmount) {
       throw new Error(`The edited total cannot be below the recorded payment (${paidAmount.toFixed(2)} LKR). Enable payment readjustment when available.`);
     }
@@ -4613,16 +4529,10 @@ export function BusinessProvider({ children }) {
 
     if (adjustablePayment && shouldAdjustPaidPayment && paymentDelta) {
       await runCloudWrite('Readjusting linked sales payment', () => supabase.from('payments').update({ amount: grandTotal }).eq('id', adjustablePayment.id));
-      if (adjustablePayment.payment_method === 'bank') {
-        await adjustBankBalance('Readjusting sales bank balance', adjustablePayment.bank_account_id, paymentDelta);
-      }
       if (adjustablePayment.payment_method === 'cheque') {
         const cheque = cheques.find(entry => entry.id === adjustablePayment.cheque_id || entry.payment_id === adjustablePayment.id);
         if (cheque) {
           await runCloudWrite('Readjusting sales cheque amount', () => supabase.from('cheque_register').update({ amount: grandTotal }).eq('id', cheque.id));
-          if (cheque.status === 'cleared') {
-            await adjustBankBalance('Readjusting cleared cheque balance', cheque.deposit_bank_account_id, paymentDelta);
-          }
           setCheques(prev => prev.map(entry => entry.id === cheque.id ? { ...entry, amount: grandTotal, party_id: nextCustomerId, party_name: nextCustomer?.business_name || entry.party_name } : entry));
         }
       }
@@ -4961,20 +4871,12 @@ export function BusinessProvider({ children }) {
     const today = new Date().toISOString().slice(0, 10);
     await runCloudWrite('Updating cheque status', () => supabase.from('cheque_register').update({
       status: newStatus,
-      deposit_bank_account_id: isValidUUID(extraData.deposit_bank_account_id) ? extraData.deposit_bank_account_id : chq.deposit_bank_account_id || null,
+      deposit_bank_account_id: null,
       return_reason: extraData.return_reason || chq.return_reason || null,
       cleared_date: newStatus === 'cleared' ? today : chq.cleared_date || null,
       return_date: newStatus === 'returned' ? today : chq.return_date || null,
       updated_at: new Date().toISOString()
     }).eq('id', chequeId));
-
-    if (newStatus === 'cleared' && isValidUUID(extraData.deposit_bank_account_id)) {
-      const account = bankAccounts.find(item => item.id === extraData.deposit_bank_account_id);
-      if (account) {
-        const directionMultiplier = chq.direction === 'issued' ? -1 : 1;
-        await adjustBankBalance('Updating deposited cheque balance', account.id, directionMultiplier * (Number(chq.amount) || 0));
-      }
-    }
 
     if (newStatus === 'returned' && chq.direction === 'received') {
       if (isValidUUID(chq.party_id)) {
@@ -5003,7 +4905,7 @@ export function BusinessProvider({ children }) {
     setCheques(prev => prev.map(c => c.id === chequeId ? {
       ...c,
       status: newStatus,
-      deposit_bank_account_id: extraData.deposit_bank_account_id || c.deposit_bank_account_id,
+      deposit_bank_account_id: null,
       return_reason: extraData.return_reason || c.return_reason,
       cleared_date: newStatus === 'cleared' ? today : c.cleared_date,
       return_date: newStatus === 'returned' ? today : c.return_date

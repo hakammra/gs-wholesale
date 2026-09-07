@@ -4,7 +4,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency } from '../../lib/formatters';
 
 export default function SupplierList() {
-  const { suppliers, saveSupplier, deleteSupplier, recordSupplierAdvance, bankAccounts, currencies } = useBusiness();
+  const { suppliers, saveSupplier, deleteSupplier, recordSupplierAdvance, currencies } = useBusiness();
   const { notifySuccess } = useNotification();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -17,7 +17,6 @@ export default function SupplierList() {
     currency: 'USD',
     exchange_rate: 305.5,
     payment_method: 'bank',
-    bank_account_id: bankAccounts[0]?.id || '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
     cheque_bank: '',
@@ -38,7 +37,6 @@ export default function SupplierList() {
       currency: sup.default_currency || 'USD',
       exchange_rate: rate,
       payment_method: 'bank',
-      bank_account_id: bankAccounts[0]?.id || '',
       cheque_no: '',
       cheque_date: new Date().toISOString().slice(0, 10),
       cheque_bank: '',
@@ -213,16 +211,6 @@ export default function SupplierList() {
                     <option value="cheque">Cheque</option>
                   </select>
                 </div>
-
-                {advanceForm.payment_method === 'bank' && (
-                  <div>
-                    <label>Paid From Bank Account *</label>
-                    <select value={advanceForm.bank_account_id} onChange={(e) => setAdvanceForm(prev => ({ ...prev, bank_account_id: e.target.value }))} required>
-                      <option value="">Select bank account</option>
-                      {bankAccounts.map(b => <option key={b.id} value={b.id}>{b.account_name} ({formatCurrency(b.current_balance)})</option>)}
-                    </select>
-                  </div>
-                )}
 
                 {advanceForm.payment_method === 'cheque' && (
                   <div className="payment-detail-grid cheque-detail-grid">

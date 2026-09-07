@@ -6,14 +6,13 @@ import { formatCurrency, formatDate } from '../../lib/formatters';
 const PENDING_STATUSES = new Set(['received', 'held', 'deposited']);
 
 export default function ChequeRegister() {
-  const { cheques = [], updateChequeStatus, bankAccounts = [] } = useBusiness();
+  const { cheques = [], updateChequeStatus } = useBusiness();
   const { notifySuccess } = useNotification();
   const [directionFilter, setDirectionFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [actionCheque, setActionCheque] = useState(null);
   const [actionType, setActionType] = useState('clear');
-  const [selectedBankId, setSelectedBankId] = useState(bankAccounts[0]?.id || '');
   const [returnReason, setReturnReason] = useState('Insufficient Funds');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -37,17 +36,16 @@ export default function ChequeRegister() {
   const openAction = (cheque, type) => {
     setActionCheque(cheque);
     setActionType(type);
-    setSelectedBankId(cheque.deposit_bank_account_id || bankAccounts[0]?.id || '');
     setReturnReason('Insufficient Funds');
   };
 
   const handleExecuteAction = async () => {
-    if (!actionCheque || isSaving || (actionType === 'clear' && !selectedBankId)) return;
+    if (!actionCheque || isSaving) return;
     setIsSaving(true);
     try {
       const nextStatus = actionType === 'clear' ? 'cleared' : actionType === 'return' ? 'returned' : 'cancelled';
       await updateChequeStatus(actionCheque.id, nextStatus, {
-        deposit_bank_account_id: actionType === 'clear' ? selectedBankId : null,
+        deposit_bank_account_id: null,
         return_reason: actionType === 'return' ? returnReason : null
       });
       notifySuccess(
@@ -132,11 +130,11 @@ export default function ChequeRegister() {
             <div className="modal-header"><h3>{actionTitle}</h3><button onClick={() => setActionCheque(null)} className="modal-close">&times;</button></div>
             <div className="modal-body">
               <div className="cheque-action-summary"><div><small>AMOUNT</small><strong>{formatCurrency(actionCheque.amount)}</strong></div><div><small>PARTY</small><strong>{actionCheque.party_name || 'Other'}</strong></div></div>
-              {actionType === 'clear' && <div><label>{actionCheque.direction === 'received' ? 'Deposit into bank account' : 'Clear from bank account'} *</label><select value={selectedBankId} onChange={(event) => setSelectedBankId(event.target.value)} required><option value="">Select bank account</option>{bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}</select></div>}
+              {actionType === 'clear' && <p className="form-warning">Clear this cheque into the unified bank payment balance.</p>}
               {actionType === 'return' && <div><label>Return reason</label><select value={returnReason} onChange={(event) => setReturnReason(event.target.value)}><option>Insufficient Funds</option><option>Signature Differs</option><option>Post-dated / Stale</option><option>Account Closed</option></select><p className="form-warning">Returning a received cheque reopens the related customer receivable.</p></div>}
-              {actionType === 'cancel' && <p className="form-warning">This marks the issued cheque as cancelled. It will not affect realized cash flow or the selected bank balance.</p>}
+              {actionType === 'cancel' && <p className="form-warning">This marks the issued cheque as cancelled. It will not affect realized cash flow.</p>}
             </div>
-            <div className="modal-footer"><button onClick={() => setActionCheque(null)} className="secondary-button">Close</button><button onClick={handleExecuteAction} disabled={isSaving || (actionType === 'clear' && !selectedBankId)} className={actionType === 'clear' ? 'success-button' : 'danger-button'}>{isSaving ? 'Saving…' : actionType === 'clear' ? 'Confirm Clearance' : actionType === 'return' ? 'Confirm Return' : 'Confirm Cancellation'}</button></div>
+            <div className="modal-footer"><button onClick={() => setActionCheque(null)} className="secondary-button">Close</button><button onClick={handleExecuteAction} disabled={isSaving} className={actionType === 'clear' ? 'success-button' : 'danger-button'}>{isSaving ? 'Saving…' : actionType === 'clear' ? 'Confirm Clearance' : actionType === 'return' ? 'Confirm Return' : 'Confirm Cancellation'}</button></div>
           </div>
         </div>
       )}

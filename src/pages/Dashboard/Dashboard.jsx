@@ -1,22 +1,56 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
 
 const OUTFLOW_TYPES = new Set(['transit_purchase_payment', 'purchase_payment', 'supplier_payment', 'supplier_advance', 'operational_expense', 'expense', 'customer_refund']);
 const PENDING_CHEQUE_STATUSES = new Set(['received', 'held', 'deposited']);
 
+const RANGE_PRESETS = [
+  ['this_month', 'This Month'], ['last_month', 'Last Month'], ['this_year', 'This Year'],
+  ['last_year', 'Last Year'], ['all_time', 'Since Start'], ['custom', 'Custom']
+];
+
+const localDateKey = date => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const inDateRange = (value, start, end) => {
+  if (!value) return false;
+  const date = String(value).slice(0, 10);
+  return (!start || date >= start) && (!end || date <= end);
+};
+
 export default function Dashboard({ onNavigateTab }) {
   const {
-    salesDocuments = [], transitShipments = [], customers = [], suppliers = [], bankAccounts = [],
+    salesDocuments = [], transitShipments = [],
     products = [], stockBalances = {}, payments = [], purchases = [], cheques = []
   } = useBusiness();
 
-  const monthKey = new Date().toISOString().slice(0, 7);
-  const monthlySales = salesDocuments.filter(document =>
-    document.doc_type === 'sales_invoice' && !['cancelled', 'returned'].includes(document.status) && String(document.doc_date || '').startsWith(monthKey)
+  const today = new Date();
+  const [rangePreset, setRangePreset] = useState('this_month');
+  const [customStart, setCustomStart] = useState(localDateKey(new Date(today.getFullYear(), today.getMonth(), 1)));
+  const [customEnd, setCustomEnd] = useState(localDateKey(today));
+  const selectedRange = useMemo(() => {
+    const year = today.getFullYear();
+    const month = today.getMonth();
+    if (rangePreset === 'this_month') return { start: localDateKey(new Date(year, month, 1)), end: localDateKey(today), label: 'This Month' };
+    if (rangePreset === 'last_month') return { start: localDateKey(new Date(year, month - 1, 1)), end: localDateKey(new Date(year, month, 0)), label: 'Last Month' };
+    if (rangePreset === 'this_year') return { start: `${year}-01-01`, end: localDateKey(today), label: 'This Year' };
+    if (rangePreset === 'last_year') return { start: `${year - 1}-01-01`, end: `${year - 1}-12-31`, label: 'Last Year' };
+    if (rangePreset === 'all_time') return { start: '', end: localDateKey(today), label: 'Since Start' };
+    return { start: customStart, end: customEnd, label: customStart && customEnd ? `${formatDate(customStart)} – ${formatDate(customEnd)}` : 'Custom Range' };
+  }, [rangePreset, customStart, customEnd]);
+
+  const rangeSales = salesDocuments.filter(document =>
+    document.doc_type === 'sales_invoice' &&
+    !['cancelled', 'returned'].includes(document.status) &&
+    inDateRange(document.doc_date || document.created_at, selectedRange.start, selectedRange.end)
   );
   const productById = new Map(products.map(product => [String(product.id), product]));
-  const monthlyProfitRows = monthlySales.map(document => {
+  const profitRows = rangeSales.map(document => {
     const lines = (document.items || []).map(item => {
       const qty = Number(item.base_qty || item.qty) || 0;
       const snapshotUnitCost = Number(item.unit_cost_snapshot) || 0;
@@ -52,26 +86,27 @@ export default function Dashboard({ onNavigateTab }) {
       savedCostDiffers: lines.length > 0 && Math.abs(storedCost - costOfGoods) > 0.01
     };
   }).sort((a, b) => new Date(b.doc_date || b.created_at) - new Date(a.doc_date || a.created_at));
-  const monthlyRevenue = monthlyProfitRows.reduce((sum, document) => sum + document.revenue, 0);
-  const monthlyCostOfGoods = monthlyProfitRows.reduce((sum, document) => sum + document.costOfGoods, 0);
-  const monthlyProfit = monthlyRevenue - monthlyCostOfGoods;
-  const fallbackInvoiceCount = monthlyProfitRows.filter(document => document.fallbackLineCount > 0).length;
-  const missingCostLineCount = monthlyProfitRows.reduce((sum, document) => sum + document.missingCostLineCount, 0);
+  const rangeRevenue = profitRows.reduce((sum, document) => sum + document.revenue, 0);
+  const rangeCostOfGoods = profitRows.reduce((sum, document) => sum + document.costOfGoods, 0);
+  const rangeProfit = rangeRevenue - rangeCostOfGoods;
+  const fallbackInvoiceCount = profitRows.filter(document => document.fallbackLineCount > 0).length;
+  const missingCostLineCount = profitRows.reduce((sum, document) => sum + document.missingCostLineCount, 0);
 
   const chequeById = new Map(cheques.map(cheque => [String(cheque.id), cheque]));
-  const monthlyPayments = payments.filter(payment => String(payment.payment_date || payment.created_at || '').startsWith(monthKey));
-  const realizedPayments = monthlyPayments.filter(payment => {
-    if (payment.payment_method !== 'cheque') return true;
+  const realizedPayments = payments.filter(payment => {
+    if (!['cash', 'bank', 'card', 'cheque'].includes(payment.payment_method)) return false;
+    if (payment.payment_method !== 'cheque') return inDateRange(payment.payment_date || payment.created_at, selectedRange.start, selectedRange.end);
     const cheque = chequeById.get(String(payment.cheque_id)) || cheques.find(item => String(item.payment_id) === String(payment.id));
-    return cheque?.status === 'cleared';
+    return cheque?.status === 'cleared' && inDateRange(cheque.cleared_date || payment.payment_date || payment.created_at, selectedRange.start, selectedRange.end);
   });
   const cashIn = realizedPayments.filter(payment => !OUTFLOW_TYPES.has(payment.payment_type)).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
   const cashOut = realizedPayments.filter(payment => OUTFLOW_TYPES.has(payment.payment_type)).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
-  const totalTransitValue = transitShipments.filter(shipment => shipment.status === 'in_transit').reduce((sum, shipment) => sum + (Number(shipment.total_estimated_cost_lkr) || 0), 0);
-  const totalReceivables = customers.reduce((sum, customer) => sum + (Number(customer.current_receivable) || 0), 0);
-  const totalPayables = suppliers.reduce((sum, supplier) => sum + (Number(supplier.current_payable) || 0), 0);
-  const totalLiquidity = bankAccounts.reduce((sum, account) => sum + (Number(account.current_balance) || 0), 0);
-  const pendingCheques = cheques.filter(cheque => PENDING_CHEQUE_STATUSES.has(cheque.status));
+  const rangeTransit = transitShipments.filter(shipment => inDateRange(shipment.document_date || shipment.shipping_date || shipment.departure_date || shipment.created_at, selectedRange.start, selectedRange.end));
+  const totalTransitValue = rangeTransit.reduce((sum, shipment) => sum + (Number(shipment.total_estimated_cost_lkr) || 0), 0);
+  const rangePurchases = purchases.filter(document => inDateRange(document.receipt_date || document.created_at, selectedRange.start, selectedRange.end));
+  const purchaseValue = rangePurchases.reduce((sum, document) => sum + (Number(document.total_landed_lkr || document.total_amount_lkr) || 0), 0);
+  const rangeReceivables = rangeSales.reduce((sum, document) => sum + Math.max(0, Number(document.balance_due) || 0), 0);
+  const pendingCheques = cheques.filter(cheque => PENDING_CHEQUE_STATUSES.has(cheque.status) && inDateRange(cheque.received_or_issued_date || cheque.created_at, selectedRange.start, selectedRange.end));
 
   const lowStockItems = products.filter(product => {
     if (product.is_active === false) return false;
@@ -83,33 +118,39 @@ export default function Dashboard({ onNavigateTab }) {
     ...payments.map(payment => ({ id: `pay-${payment.id}`, date: payment.payment_date || payment.created_at, type: 'Payment', reference: payment.payment_no, detail: payment.reference || payment.notes || payment.payment_type, amount: Number(payment.amount) || 0, outflow: OUTFLOW_TYPES.has(payment.payment_type) })),
     ...salesDocuments.map(document => ({ id: `sale-${document.id}`, date: document.doc_date || document.created_at, type: document.doc_type === 'quotation' ? 'Quotation' : 'Sales Document', reference: document.doc_no, detail: document.customer_name || document.payment_status, amount: Number(document.grand_total) || 0 })),
     ...purchases.map(document => ({ id: `purchase-${document.id}`, date: document.receipt_date || document.created_at, type: 'Purchase Document', reference: document.doc_no || document.grn_no, detail: document.supplier_name || document.status, amount: Number(document.total_landed_lkr || document.total_amount_lkr) || 0, outflow: true }))
-  ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 8), [payments, salesDocuments, purchases]);
+  ].filter(item => inDateRange(item.date, selectedRange.start, selectedRange.end)).sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 8), [payments, salesDocuments, purchases, selectedRange.start, selectedRange.end]);
 
   return (
     <div className="page-section dashboard-page">
-      <div className="dashboard-heading"><div><h2>Business Overview</h2><p>Live operational and financial position for {new Date().toLocaleString('en-LK', { month: 'long', year: 'numeric' })}</p></div><button className="primary-button" onClick={() => onNavigateTab('pos')}>Open Wholesale POS</button></div>
+      <div className="dashboard-heading"><div><h2>Business Overview</h2><p>Financial activity for {selectedRange.label}</p></div><button className="primary-button" onClick={() => onNavigateTab('pos')}>Open Wholesale POS</button></div>
+
+      <div className="dashboard-range-bar" aria-label="Dashboard date range">
+        <div className="dashboard-range-presets">
+          {RANGE_PRESETS.map(([key, label]) => <button type="button" key={key} className={rangePreset === key ? 'active' : ''} onClick={() => setRangePreset(key)}>{label}</button>)}
+        </div>
+        {rangePreset === 'custom' && <div className="dashboard-custom-range"><label>From<input type="date" value={customStart} max={customEnd || undefined} onChange={event => setCustomStart(event.target.value)} /></label><label>To<input type="date" value={customEnd} min={customStart || undefined} onChange={event => setCustomEnd(event.target.value)} /></label></div>}
+      </div>
 
       <div className="dashboard-metric-grid">
-        <div className="stat-card"><p>MONTHLY SALES</p><strong>{formatCurrency(monthlyRevenue)}</strong><small>{monthlySales.length} posted invoices</small></div>
-        <div className="stat-card"><p>COST OF GOODS SOLD</p><strong style={{ color: '#ffca58' }}>{formatCurrency(monthlyCostOfGoods)}</strong><small>Quantity × cost recorded at sale</small></div>
-        <div className="stat-card"><p>GROSS PROFIT</p><strong style={{ color: monthlyProfit >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(monthlyProfit)}</strong><small>{monthlyRevenue ? `${((monthlyProfit / monthlyRevenue) * 100).toFixed(1)}% margin · sale-time cost` : 'No sales this month'}</small></div>
-        <div className="stat-card"><p>REALIZED CASH FLOW</p><strong style={{ color: cashIn - cashOut >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(cashIn - cashOut)}</strong><small>{formatCurrency(cashIn)} in · {formatCurrency(cashOut)} out</small></div>
-        <div className="stat-card"><p>BANK LIQUIDITY</p><strong>{formatCurrency(totalLiquidity)}</strong><small>Across {bankAccounts.length} accounts</small></div>
-        <div className="stat-card"><p>RECEIVABLES</p><strong style={{ color: '#ffca58' }}>{formatCurrency(totalReceivables)}</strong><small>Outstanding customer balances</small></div>
-        <div className="stat-card"><p>SUPPLIER PAYABLES</p><strong style={{ color: '#ff8e8e' }}>{formatCurrency(totalPayables)}</strong><small>Open supplier credit</small></div>
-        <div className="stat-card"><p>IN TRANSIT</p><strong>{formatCurrency(totalTransitValue)}</strong><small>{transitShipments.filter(shipment => shipment.status === 'in_transit').length} active shipments</small></div>
-        <div className="stat-card"><p>PENDING CHEQUES</p><strong>{pendingCheques.length}</strong><small>Received and issued awaiting clearance</small></div>
+        <div className="stat-card"><p>SALES</p><strong>{formatCurrency(rangeRevenue)}</strong><small>{rangeSales.length} posted invoices · {selectedRange.label}</small></div>
+        <div className="stat-card"><p>COST OF GOODS SOLD</p><strong style={{ color: '#ffca58' }}>{formatCurrency(rangeCostOfGoods)}</strong><small>Quantity × cost recorded at sale</small></div>
+        <div className="stat-card"><p>GROSS PROFIT</p><strong style={{ color: rangeProfit >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(rangeProfit)}</strong><small>{rangeRevenue ? `${((rangeProfit / rangeRevenue) * 100).toFixed(1)}% margin · sale-time cost` : `No sales for ${selectedRange.label.toLowerCase()}`}</small></div>
+        <div className="stat-card"><p>REALIZED CASH + BANK</p><strong style={{ color: cashIn - cashOut >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(cashIn - cashOut)}</strong><small>{formatCurrency(cashIn)} in · {formatCurrency(cashOut)} out</small></div>
+        <div className="stat-card"><p>OPEN RECEIVABLES</p><strong style={{ color: '#ffca58' }}>{formatCurrency(rangeReceivables)}</strong><small>Balance on invoices in this range</small></div>
+        <div className="stat-card"><p>PURCHASE VALUE</p><strong style={{ color: '#ff8e8e' }}>{formatCurrency(purchaseValue)}</strong><small>{rangePurchases.length} purchase documents</small></div>
+        <div className="stat-card"><p>TRANSIT ORDERS</p><strong>{formatCurrency(totalTransitValue)}</strong><small>{rangeTransit.length} transit documents created</small></div>
+        <div className="stat-card"><p>PENDING CHEQUES</p><strong>{pendingCheques.length}</strong><small>Within the selected date range</small></div>
       </div>
 
       <div className="panel-card dashboard-profit-panel">
         <div className="panel-heading">
-          <div><h3>Monthly Gross Profit Calculation</h3><p>Invoice sales minus the cost of the exact quantity sold</p></div>
+          <div><h3>Gross Profit Calculation</h3><p>{selectedRange.label} · invoice sales minus the cost of the exact quantity sold</p></div>
           <div className="profit-equation" aria-label="Gross profit formula">
-            <span><small>Sales</small><strong>{formatCurrency(monthlyRevenue)}</strong></span>
+            <span><small>Sales</small><strong>{formatCurrency(rangeRevenue)}</strong></span>
             <b>−</b>
-            <span><small>COGS</small><strong>{formatCurrency(monthlyCostOfGoods)}</strong></span>
+            <span><small>COGS</small><strong>{formatCurrency(rangeCostOfGoods)}</strong></span>
             <b>=</b>
-            <span><small>Gross profit</small><strong className={monthlyProfit >= 0 ? 'amount-in' : 'amount-out'}>{formatCurrency(monthlyProfit)}</strong></span>
+            <span><small>Gross profit</small><strong className={rangeProfit >= 0 ? 'amount-in' : 'amount-out'}>{formatCurrency(rangeProfit)}</strong></span>
           </div>
         </div>
         {fallbackInvoiceCount > 0 && (
@@ -123,7 +164,7 @@ export default function Dashboard({ onNavigateTab }) {
           <table>
             <thead><tr><th>Invoice / Cost calculation</th><th>Date</th><th>Sales</th><th>COGS</th><th>Gross profit</th><th>Margin</th></tr></thead>
             <tbody>
-              {monthlyProfitRows.map(document => (
+              {profitRows.map(document => (
                 <tr key={document.id}>
                   <td>
                     <strong>{document.doc_no}</strong>
@@ -149,9 +190,9 @@ export default function Dashboard({ onNavigateTab }) {
                   <td className="mono">{document.revenue ? `${((document.grossProfit / document.revenue) * 100).toFixed(1)}%` : '0.0%'}</td>
                 </tr>
               ))}
-              {!monthlyProfitRows.length && <tr><td colSpan="6" className="empty-state-cell">No posted sales invoices this month.</td></tr>}
+              {!profitRows.length && <tr><td colSpan="6" className="empty-state-cell">No posted sales invoices for {selectedRange.label.toLowerCase()}.</td></tr>}
             </tbody>
-            {monthlyProfitRows.length > 0 && <tfoot><tr><th colSpan="2">Monthly total</th><th className="mono">{formatCurrency(monthlyRevenue)}</th><th className="mono">{formatCurrency(monthlyCostOfGoods)}</th><th className={`mono ${monthlyProfit >= 0 ? 'amount-in' : 'amount-out'}`}>{formatCurrency(monthlyProfit)}</th><th className="mono">{monthlyRevenue ? `${((monthlyProfit / monthlyRevenue) * 100).toFixed(1)}%` : '0.0%'}</th></tr></tfoot>}
+            {profitRows.length > 0 && <tfoot><tr><th colSpan="2">Range total</th><th className="mono">{formatCurrency(rangeRevenue)}</th><th className="mono">{formatCurrency(rangeCostOfGoods)}</th><th className={`mono ${rangeProfit >= 0 ? 'amount-in' : 'amount-out'}`}>{formatCurrency(rangeProfit)}</th><th className="mono">{rangeRevenue ? `${((rangeProfit / rangeRevenue) * 100).toFixed(1)}%` : '0.0%'}</th></tr></tfoot>}
           </table>
         </div>
       </div>

@@ -14,7 +14,6 @@ export default function CustomerList({ onNavigateTab }) {
     salesDocuments = [],
     cheques = [],
     payments = [],
-    bankAccounts = [],
     companySettings = {}
   } = useBusiness();
 
@@ -59,7 +58,6 @@ export default function CustomerList({ onNavigateTab }) {
     amount: '',
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: 'cash', // 'cash' | 'bank' | 'cheque'
-    bank_account_id: bankAccounts[0]?.id || '',
     reference: '',
     notes: '',
     cheque_no: '',
@@ -278,7 +276,6 @@ export default function CustomerList({ onNavigateTab }) {
       amount: due > 0 ? due : '',
       payment_date: new Date().toISOString().slice(0, 10),
       payment_method: 'cash',
-      bank_account_id: bankAccounts[0]?.id || '',
       reference: ref || `Credit settlement for ${selectedCust.business_name}`,
       notes: ref ? `Payment for ${ref}` : `Credit settlement for ${selectedCust.business_name}`,
       cheque_no: '',
@@ -305,7 +302,7 @@ export default function CustomerList({ onNavigateTab }) {
         amount: amt,
         payment_date: settlementForm.payment_date,
         payment_method: settlementForm.payment_method,
-        bank_account_id: settlementForm.bank_account_id || bankAccounts[0]?.id,
+        bank_account_id: null,
         reference: settlementForm.reference,
         notes: settlementForm.notes,
         cheque_no: settlementForm.cheque_no,

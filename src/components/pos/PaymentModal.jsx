@@ -9,7 +9,7 @@ export default function PaymentModal({
   onClose,
   onConfirmPayment
 }) {
-  const { bankAccounts = [], customers = [] } = useBusiness();
+  const { customers = [] } = useBusiness();
   const grandTotal = totals.grand_total || 0;
 
   const liveCustomer = customer
@@ -20,7 +20,6 @@ export default function PaymentModal({
     {
       method: customer ? 'credit' : 'cash',
       amount: grandTotal,
-      bank_account_id: (customer ? 'credit' : 'cash') === 'bank' ? (bankAccounts[0]?.id || '') : '',
       reference: ''
     }
   ]);
@@ -49,7 +48,6 @@ export default function PaymentModal({
       setPaymentLines([{
         method,
         amount: grandTotal,
-        bank_account_id: method === 'bank' ? (bankAccounts[0]?.id || '') : '',
         reference: ''
       }]);
       return;
@@ -57,7 +55,6 @@ export default function PaymentModal({
     setPaymentLines(prev => [...prev, {
       method,
       amount: remaining > 0 ? remaining : 0,
-      bank_account_id: method === 'bank' ? (bankAccounts[0]?.id || '') : '',
       reference: ''
     }]);
   };
@@ -250,19 +247,7 @@ export default function PaymentModal({
                         />
                       </td>
                       <td data-label="Account / Details">
-                        {line.method === 'bank' && (
-                          <select
-                            value={line.bank_account_id || ''}
-                            onChange={(e) => handleUpdateLine(idx, 'bank_account_id', e.target.value)}
-                            required
-                            aria-label="Deposit bank account"
-                          >
-                            <option value="">Select bank account</option>
-                            {bankAccounts.map(account => (
-                              <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>
-                            ))}
-                          </select>
-                        )}
+                        {line.method === 'bank' && <span style={{ color: 'var(--muted)', fontSize: 12 }}>Bank payment</span>}
                         {line.method === 'cheque' && (
                           <span style={{ color: 'var(--primary)', fontSize: 12 }}>Details configured below</span>
                         )}

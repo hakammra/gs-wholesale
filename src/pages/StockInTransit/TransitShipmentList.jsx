@@ -14,7 +14,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
     transitGroups = [],
     salesDocuments = [],
     stockBalances = {},
-    bankAccounts = [],
     payments = [],
     cheques = [],
     createTransitShipment,
@@ -59,7 +58,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [isSaving, setIsSaving] = useState(false);
   const [isReceiving, setIsReceiving] = useState(false);
   const [arrivalShippingPaymentMethod, setArrivalShippingPaymentMethod] = useState('cash');
-  const [arrivalShippingBankId, setArrivalShippingBankId] = useState('');
   const [arrivalShippingAlreadyRecorded, setArrivalShippingAlreadyRecorded] = useState(false);
   const [arrivalShippingCheque, setArrivalShippingCheque] = useState({
     cheque_no: '',
@@ -82,7 +80,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const [paymentType, setPaymentType] = useState(() => (
     savedDraft?.paymentType && savedDraft.paymentType !== 'credit' ? savedDraft.paymentType : 'cash'
   )); // Transit goods are paid when dispatched; shipping is paid separately on arrival.
-  const [bankAccountId, setBankAccountId] = useState(() => savedDraft?.bankAccountId || bankAccounts[0]?.id || '');
   const [chequeNo, setChequeNo] = useState(() => savedDraft?.chequeNo || '');
   const [chequeDate, setChequeDate] = useState(() => savedDraft?.chequeDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const [chequeBank, setChequeBank] = useState(() => savedDraft?.chequeBank || '');
@@ -143,7 +140,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
         notes,
         goodsAmountPaid,
         paymentType,
-        bankAccountId,
         chequeNo,
         chequeDate,
         chequeBank,
@@ -164,7 +160,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
     notes,
     goodsAmountPaid,
     paymentType,
-    bankAccountId,
     chequeNo,
     chequeDate,
     chequeBank,
@@ -191,7 +186,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
     setNotes('');
     setGoodsAmountPaid(0);
     setPaymentType('cash');
-    setBankAccountId(bankAccounts[0]?.id || '');
     setChequeNo('');
     setItems([]);
     notifySuccess('Unsaved draft cleared');
@@ -286,7 +280,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
     const linkedPayment = payments.find(payment => (
       payment.source_key === `transit:${shipment.id}:payment` || payment.transit_shipment_id === shipment.id
     ));
-    if (linkedPayment?.bank_account_id) setBankAccountId(linkedPayment.bank_account_id);
     const linkedCheque = linkedPayment
       ? cheques.find(cheque => cheque.id === linkedPayment.cheque_id || cheque.payment_id === linkedPayment.id)
       : null;
@@ -486,11 +479,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
       return;
     }
 
-    if (!asDraft && paymentType === 'bank' && !bankAccountId) {
-      notifyError('Select the bank account used for this payment.');
-      return;
-    }
-
     const validItems = items.filter(it => it.line_type === 'group' ? it.transit_group_id : it.product_id);
     if (validItems.length === 0) {
       notifyError('Add at least one known product or unconfirmed transit group.');
@@ -524,7 +512,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
       goods_amount_paid_lkr: Math.max(0, Number(goodsAmountPaid) || 0),
       estimated_landed_expenses_lkr: 0,
       payment_type: paymentType,
-      payment_details: paymentType === 'bank' ? { bank_account_id: bankAccountId } : paymentType === 'cheque' ? { cheque_no: chequeNo, cheque_date: chequeDate, bank_name: chequeBank } : null,
+      payment_details: paymentType === 'cheque' ? { cheque_no: chequeNo, cheque_date: chequeDate, bank_name: chequeBank } : null,
       items: validItems.map(it => ({
         id: it.id,
         line_type: it.line_type === 'group' ? 'group' : 'known_product',
@@ -590,7 +578,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
       };
     }));
     setArrivalShippingPaymentMethod('cash');
-    setArrivalShippingBankId(bankAccounts[0]?.id || '');
     setArrivalShippingAlreadyRecorded(
       shipmentCosts.actual > 0 || (shipment.landed_expenses || []).some(expense => Number(expense.amount_lkr) > 0)
     );
@@ -686,10 +673,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
       return;
     }
 
-    if (!arrivalShippingAlreadyRecorded && arrivalShippingTotal > 0 && arrivalShippingPaymentMethod === 'bank' && !arrivalShippingBankId) {
-      notifyWarning('Select the bank account used to pay shipping.');
-      return;
-    }
     if (!arrivalShippingAlreadyRecorded && arrivalShippingTotal > 0 && arrivalShippingPaymentMethod === 'cheque' && (!arrivalShippingCheque.cheque_no || !arrivalShippingCheque.cheque_date || !arrivalShippingCheque.bank_name)) {
       notifyWarning('Enter the shipping cheque number, date and bank.');
       return;
@@ -724,7 +707,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
         shipping_payment: arrivalShippingTotal > 0 && !arrivalShippingAlreadyRecorded ? {
           amount: arrivalShippingTotal,
           method: arrivalShippingPaymentMethod,
-          bank_account_id: arrivalShippingPaymentMethod === 'bank' ? arrivalShippingBankId : null,
+          bank_account_id: null,
           cheque_details: arrivalShippingPaymentMethod === 'cheque' ? arrivalShippingCheque : null,
           payee: shipmentToReceive.shipping_line_carrier || 'Shipping / Clearing'
         } : null
@@ -1097,15 +1080,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
                 <span>📝</span> Cheque Issued
               </button>
             </div>
-            {paymentType === 'bank' && (
-              <div className="payment-detail-grid">
-                <label>Paid from bank account *</label>
-                <select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)} required>
-                  <option value="">Select bank account</option>
-                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                </select>
-              </div>
-            )}
             {paymentType === 'cheque' && (
               <div className="payment-detail-grid cheque-detail-grid">
                 <div><label>Cheque number *</label><input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} required /></div>
@@ -1910,15 +1884,6 @@ export default function TransitShipmentList({ onNavigateTab }) {
                         <strong className="mono" style={{ color: '#ffca58', fontSize: 18 }}>{formatCurrency(arrivalShippingTotal)}</strong>
                       </div>
                     </div>
-                    {arrivalShippingPaymentMethod === 'bank' && (
-                      <div style={{ marginTop: 10 }}>
-                        <label>Paid from Bank Account *</label>
-                        <select value={arrivalShippingBankId} onChange={(e) => setArrivalShippingBankId(e.target.value)} required>
-                          <option value="">Select bank account</option>
-                          {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                        </select>
-                      </div>
-                    )}
                     {arrivalShippingPaymentMethod === 'cheque' && (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8, marginTop: 10 }}>
                         <div><label>Cheque Number *</label><input value={arrivalShippingCheque.cheque_no} onChange={(e) => setArrivalShippingCheque(current => ({ ...current, cheque_no: e.target.value }))} required /></div>

@@ -12,7 +12,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     products = [],
     categories = [],
     companySettings = {},
-    bankAccounts = [],
     receivePurchaseShipment,
     updatePurchaseDocument,
     deletePurchaseDocument,
@@ -47,7 +46,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
   const [supplierId, setSupplierId] = useState(() => savedDraft?.supplierId || suppliers[0]?.id || '');
   const [purchaseDate, setPurchaseDate] = useState(() => savedDraft?.purchaseDate || new Date().toISOString().slice(0, 10));
   const [paymentType, setPaymentType] = useState(() => savedDraft?.paymentType || 'credit');
-  const [bankAccountId, setBankAccountId] = useState(() => savedDraft?.bankAccountId || bankAccounts[0]?.id || '');
   const [chequeNo, setChequeNo] = useState(() => savedDraft?.chequeNo || '');
   const [chequeDate, setChequeDate] = useState(() => savedDraft?.chequeDate || new Date().toISOString().slice(0, 10));
   const [chequeBank, setChequeBank] = useState(() => savedDraft?.chequeBank || '');
@@ -83,7 +81,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
         supplierId,
         purchaseDate,
         paymentType,
-        bankAccountId,
         chequeNo,
         chequeDate,
         chequeBank,
@@ -100,7 +97,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     supplierId,
     purchaseDate,
     paymentType,
-    bankAccountId,
     chequeNo,
     chequeDate,
     chequeBank,
@@ -116,7 +112,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     setSupplierId(suppliers[0]?.id || '');
     setPurchaseDate(new Date().toISOString().slice(0, 10));
     setPaymentType('credit');
-    setBankAccountId(bankAccounts[0]?.id || '');
     setChequeNo('');
     setChequeDate(new Date().toISOString().slice(0, 10));
     setChequeBank('');
@@ -176,7 +171,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
     setSupplierId(suppliers[0]?.id || '');
     setPurchaseDate(new Date().toISOString().slice(0, 10));
     setPaymentType('credit');
-    setBankAccountId(bankAccounts[0]?.id || '');
     setNotes('');
     setItems([]);
     setTreeSearch('');
@@ -348,10 +342,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
   const handleSaveDirectPurchase = async (e, asDraft = false) => {
     if (e) e.preventDefault();
     if (isSaving) return;
-    if (paymentType === 'bank' && !bankAccountId) {
-      notifyError('Select the bank account used for this payment.');
-      return;
-    }
     if (paymentType === 'cheque' && (!chequeNo.trim() || !chequeDate)) {
       notifyError('Cheque number and cheque date are required.');
       return;
@@ -386,9 +376,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
       supplier_id: resolvedSupplierId,
       supplier_name: resolvedSupplierName,
       payment_type: paymentType,
-      payment_details: paymentType === 'bank'
-        ? { bank_account_id: bankAccountId }
-        : paymentType === 'cheque'
+      payment_details: paymentType === 'cheque'
           ? { cheque_no: chequeNo.trim(), cheque_date: chequeDate, bank_name: chequeBank.trim() || 'Bank' }
           : null,
       receipt_date: purchaseDate,
@@ -755,15 +743,6 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                 <span>📝</span> Cheque Issued
               </button>
             </div>
-            {paymentType === 'bank' && (
-              <div className="payment-detail-grid">
-                <label>Paid from bank account *</label>
-                <select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)} required>
-                  <option value="">Select bank account</option>
-                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                </select>
-              </div>
-            )}
             {paymentType === 'cheque' && (
               <div className="payment-detail-grid cheque-detail-grid">
                 <div><label>Cheque number *</label><input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} required /></div>

@@ -6,7 +6,6 @@ import { formatCurrency, formatDate } from '../../lib/formatters';
 export default function CashflowOverview() {
   const {
     payments = [],
-    bankAccounts = [],
     recordDirectExpense,
     recordDirectIncome,
     deletePayment,
@@ -28,7 +27,6 @@ export default function CashflowOverview() {
     expense_category: 'General Expense',
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: 'cash',
-    bank_account_id: bankAccounts[0]?.id || '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
     cheque_bank: '',
@@ -43,7 +41,6 @@ export default function CashflowOverview() {
     income_category: "Owner's Capital Investment (Initial)",
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: 'cash',
-    bank_account_id: bankAccounts[0]?.id || '',
     payer_name: '',
     reference: '',
     notes: ''
@@ -210,7 +207,7 @@ export default function CashflowOverview() {
         expense_category: expenseForm.expense_category,
         payment_date: expenseForm.payment_date,
         payment_method: expenseForm.payment_method,
-        bank_account_id: expenseForm.payment_method === 'bank' ? expenseForm.bank_account_id : null,
+        bank_account_id: null,
         cheque_no: expenseForm.cheque_no,
         cheque_date: expenseForm.cheque_date,
         cheque_bank: expenseForm.cheque_bank,
@@ -225,7 +222,6 @@ export default function CashflowOverview() {
         expense_category: 'General Expense',
         payment_date: new Date().toISOString().slice(0, 10),
         payment_method: 'cash',
-        bank_account_id: bankAccounts[0]?.id || '',
         cheque_no: '',
         cheque_date: new Date().toISOString().slice(0, 10),
         cheque_bank: '',
@@ -257,7 +253,7 @@ export default function CashflowOverview() {
         income_category: incomeForm.income_category,
         payment_date: incomeForm.payment_date,
         payment_method: incomeForm.payment_method,
-        bank_account_id: incomeForm.payment_method === 'bank' ? incomeForm.bank_account_id : null,
+        bank_account_id: null,
         payer_name: incomeForm.payer_name,
         reference: incomeForm.reference,
         notes: incomeForm.notes
@@ -268,7 +264,6 @@ export default function CashflowOverview() {
         income_category: "Owner's Capital Investment (Initial)",
         payment_date: new Date().toISOString().slice(0, 10),
         payment_method: 'cash',
-        bank_account_id: bankAccounts[0]?.id || '',
         payer_name: '',
         reference: '',
         notes: ''
@@ -636,20 +631,6 @@ export default function CashflowOverview() {
                   </div>
                 </div>
 
-                {expenseForm.payment_method === 'bank' && (
-                  <div style={{ marginTop: 12 }}>
-                    <label>Bank Account *</label>
-                    <select
-                      required
-                      value={expenseForm.bank_account_id}
-                      onChange={(e) => setExpenseForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
-                    >
-                      <option value="">Select bank account</option>
-                      {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                    </select>
-                  </div>
-                )}
-
                 {expenseForm.payment_method === 'cheque' && (
                   <div className="transaction-details-grid" style={{ marginTop: 12 }}>
                     <div><label>Cheque Number *</label><input required value={expenseForm.cheque_no} onChange={(e) => setExpenseForm(prev => ({ ...prev, cheque_no: e.target.value }))} /></div>
@@ -802,20 +783,6 @@ export default function CashflowOverview() {
                     </button>
                   </div>
                 </div>
-
-                {incomeForm.payment_method === 'bank' && (
-                  <div style={{ marginTop: 12 }}>
-                    <label>Receiving Bank Account *</label>
-                    <select
-                      required
-                      value={incomeForm.bank_account_id}
-                      onChange={(e) => setIncomeForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
-                    >
-                      <option value="">Select bank account</option>
-                      {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                    </select>
-                  </div>
-                )}
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
                   <div>

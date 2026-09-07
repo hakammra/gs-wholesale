@@ -3,7 +3,7 @@ import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency } from '../../lib/formatters';
 
 export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
-  const { transitShipments, currencies, addLandedCostExpense, bankAccounts } = useBusiness();
+  const { transitShipments, currencies, addLandedCostExpense } = useBusiness();
 
   const shipment = transitShipments.find(s => s.id === shipmentId);
 
@@ -14,7 +14,6 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
     amount: '',
     exchange_rate: 1.0,
     paid_by: 'bank',
-    bank_account_id: bankAccounts[0]?.id || '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
     cheque_bank: '',
@@ -33,7 +32,6 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
       amount: '',
       exchange_rate: 1,
       paid_by: 'bank',
-      bank_account_id: bankAccounts[0]?.id || '',
       cheque_no: '',
       cheque_date: new Date().toISOString().slice(0, 10),
       cheque_bank: '',
@@ -41,7 +39,7 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
       reference: '',
       notes: ''
     });
-  }, [isOpen, shipmentId, bankAccounts]);
+  }, [isOpen, shipmentId]);
 
   if (!isOpen || !shipment) return null;
 
@@ -207,15 +205,6 @@ export default function LandedCostModal({ isOpen, onClose, shipmentId }) {
                 />
               </div>
             </div>
-            {form.paid_by === 'bank' && (
-              <div>
-                <label>Paid from bank account *</label>
-                <select value={form.bank_account_id} onChange={(e) => setForm(prev => ({ ...prev, bank_account_id: e.target.value }))} required>
-                  <option value="">Select bank account</option>
-                  {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                </select>
-              </div>
-            )}
             {form.paid_by === 'cheque' && (
               <div className="payment-detail-grid cheque-detail-grid">
                 <div><label>Cheque number *</label><input value={form.cheque_no} onChange={(e) => setForm(prev => ({ ...prev, cheque_no: e.target.value }))} required /></div>

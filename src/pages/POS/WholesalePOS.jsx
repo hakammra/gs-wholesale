@@ -21,8 +21,7 @@ export default function WholesalePOS() {
     cancelReservation,
     customers,
     products = [],
-    stockBalances = {},
-    bankAccounts = []
+    stockBalances = {}
   } = useBusiness();
 
   const { notifySuccess, notifyError, notifyWarning } = useNotification();
@@ -72,7 +71,6 @@ export default function WholesalePOS() {
     customer_phone: '',
     advance_amount: '',
     payment_method: 'cash',
-    bank_account_id: '',
     cheque_no: '',
     cheque_date: new Date().toISOString().slice(0, 10),
     cheque_bank: '',
@@ -353,7 +351,6 @@ export default function WholesalePOS() {
       customer_phone: currentTab.customer?.phone || '',
       advance_amount: '',
       payment_method: 'cash',
-      bank_account_id: bankAccounts[0]?.id || '',
       cheque_no: '',
       cheque_date: new Date().toISOString().slice(0, 10),
       cheque_bank: '',
@@ -376,11 +373,6 @@ export default function WholesalePOS() {
 
     if (advAmt > totals.grand_total) {
       notifyWarning(`Advance payment cannot exceed the total bill amount (Rs. ${totals.grand_total.toLocaleString()}).`);
-      return;
-    }
-
-    if (advAmt > 0 && reservationForm.payment_method === 'bank' && !reservationForm.bank_account_id) {
-      notifyWarning('Select the bank account receiving the advance.');
       return;
     }
 
@@ -409,7 +401,7 @@ export default function WholesalePOS() {
           method: reservationForm.payment_method,
           amount: advAmt,
           currency: 'LKR',
-          bank_account_id: reservationForm.payment_method === 'bank' ? reservationForm.bank_account_id : null,
+          bank_account_id: null,
           cheque_details: reservationForm.payment_method === 'cheque' ? {
             cheque_no: reservationForm.cheque_no,
             cheque_date: reservationForm.cheque_date,
@@ -1036,20 +1028,6 @@ export default function WholesalePOS() {
                       </select>
                     </div>
                   </div>
-
-                  {Number(reservationForm.advance_amount) > 0 && reservationForm.payment_method === 'bank' && (
-                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed rgba(56, 189, 248, 0.25)' }}>
-                      <label style={{ fontSize: 11 }}>Receiving Bank Account *</label>
-                      <select
-                        required
-                        value={reservationForm.bank_account_id}
-                        onChange={(e) => setReservationForm(prev => ({ ...prev, bank_account_id: e.target.value }))}
-                      >
-                        <option value="">Select bank account</option>
-                        {bankAccounts.map(account => <option key={account.id} value={account.id}>{account.account_name} ({account.bank_name})</option>)}
-                      </select>
-                    </div>
-                  )}
 
                   {/* Cheque Fields if Cheque Method */}
                   {Number(reservationForm.advance_amount) > 0 && reservationForm.payment_method === 'cheque' && (
