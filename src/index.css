@@ -1900,6 +1900,10 @@ tr:hover td { background: #303030; }
 .dashboard-custom-range input { margin: 0; padding: 6px 8px; }
 .dashboard-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .dashboard-metric-grid .stat-card small, .cheque-stats-grid .stat-card small { display: block; margin-top: 7px; color: var(--muted); }
+.sales-cash-summary { display: grid; gap: 4px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 10.5px; }
+.sales-cash-summary span { display: flex; align-items: baseline; justify-content: space-between; gap: 7px; }
+.sales-cash-summary b { color: var(--text); font: 700 11px 'JetBrains Mono', Consolas, monospace; white-space: nowrap; }
+.sales-cash-summary span:last-child b { color: #ffca58; }
 .dashboard-profit-panel { min-width: 0; margin-bottom: 14px; padding: 0; overflow: hidden; }
 .dashboard-profit-panel .panel-heading { align-items: flex-start; }
 .profit-equation { display: flex; align-items: center; gap: 10px; }

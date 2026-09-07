@@ -4,6 +4,7 @@ import { formatCurrency, formatDate } from '../../lib/formatters';
 
 const OUTFLOW_TYPES = new Set(['transit_purchase_payment', 'purchase_payment', 'supplier_payment', 'supplier_advance', 'operational_expense', 'expense', 'customer_refund']);
 const PENDING_CHEQUE_STATUSES = new Set(['received', 'held', 'deposited']);
+const SALES_COLLECTION_TYPES = new Set(['sales_receipt', 'customer_payment', 'customer_settlement', 'customer_advance']);
 
 const RANGE_PRESETS = [
   ['this_month', 'This Month'], ['last_month', 'Last Month'], ['this_year', 'This Year'],
@@ -101,6 +102,9 @@ export default function Dashboard({ onNavigateTab }) {
   });
   const cashIn = realizedPayments.filter(payment => !OUTFLOW_TYPES.has(payment.payment_type)).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
   const cashOut = realizedPayments.filter(payment => OUTFLOW_TYPES.has(payment.payment_type)).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+  const salesCashReceived = realizedPayments
+    .filter(payment => SALES_COLLECTION_TYPES.has(payment.payment_type) || (payment.party_type === 'customer' && payment.sales_doc_id))
+    .reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
   const rangeTransit = transitShipments.filter(shipment => inDateRange(shipment.document_date || shipment.shipping_date || shipment.departure_date || shipment.created_at, selectedRange.start, selectedRange.end));
   const totalTransitValue = rangeTransit.reduce((sum, shipment) => sum + (Number(shipment.total_estimated_cost_lkr) || 0), 0);
   const rangePurchases = purchases.filter(document => inDateRange(document.receipt_date || document.created_at, selectedRange.start, selectedRange.end));
@@ -132,11 +136,10 @@ export default function Dashboard({ onNavigateTab }) {
       </div>
 
       <div className="dashboard-metric-grid">
-        <div className="stat-card"><p>SALES</p><strong>{formatCurrency(rangeRevenue)}</strong><small>{rangeSales.length} posted invoices · {selectedRange.label}</small></div>
+        <div className="stat-card sales-summary-card"><p>SALES</p><strong>{formatCurrency(rangeRevenue)}</strong><small>{rangeSales.length} posted invoices · {selectedRange.label}</small><div className="sales-cash-summary"><span><b>{formatCurrency(salesCashReceived)}</b> cash + bank received</span><span><b>{formatCurrency(rangeReceivables)}</b> still receivable</span></div></div>
         <div className="stat-card"><p>COST OF GOODS SOLD</p><strong style={{ color: '#ffca58' }}>{formatCurrency(rangeCostOfGoods)}</strong><small>Quantity × cost recorded at sale</small></div>
         <div className="stat-card"><p>GROSS PROFIT</p><strong style={{ color: rangeProfit >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(rangeProfit)}</strong><small>{rangeRevenue ? `${((rangeProfit / rangeRevenue) * 100).toFixed(1)}% margin · sale-time cost` : `No sales for ${selectedRange.label.toLowerCase()}`}</small></div>
         <div className="stat-card"><p>REALIZED CASH + BANK</p><strong style={{ color: cashIn - cashOut >= 0 ? '#52e37e' : '#ff8e8e' }}>{formatCurrency(cashIn - cashOut)}</strong><small>{formatCurrency(cashIn)} in · {formatCurrency(cashOut)} out</small></div>
-        <div className="stat-card"><p>OPEN RECEIVABLES</p><strong style={{ color: '#ffca58' }}>{formatCurrency(rangeReceivables)}</strong><small>Balance on invoices in this range</small></div>
         <div className="stat-card"><p>PURCHASE VALUE</p><strong style={{ color: '#ff8e8e' }}>{formatCurrency(purchaseValue)}</strong><small>{rangePurchases.length} purchase documents</small></div>
         <div className="stat-card"><p>TRANSIT ORDERS</p><strong>{formatCurrency(totalTransitValue)}</strong><small>{rangeTransit.length} transit documents created</small></div>
         <div className="stat-card"><p>PENDING CHEQUES</p><strong>{pendingCheques.length}</strong><small>Within the selected date range</small></div>
