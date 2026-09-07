@@ -4,7 +4,6 @@ export const NAV_ITEMS = [
   { id: 'sales-documents', label: 'Sales Documents', icon: 'FileText' },
   { id: 'customers', label: 'Customers', icon: 'Users' },
   { id: 'suppliers', label: 'Suppliers', icon: 'Truck' },
-  { id: 'supplier-orders', label: 'Supplier Orders', icon: 'ClipboardList' },
   { id: 'stock-in-transit', label: 'Stock in Transit', icon: 'Ship' },
   { id: 'purchases', label: 'Purchases / Receiving', icon: 'PackageCheck' },
   { id: 'products', label: 'Products', icon: 'Boxes' },

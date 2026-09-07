@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, formatDate } from '../../lib/formatters';
@@ -24,6 +24,14 @@ export default function CustomerList({ onNavigateTab }) {
   const [filterType, setFilterType] = useState('all'); // 'all' | 'has_balance' | 'good_standing'
   const [selectedCustomerId, setSelectedCustomerId] = useState(customers[0]?.id || null);
   const [activeTab, setActiveTab] = useState('invoices'); // 'invoices' | 'payments' | 'cheques' | 'aging'
+  const customerProfileRef = useRef(null);
+
+  const handleSelectCustomer = (customerId) => {
+    setSelectedCustomerId(customerId);
+    if (typeof window !== 'undefined' && window.innerWidth <= 768) {
+      window.setTimeout(() => customerProfileRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+    }
+  };
 
   // Modals
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
@@ -340,9 +348,9 @@ export default function CustomerList({ onNavigateTab }) {
   };
 
   return (
-    <div style={{ height: 'calc(100vh - 75px)', display: 'flex', flexDirection: 'column', padding: '10px 14px', gap: 10, overflow: 'hidden' }}>
+    <div className="customers-workspace" style={{ height: 'calc(100vh - 75px)', display: 'flex', flexDirection: 'column', padding: '10px 14px', gap: 10, overflow: 'hidden' }}>
       {/* Top Stat Summary Bar */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, flexShrink: 0 }}>
+      <div className="customer-summary-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, flexShrink: 0 }}>
         <div className="panel-card" style={{ padding: '8px 12px', borderLeft: '4px solid #0284c7' }}>
           <small style={{ color: 'var(--muted)', fontWeight: 600, fontSize: 10 }}>TOTAL CUSTOMERS</small>
           <div className="mono font-semibold" style={{ fontSize: 18, marginTop: 2, color: '#0284c7' }}>
@@ -373,10 +381,10 @@ export default function CustomerList({ onNavigateTab }) {
       </div>
 
       {/* Main Two-Column Layout: Left Directory | Right Customer Profile & Ledger */}
-      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      <div className="customer-master-detail" style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         
         {/* Left Column: Customer Directory */}
-        <div className="panel-card" style={{ padding: 0, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+        <div className="panel-card customer-directory-panel" style={{ padding: 0, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
           <div style={{ padding: 10, borderBottom: '1px solid var(--line)', background: '#242424', flexShrink: 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <strong style={{ fontSize: 13 }}>Customers Directory</strong>
@@ -434,7 +442,7 @@ export default function CustomerList({ onNavigateTab }) {
               return (
                 <div
                   key={c.id}
-                  onClick={() => setSelectedCustomerId(c.id)}
+                  onClick={() => handleSelectCustomer(c.id)}
                   style={{
                     padding: '9px 12px',
                     borderBottom: '1px solid var(--line-soft)',
@@ -476,13 +484,13 @@ export default function CustomerList({ onNavigateTab }) {
         </div>
 
         {/* Right Column: Customer Full Profile & Transaction History */}
-        <div style={{ height: '100%', minHeight: 0, overflow: 'hidden' }}>
+        <div ref={customerProfileRef} className="customer-profile-pane" style={{ height: '100%', minHeight: 0, overflow: 'hidden' }}>
           {selectedCust ? (
-            <div className="panel-card" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+            <div className="panel-card customer-profile-card" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
               {/* Profile Header */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, borderBottom: '1px solid var(--line)', paddingBottom: 16, marginBottom: 16 }}>
+              <div className="customer-profile-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, borderBottom: '1px solid var(--line)', paddingBottom: 16, marginBottom: 16 }}>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div className="customer-profile-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <h2 style={{ margin: 0, fontSize: 22, color: '#fff' }}>{selectedCust.business_name}</h2>
                     <span className="mono font-semibold" style={{ color: 'var(--primary)', fontSize: 13, background: 'rgba(2, 132, 199, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
                       {selectedCust.customer_code}
@@ -515,7 +523,7 @@ export default function CustomerList({ onNavigateTab }) {
                   )}
                 </div>
 
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <div className="customer-profile-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button
                     type="button"
                     onClick={handleOpenSettlementModal}
@@ -553,7 +561,7 @@ export default function CustomerList({ onNavigateTab }) {
               </div>
 
               {/* Financial Metrics Cards */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 18 }}>
+              <div className="customer-financial-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 18 }}>
                 <div style={{ background: '#242424', padding: 12, borderRadius: 6, border: '1px solid var(--line)' }}>
                   <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>Current Receivable</span>
                   <div className="mono font-semibold" style={{ fontSize: 20, marginTop: 4, color: outstandingDue > 0 ? '#ff8e8e' : '#52e37e' }}>
@@ -587,7 +595,7 @@ export default function CustomerList({ onNavigateTab }) {
               </div>
 
               {/* Tab Navigation */}
-              <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12, flexShrink: 0 }}>
+              <div className="customer-profile-tabs" style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 12, flexShrink: 0 }}>
                 <button
                   type="button"
                   onClick={() => setActiveTab('invoices')}
@@ -623,7 +631,7 @@ export default function CustomerList({ onNavigateTab }) {
               </div>
 
               {/* Scrollable Tab Body */}
-              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+              <div className="customer-profile-tab-body" style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
                 {/* Tab 1: Sales Documents & Invoices */}
               {activeTab === 'invoices' && (
                 <div className="large-table" style={{ background: '#1c1c1c', border: '1px solid var(--line)', borderRadius: 4 }}>

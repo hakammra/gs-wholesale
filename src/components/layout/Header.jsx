@@ -5,7 +5,6 @@ import { useBusiness } from '../../context/BusinessContext';
 const TAB_INFO = {
   'pos': { title: 'Wholesale POS & Fast Invoicing', desc: 'Direct wholesale billing, tiered pricing & multi-tender settlement' },
   'dashboard': { title: 'Wholesale Executive Dashboard', desc: 'Real-time sales, imports in transit, receivables & liquidity' },
-  'supplier-orders': { title: 'Import Purchase Orders', desc: 'Factory purchase orders & supplier dispatch tracking' },
   'stock-in-transit': { title: 'Stock in Transit & Landed Costs', desc: 'Sea / Air shipments, Bill of Lading & customs cost allocation' },
   'purchases': { title: 'Goods Received Notes (GRN)', desc: 'Arrival inspection, sellable stock entry & weighted average cost' },
   'suppliers': { title: 'Suppliers & Advances', desc: 'Supplier ledgers, lead times & advance deposit management' },
@@ -38,7 +37,7 @@ export default function Header({ currentTab, onToggleMobileNav }) {
 
   return (
     <header className="topbar">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+      <div className="topbar-title">
         {/* Mobile Hamburger (hidden on desktop, only visible on mobile <= 768px) */}
         <button
           type="button"
@@ -59,9 +58,9 @@ export default function Header({ currentTab, onToggleMobileNav }) {
       </div>
 
       <div className="topbar-right">
-        <button onClick={lockStaff} className="secondary-button small-button staff-session-button" title="Lock and switch staff account">
-          <strong>{activeStaff?.full_name || 'Staff'}</strong>
-          <small>{activeStaff?.role === 'admin' ? 'Admin' : 'View only'} · Switch</small>
+        <button onClick={lockStaff} className="secondary-button small-button staff-session-button" title="Lock and switch staff account" aria-label="Lock and switch staff account">
+          <span className="header-action-icon" aria-hidden="true">👤</span>
+          <span className="header-action-copy"><strong>{activeStaff?.full_name || 'Staff'}</strong><small>{activeStaff?.role === 'admin' ? 'Admin' : 'View only'} · Switch</small></span>
         </button>
         <div
           className={`sync-health sync-health-${syncState?.status || 'connecting'}`}
@@ -81,13 +80,15 @@ export default function Header({ currentTab, onToggleMobileNav }) {
           disabled={dataLoading}
           className="secondary-button small-button sync-refresh-button"
           title={syncState?.error || 'Fetch the latest updates from Supabase'}
+          aria-label={dataLoading ? 'Refreshing cloud data' : 'Refresh cloud data'}
         >
           <span className={dataLoading ? 'sync-spin' : ''}>↻</span>
-          <span>{dataLoading ? 'Refreshing' : 'Refresh'}</span>
+          <span className="header-action-label">{dataLoading ? 'Refreshing' : 'Refresh'}</span>
         </button>
 
-        <button onClick={logout} className="secondary-button small-button logout-button" style={{ fontWeight: 700 }}>
-          <span>Sign out</span>
+        <button onClick={logout} className="secondary-button small-button logout-button" style={{ fontWeight: 700 }} title={`Sign out ${user?.email || ''}`} aria-label="Sign out">
+          <span className="logout-icon" aria-hidden="true">⇥</span>
+          <span className="header-action-label">Sign out</span>
           <small>{user?.email?.split('@')[0] || 'Owner'}</small>
         </button>
       </div>

@@ -157,7 +157,7 @@ export default function Dashboard({ onNavigateTab }) {
       </div>
 
       <div className="dashboard-quick-actions">
-        <button onClick={() => onNavigateTab('supplier-orders')}>⌁ New Supplier Order</button><button onClick={() => onNavigateTab('stock-in-transit')}>🚢 Track Transit</button><button onClick={() => onNavigateTab('purchase-documents')}>📄 Receive Purchase</button><button onClick={() => onNavigateTab('cheques')}>💳 Manage Cheques</button><button onClick={() => onNavigateTab('cashflow-bank')}>💵 Review Cash Flow</button>
+        <button onClick={() => onNavigateTab('reporting')}>▥ Open Reports</button><button onClick={() => onNavigateTab('stock-in-transit')}>🚢 Track Transit</button><button onClick={() => onNavigateTab('purchase-documents')}>📄 Receive Purchase</button><button onClick={() => onNavigateTab('cheques')}>💳 Manage Cheques</button><button onClick={() => onNavigateTab('cashflow-bank')}>💵 Review Cash Flow</button>
       </div>
 
       <div className="dashboard-two-column">

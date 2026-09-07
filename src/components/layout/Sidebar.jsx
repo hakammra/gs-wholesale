@@ -12,7 +12,6 @@ const NAV_GROUPS = [
   {
     group: 'Purchases & Stock',
     items: [
-      { key: 'supplier-orders', label: 'Supplier Orders', icon: '⌁' },
       { key: 'stock-in-transit', label: 'Stock in Transit', icon: '🚢', showTransitBadge: true },
       { key: 'purchase-documents', label: 'Purchase Documents', icon: '📄', showPurchaseBadge: true },
       { key: 'suppliers', label: 'Suppliers & Advances', icon: '♟' },
@@ -32,7 +31,7 @@ const NAV_GROUPS = [
     items: [
       { key: 'cheques', label: 'Cheque Register', icon: '💳', showChequeBadge: true },
       { key: 'cashflow-bank', label: 'Cash Flow', icon: '💵' },
-      { key: 'reporting', label: 'Reporting & P&L', icon: '▥' },
+      { key: 'reporting', label: 'Reports & Exports', icon: '▥' },
     ]
   }
 ];
