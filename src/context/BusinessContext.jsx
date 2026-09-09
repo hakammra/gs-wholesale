@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabaseClient';
 import { useNotification } from './NotificationContext';
 import { useAuth } from './AuthContext';
 import { firstCell } from '../lib/exportUtils';
+import { getTransitGroupLineId, isTransitGroupLine } from '../lib/transitLineUtils';
 
 const BusinessContext = createContext();
 
@@ -3812,8 +3813,8 @@ export function BusinessProvider({ children }) {
       const pools = new Map();
       const allocatedItems = (docData.items || []).map(item => {
         const productId = item.product?.id || item.product_id || item.id;
-        const transitGroupId = item.product?.transit_group_id || item.transit_group_id;
-        const isTransitGroup = Boolean(item.product?.is_transit_group || transitGroupId);
+        const isTransitGroup = isTransitGroupLine(item);
+        const transitGroupId = getTransitGroupLineId(item);
         if (!pools.has(productId)) {
           const stock = stockBalances[productId] || {};
           const groupIncoming = isTransitGroup ? transitShipments
@@ -3964,7 +3965,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (docData.items || []).forEach(it => {
-          if (it.product?.is_transit_group || it.transit_group_id) return;
+          if (isTransitGroupLine(it)) return;
           const pId = it.product?.id || it.product_id;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
           const onHandQty = Number(it.reserved_on_hand_qty) || 0;
@@ -4095,8 +4096,8 @@ export function BusinessProvider({ children }) {
 
     const itemsToInsert = (docData.items || []).map(item => {
       const productId = item.product?.id || item.product_id;
-      const transitGroupId = item.product?.transit_group_id || item.transit_group_id || null;
-      const isTransitGroup = Boolean(item.product?.is_transit_group || transitGroupId);
+      const isTransitGroup = isTransitGroupLine(item);
+      const transitGroupId = getTransitGroupLineId(item);
       const unitPrice = item.is_warranty_replacement ? 0 : (Number(item.unit_price) || 0);
       const qty = Number(item.qty) || 1;
       const lineDiscount = item.is_warranty_replacement ? 0 : (Number(item.discount_amount) || 0);
@@ -4132,7 +4133,7 @@ export function BusinessProvider({ children }) {
     if (docData.doc_type === 'sales_invoice' || isReservation) {
       const stockWrites = (docData.items || []).map(item => {
         const productId = item.product?.id || item.product_id;
-        if (item.product?.is_transit_group || item.transit_group_id) return null;
+        if (isTransitGroupLine(item)) return null;
         if (!isValidUUID(productId)) return null;
         const qty = Number(item.qty) || 1;
         if (isReservation) {
@@ -4263,7 +4264,7 @@ export function BusinessProvider({ children }) {
     if (['cancelled', 'converted_to_sale', 'returned'].includes(existingDoc.status)) {
       throw new Error('Cancelled, returned, or converted documents cannot be edited.');
     }
-    if ((existingDoc.items || []).some(item => item.transit_group_id)) {
+    if ((existingDoc.items || []).some(isTransitGroupLine)) {
       throw new Error('An unconfirmed-group reservation cannot be edited until arrival classifies it into actual products. Cancel and recreate it if the customer changes the reservation.');
     }
 
@@ -4629,7 +4630,7 @@ export function BusinessProvider({ children }) {
     }).eq('id', docId));
 
     const stockWrites = (doc.items || []).map(item => {
-      if (item.product?.is_transit_group || item.transit_group_id) return null;
+      if (isTransitGroupLine(item)) return null;
       const productId = item.product?.id || item.product_id;
       const qty = Number(item.qty) || 0;
       const onHandReserved = item.reserved_on_hand_qty == null ? qty : Number(item.reserved_on_hand_qty) || 0;
@@ -4663,7 +4664,7 @@ export function BusinessProvider({ children }) {
     setStockBalances(prev => {
       const updated = { ...prev };
       (doc.items || []).forEach(it => {
-        if (it.product?.is_transit_group || it.transit_group_id) return;
+        if (isTransitGroupLine(it)) return;
         const pId = it.product?.id || it.product_id;
         const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
         const qty = Number(it.qty) || 1;
@@ -4758,7 +4759,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (doc.items || []).forEach(it => {
-          if (it.product?.is_transit_group || it.transit_group_id) return;
+          if (isTransitGroupLine(it)) return;
           const pId = it.product_id;
           const qty = Number(it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
@@ -4774,7 +4775,7 @@ export function BusinessProvider({ children }) {
       setStockBalances(prev => {
         const updated = { ...prev };
         (doc.items || []).forEach(it => {
-          if (it.product?.is_transit_group || it.transit_group_id) return;
+          if (isTransitGroupLine(it)) return;
           const pId = it.product_id;
           const qty = Number(it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };

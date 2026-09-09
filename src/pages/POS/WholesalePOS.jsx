@@ -4,6 +4,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { formatCurrency, calculateWholesaleItemPrice, calculateDocumentTotals, formatDate } from '../../lib/formatters';
 import { createInvoicePDFFile, generateInvoicePDF, printInvoiceDocument } from '../../lib/pdfGenerator';
 import { buildWhatsAppInvoiceMessage, buildWhatsAppReservationMessage, shareWhatsAppContent } from '../../lib/exportUtils';
+import { getTransitGroupLineId, isTransitGroupLine } from '../../lib/transitLineUtils';
 import CustomerHeader from '../../components/pos/CustomerHeader';
 import ProductSearchGrid from '../../components/pos/ProductSearchGrid';
 import PosCart from '../../components/pos/PosCart';
@@ -303,7 +304,7 @@ export default function WholesalePOS() {
       const productId = item.product?.id || item.product_id || item.id;
       if (!pools.has(productId)) {
         const stock = stockBalances[productId] || {};
-        const isTransitGroup = Boolean(item.product?.is_transit_group || item.transit_group_id);
+        const isTransitGroup = isTransitGroupLine(item);
         pools.set(productId, {
           onHand: isTransitGroup ? 0 : Math.max(0, Number(stock.qty_available) || 0),
           incoming: isTransitGroup
@@ -324,7 +325,7 @@ export default function WholesalePOS() {
       pool.incoming = Math.max(0, pool.incoming - reservedInTransit);
       return {
         ...item,
-        transit_group_id: item.product?.transit_group_id || item.transit_group_id || null,
+        transit_group_id: getTransitGroupLineId(item),
         reserved_on_hand_qty: reservedOnHand,
         reserved_in_transit_qty: reservedInTransit
       };
