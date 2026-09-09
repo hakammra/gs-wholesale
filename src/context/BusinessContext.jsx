@@ -98,7 +98,7 @@ const safeGet = (key, fallback) => {
 
 export function BusinessProvider({ children }) {
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useNotification();
-  const { isReadOnly } = useAuth();
+  const { user, activeStaff, isReadOnly } = useAuth();
   const [dataLoading, setDataLoading] = useState(false);
   const [syncState, setSyncState] = useState({
     status: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connecting',
@@ -531,6 +531,10 @@ export function BusinessProvider({ children }) {
   // Realtime is the primary cross-device path; focus/visibility and polling are
   // fallbacks for suspended mobile tabs and temporarily disconnected sockets.
   useEffect(() => {
+    // Business-table RLS requires both the email session and an unlocked staff
+    // PIN. Waiting here also avoids noisy denied requests on the PIN screen.
+    if (!user || !activeStaff) return undefined;
+
     fetchSupabaseData();
 
     const scheduleRefresh = () => {
@@ -572,7 +576,7 @@ export function BusinessProvider({ children }) {
       clearInterval(pollInterval);
       supabase.removeChannel(realtimeChannel);
     };
-  }, [fetchSupabaseData]);
+  }, [fetchSupabaseData, user?.id, activeStaff?.id]);
 
   // EXCEL PRODUCT IMPORT ENGINE (Direct Supabase Upsert)
   const importProductsFromExcel = async (rows) => {
