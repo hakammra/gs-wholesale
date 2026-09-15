@@ -533,8 +533,8 @@ export default function SalesDocumentsList() {
                 <div className="sales-edit-header-grid">
                   <div>
                     <label>Customer</label>
-                    <select value={editForm.customer_id} onChange={(event) => setEditForm(current => ({ ...current, customer_id: event.target.value }))}>
-                      <option value="">Cash / Counter Customer</option>
+                    <select required value={editForm.customer_id} onChange={(event) => setEditForm(current => ({ ...current, customer_id: event.target.value }))}>
+                      <option value="">Select wholesale customer…</option>
                       {customers.map(customer => <option key={customer.id} value={customer.id}>{customer.customer_code} - {customer.business_name}</option>)}
                     </select>
                   </div>

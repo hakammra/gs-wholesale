@@ -42,14 +42,18 @@ export default function CustomerHeader({
         </div>
 
         {/* Customer Selector */}
-        <div className="pos-customer-field pos-customer-select-field" style={{ minWidth: 260 }}>
-          <label style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 2 }}>WHOLESALE CUSTOMER</label>
+        <div className={`pos-customer-field pos-customer-select-field ${liveCustomer ? '' : 'customer-required'}`} style={{ minWidth: 260 }}>
+          <label style={{ fontSize: 11, color: liveCustomer ? 'var(--muted)' : '#ffca58', display: 'block', marginBottom: 2 }}>
+            WHOLESALE CUSTOMER {!liveCustomer && '• REQUIRED'}
+          </label>
           <select
             value={liveCustomer?.id || ''}
             onChange={handleCustomerChange}
+            required
+            aria-required="true"
             style={{ fontWeight: 600 }}
           >
-            <option value="">-- Walk-in / Cash Wholesale Customer --</option>
+            <option value="">Select wholesale customer…</option>
             {customers.map(c => (
               <option key={c.id} value={c.id}>
                 {c.customer_code} - {c.business_name} ({c.price_tier || 'Standard'})

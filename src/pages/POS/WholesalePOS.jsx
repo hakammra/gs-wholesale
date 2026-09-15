@@ -88,6 +88,12 @@ export default function WholesalePOS() {
 
   const totals = calculateDocumentTotals(currentTab.items, effectiveCartDiscount, 0);
 
+  const requireWholesaleCustomer = () => {
+    if (currentTab.customer?.id) return true;
+    notifyWarning('Select a wholesale customer before continuing.');
+    return false;
+  };
+
   const handleShareCompletedInvoice = async () => {
     if (!completedSaleDoc || isSharingInvoice) return;
     const phone = completedSaleDoc.customer?.whatsapp || completedSaleDoc.customer?.phone || completedSaleDoc.customer_phone;
@@ -155,6 +161,7 @@ export default function WholesalePOS() {
       notifyWarning('Add products to the bill first');
       return;
     }
+    if (!requireWholesaleCustomer()) return;
     handleCompleteSale({
       payment_lines: [{ method: 'cash', amount: totals.grand_total, currency: 'LKR' }],
       cheque_details: null,
@@ -167,10 +174,7 @@ export default function WholesalePOS() {
       notifyWarning('Add products to the bill first');
       return;
     }
-    if (!currentTab.customer) {
-      notifyWarning('Please select a Customer for Credit / Pay Later sale');
-      return;
-    }
+    if (!requireWholesaleCustomer()) return;
     handleCompleteSale({
       payment_lines: [{ method: 'credit', amount: totals.grand_total, currency: 'LKR' }],
       cheque_details: null,
@@ -183,10 +187,7 @@ export default function WholesalePOS() {
       notifyWarning('Add products to the bill first');
       return;
     }
-    if (!currentTab.customer) {
-      notifyWarning('Please select a Customer for Cash on Delivery (COD) sale');
-      return;
-    }
+    if (!requireWholesaleCustomer()) return;
     handleCompleteSale({
       payment_lines: [{ method: 'cod', amount: totals.grand_total, currency: 'LKR' }],
       cheque_details: null,
@@ -339,6 +340,8 @@ export default function WholesalePOS() {
       return;
     }
 
+    if (!requireWholesaleCustomer()) return;
+
     const onHandPlan = buildReservationPlan('on_hand');
     const incomingPlan = buildReservationPlan('incoming');
     if (!onHandPlan.valid && !incomingPlan.valid) {
@@ -365,6 +368,7 @@ export default function WholesalePOS() {
   // Confirm and Save Reservation with Optional Advance
   const handleConfirmReservation = async (e) => {
     e.preventDefault();
+    if (!requireWholesaleCustomer()) return;
     const advAmt = Number(reservationForm.advance_amount) || 0;
 
     if (advAmt < 0) {
@@ -473,6 +477,7 @@ export default function WholesalePOS() {
       notifyWarning('Cannot checkout an empty bill');
       return;
     }
+    if (!requireWholesaleCustomer()) return;
     if (!currentTab.source_reserved_doc_id && currentTab.items.some(item => item.product?.pos_transit_only || item.product?.is_transit_group)) {
       notifyWarning('Items selected from the In Transit tab cannot be invoiced yet. Use Reserve Stock, then convert the reservation after arrival.');
       return;
@@ -508,14 +513,17 @@ export default function WholesalePOS() {
 
   const handleCompleteSale = async (paymentData) => {
     try {
+      if (!currentTab.customer?.id) {
+        throw new Error('Select a wholesale customer before completing this sale.');
+      }
       if (!currentTab.source_reserved_doc_id && currentTab.items.some(item => item.product?.pos_transit_only || item.product?.is_transit_group)) {
         throw new Error('In-transit items must be reserved and received before invoicing.');
       }
       const docPayload = {
         doc_type: 'sales_invoice',
         source_reserved_doc_id: currentTab.source_reserved_doc_id || null,
-        customer_id: currentTab.customer?.id || null,
-        customer_name: currentTab.customer?.business_name || 'Counter Sale / Cash',
+        customer_id: currentTab.customer.id,
+        customer_name: currentTab.customer.business_name,
         customer_phone: currentTab.customer?.phone || null,
         items: currentTab.items,
         discount_amount: effectiveCartDiscount,
@@ -910,7 +918,7 @@ export default function WholesalePOS() {
             <form onSubmit={handleConfirmReservation}>
               <div className="modal-body" style={{ gap: 12 }}>
                 {/* Order Summary Header */}
-                <div style={{ background: '#1c1c1c', border: '1px solid var(--line)', borderRadius: 6, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="reservation-order-summary" style={{ background: '#1c1c1c', border: '1px solid var(--line)', borderRadius: 6, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <span style={{ fontSize: 11, color: 'var(--muted)', display: 'block' }}>TOTAL ORDER VALUE</span>
                     <span className="mono font-semibold" style={{ fontSize: 18, color: '#fff' }}>
@@ -949,7 +957,7 @@ export default function WholesalePOS() {
 
                   <div style={{ marginTop: 9, display: 'grid', gap: 4 }}>
                     {buildReservationPlan(reservationForm.reservation_source).items.map((item, index) => (
-                      <div key={`${item.product?.id || item.product_id}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.5, color: 'var(--muted)' }}>
+                      <div className="reservation-allocation-row" key={`${item.product?.id || item.product_id}-${index}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.5, color: 'var(--muted)' }}>
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.product?.name || item.product_name}</span>
                         <span className="mono" style={{ flexShrink: 0 }}>
                           Current: {item.reserved_on_hand_qty} · Transit: {item.reserved_in_transit_qty}
@@ -966,14 +974,14 @@ export default function WholesalePOS() {
                 </div>
 
                 {/* Customer Details */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div className="pos-form-two-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div>
                     <label style={{ fontSize: 12 }}>Customer / Business Name</label>
                     <input
                       type="text"
                       placeholder="e.g. Apex Tech Solutions"
                       value={reservationForm.customer_name}
-                      onChange={(e) => setReservationForm(prev => ({ ...prev, customer_name: e.target.value }))}
+                      readOnly
                       style={{ fontSize: 13 }}
                     />
                   </div>
@@ -983,7 +991,7 @@ export default function WholesalePOS() {
                       type="text"
                       placeholder="e.g. 0771234567"
                       value={reservationForm.customer_phone}
-                      onChange={(e) => setReservationForm(prev => ({ ...prev, customer_phone: e.target.value }))}
+                      readOnly
                       style={{ fontSize: 13 }}
                     />
                   </div>
@@ -991,7 +999,7 @@ export default function WholesalePOS() {
 
                 {/* Advance Deposit Section */}
                 <div style={{ background: 'rgba(255, 202, 88, 0.06)', border: '1px solid rgba(255, 202, 88, 0.35)', borderRadius: 6, padding: '12px 14px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <div className="reservation-advance-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <strong style={{ fontSize: 13, color: '#ffca58', display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span>💵</span> Advance Payment Deposit
                     </strong>
@@ -1000,7 +1008,7 @@ export default function WholesalePOS() {
                     </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div className="pos-form-two-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div>
                       <label style={{ fontSize: 11, color: 'var(--muted)' }}>Advance Amount (Rs)</label>
                       <input
@@ -1032,7 +1040,7 @@ export default function WholesalePOS() {
 
                   {/* Cheque Fields if Cheque Method */}
                   {Number(reservationForm.advance_amount) > 0 && reservationForm.payment_method === 'cheque' && (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10, paddingTop: 10, borderTop: '1px dashed rgba(255, 202, 88, 0.2)' }}>
+                    <div className="pos-form-two-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10, paddingTop: 10, borderTop: '1px dashed rgba(255, 202, 88, 0.2)' }}>
                       <div>
                         <label style={{ fontSize: 11 }}>Cheque Number *</label>
                         <input
@@ -1089,7 +1097,7 @@ export default function WholesalePOS() {
                 </div>
               </div>
 
-              <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div className="modal-footer reservation-modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <button type="button" onClick={() => setIsCreateReservationOpen(false)} className="secondary-button">
                   Cancel
                 </button>
@@ -1136,7 +1144,7 @@ export default function WholesalePOS() {
                     onChange={(e) => setNewCustomerForm(prev => ({ ...prev, business_name: e.target.value }))}
                   />
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div className="pos-form-two-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <div>
                     <label>Contact Person</label>
                     <input
@@ -1155,7 +1163,7 @@ export default function WholesalePOS() {
                     />
                   </div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+                <div className="pos-form-two-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
                   <div>
                     <label>Assigned Price Tier</label>
                     <select
@@ -1293,12 +1301,12 @@ export default function WholesalePOS() {
               <div style={{ background: '#1e1e1e', padding: 12, borderRadius: 6, border: '1px solid var(--line)', marginBottom: 14 }}>
                 <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase' }}>Customer</span>
                 <div style={{ fontSize: 15, fontWeight: 700, marginTop: 2 }}>
-                  {completedSaleDoc.customer_name || 'Walk-in / Cash Customer'}
+                  {completedSaleDoc.customer_name || 'Wholesale customer'}
                 </div>
               </div>
 
               {/* Financial Breakdown Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+              <div className="pos-completed-financial-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
                 <div style={{ background: '#222', padding: 12, borderRadius: 6, border: '1px solid var(--line)' }}>
                   <span style={{ fontSize: 11, color: 'var(--muted)' }}>BILL TOTAL</span>
                   <div className="mono font-semibold" style={{ fontSize: 18, color: '#fff', marginTop: 2 }}>

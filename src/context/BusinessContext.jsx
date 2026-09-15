@@ -3805,6 +3805,9 @@ export function BusinessProvider({ children }) {
   const postSalesDocument = async (docData) => {
     const isReservation = docData.doc_type === 'reserved_order' || docData.doc_type === 'sales_order';
     const isQuotation = docData.doc_type === 'quotation';
+    if (!isValidUUID(docData.customer_id)) {
+      throw new Error('Select a wholesale customer before saving this document.');
+    }
     const prefix = isQuotation ? 'QT' : isReservation ? 'RES' : 'INV';
     const docNo = `${prefix}-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -4386,8 +4389,8 @@ export function BusinessProvider({ children }) {
 
     const balanceDue = Math.max(0, grandTotal - paidAmount);
     const nextCustomerId = isValidUUID(updatedData.customer_id) ? updatedData.customer_id : null;
-    if (!isQuotation && balanceDue > 0.01 && !nextCustomerId) {
-      throw new Error('Select a customer when the edited document has an outstanding balance.');
+    if (!nextCustomerId) {
+      throw new Error('Select a wholesale customer before saving this document.');
     }
     const nextCustomer = customers.find(customer => customer.id === nextCustomerId);
 

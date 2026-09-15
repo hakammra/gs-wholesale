@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency, calculateWholesaleItemPrice } from '../../lib/formatters';
 
+const TRANSIT_GROUPS_FOLDER_ID = '__transit_groups__';
+const UNCATEGORIZED_FOLDER_ID = '__uncategorized__';
+
 export default function ProductSearchGrid({ onAddToCart, customer }) {
   const { products = [], categories = [], transitGroups = [], transitShipments = [], salesDocuments = [], stockBalances = {}, getCategoryPath } = useBusiness();
   const [searchTerm, setSearchTerm] = useState('');
@@ -38,8 +41,12 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
     return ids;
   };
 
-  // Direct child folders at current level
+  const rootCategories = useMemo(() => categories.filter(category => !category.parent_id), [categories]);
+
+  // Direct child folders at the current level. Products are opened like a file browser:
+  // root folders first, then the immediate folders/products inside the selected folder.
   const currentLevelFolders = useMemo(() => {
+    if (currentFolderId === TRANSIT_GROUPS_FOLDER_ID || currentFolderId === UNCATEGORIZED_FOLDER_ID) return [];
     return categories
       .filter(c => (currentFolderId ? c.parent_id === currentFolderId : !c.parent_id))
       .map(c => {
@@ -56,6 +63,8 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
 
   // Breadcrumb Trail calculation
   const breadcrumbs = useMemo(() => {
+    if (currentFolderId === TRANSIT_GROUPS_FOLDER_ID) return [{ id: TRANSIT_GROUPS_FOLDER_ID, name: 'Unconfirmed Transit Groups' }];
+    if (currentFolderId === UNCATEGORIZED_FOLDER_ID) return [{ id: UNCATEGORIZED_FOLDER_ID, name: 'Uncategorized Products' }];
     if (!currentFolderId) return [];
     const trail = [];
     let curId = currentFolderId;
@@ -74,18 +83,18 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
   const visibleProducts = useMemo(() => {
     return products.filter(p => {
       const stock = stockBalances[p.id] || {};
-      const onHandAvailable = Math.max(0, Number(stock.qty_available) || 0);
       const incomingAvailable = Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0));
-      if (stockView === 'on_hand' && onHandAvailable <= 0) return false;
       if (stockView === 'incoming' && incomingAvailable <= 0) return false;
 
-      // If folder selected and not searching globally, filter by folder subtree
-      if (currentFolderId && !searchTerm) {
-        const subtreeIds = getAllDescendantCatIds(currentFolderId);
-        if (!subtreeIds.includes(p.category_id)) return false;
+      // Search is global. Without a search, show only direct products in the open folder.
+      if (!searchTerm.trim()) {
+        if (currentFolderId === TRANSIT_GROUPS_FOLDER_ID) return false;
+        if (currentFolderId === UNCATEGORIZED_FOLDER_ID) return !p.category_id;
+        if (!currentFolderId) return rootCategories.length === 0 && !p.category_id;
+        if (p.category_id !== currentFolderId) return false;
       }
 
-      if (!searchTerm) return true;
+      if (!searchTerm.trim()) return true;
       const term = searchTerm.toLowerCase();
       return (
         p.name?.toLowerCase().includes(term) ||
@@ -94,9 +103,9 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
         p.model?.toLowerCase().includes(term)
       );
     });
-  }, [products, currentFolderId, searchTerm, categories, stockBalances, stockView]);
+  }, [products, currentFolderId, searchTerm, rootCategories, stockBalances, stockView]);
 
-  const visibleIncomingGroups = useMemo(() => stockView === 'incoming' ? transitGroups.map(group => {
+  const incomingGroupRecords = useMemo(() => transitGroups.map(group => {
     const incoming = transitShipments
       .filter(shipment => shipment.status === 'in_transit')
       .flatMap(shipment => shipment.items || [])
@@ -120,9 +129,21 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
       qty_in_transit_reserved: reserved,
       incoming_available: Math.max(0, incoming - reserved)
     };
-  }).filter(group => group.incoming_available > 0 && (
-    !searchTerm || group.name.toLowerCase().includes(searchTerm.toLowerCase())
-  )) : [], [transitGroups, transitShipments, salesDocuments, searchTerm, stockView]);
+  }).filter(group => group.incoming_available > 0), [transitGroups, transitShipments, salesDocuments]);
+
+  const visibleIncomingGroups = useMemo(() => stockView === 'incoming' ? incomingGroupRecords.filter(group => (
+    searchTerm.trim()
+      ? group.name.toLowerCase().includes(searchTerm.toLowerCase())
+      : currentFolderId === TRANSIT_GROUPS_FOLDER_ID
+  )) : [], [incomingGroupRecords, searchTerm, stockView, currentFolderId]);
+
+  const uncategorizedCount = products.filter(product => !product.category_id).length;
+  const availableTransitGroupCount = stockView === 'incoming' ? incomingGroupRecords.length : 0;
+
+  const openFolder = (folderId) => {
+    setSearchTerm('');
+    setCurrentFolderId(folderId);
+  };
 
   return (
     <div className="product-search-panel" style={{ padding: 10 }}>
@@ -144,7 +165,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
         <button
           type="button"
           className={`secondary-button ${stockView === 'on_hand' ? 'active' : ''}`}
-          onClick={() => setStockView('on_hand')}
+          onClick={() => { setStockView('on_hand'); setCurrentFolderId(null); }}
           style={{ flex: 1, fontWeight: 800, borderColor: stockView === 'on_hand' ? '#52e37e' : undefined, color: stockView === 'on_hand' ? '#52e37e' : undefined }}
         >
           In Stock
@@ -152,39 +173,11 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
         <button
           type="button"
           className={`secondary-button ${stockView === 'incoming' ? 'active' : ''}`}
-          onClick={() => setStockView('incoming')}
+          onClick={() => { setStockView('incoming'); setCurrentFolderId(null); }}
           style={{ flex: 1, fontWeight: 800, borderColor: stockView === 'incoming' ? '#ffca58' : undefined, color: stockView === 'incoming' ? '#ffca58' : undefined }}
         >
           In Transit · Reserve Only
         </button>
-      </div>
-
-      {/* Category Folders Filter Pills (Fully displayed without scrollbar) */}
-      <div className="category-filter-bar" style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        <button
-          type="button"
-          className={`cat-chip ${currentFolderId === null && !searchTerm ? 'active' : ''}`}
-          onClick={() => { setSearchTerm(''); setCurrentFolderId(null); }}
-          style={{ fontSize: 11.5, padding: '4px 10px', whiteSpace: 'normal', wordBreak: 'break-word', height: 'auto' }}
-        >
-          All ({products.length})
-        </button>
-        {categories.filter(c => !c.parent_id).map(c => {
-          const subtreeIds = getAllDescendantCatIds(c.id);
-          const count = products.filter(p => subtreeIds.includes(p.category_id)).length;
-          const isSelected = currentFolderId === c.id;
-          return (
-            <button
-              key={c.id}
-              type="button"
-              className={`cat-chip ${isSelected && !searchTerm ? 'active' : ''}`}
-              onClick={() => { setSearchTerm(''); setCurrentFolderId(c.id); }}
-              style={{ fontSize: 11.5, padding: '4px 10px', whiteSpace: 'normal', wordBreak: 'break-word', height: 'auto', textAlign: 'left' }}
-            >
-              📁 {c.name} ({count})
-            </button>
-          );
-        })}
       </div>
 
       {/* Breadcrumb Trail if inside sub-folder */}
@@ -221,35 +214,65 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
         </div>
       )}
 
-      {/* Sub-Folders Grid if current level has children (Fully displayed without truncation) */}
-      {!searchTerm.trim() && currentLevelFolders.length > 0 && currentFolderId !== null && (
-        <div className="pos-category-tiles" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6, marginBottom: 8 }}>
-          <button
-            type="button"
-            className="pos-category-tile back"
-            onClick={() => setCurrentFolderId(currentCategory?.parent_id || null)}
-            style={{ minHeight: 44, padding: '6px 10px', height: 'auto' }}
-          >
-            <strong style={{ fontSize: 12 }}>← Back</strong>
-          </button>
-
-          {currentLevelFolders.map(folder => (
-            <button
-              key={folder.id}
-              type="button"
-              className="pos-category-tile"
-              onClick={() => { setSearchTerm(''); setCurrentFolderId(folder.id); }}
-              style={{ minHeight: 44, padding: '6px 10px', height: 'auto', textAlign: 'left' }}
-            >
-              <strong style={{ fontSize: 12, display: 'block', whiteSpace: 'normal', wordBreak: 'break-word' }}>📁 {folder.name}</strong>
-              <small style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 2 }}>{folder.productCount} items</small>
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* Product Results Grid (Shop-POS Product Tiles Style) */}
       <div className="pos-product-tiles">
+        {!searchTerm.trim() && currentFolderId !== null && (
+          <button
+            type="button"
+            className="product-tile pos-folder-product-tile back"
+            onClick={() => openFolder(currentCategory?.parent_id || null)}
+          >
+            <span className="pos-folder-icon" aria-hidden="true">←</span>
+            <div>
+              <div className="pos-product-name">Back</div>
+              <div className="pos-product-code">Previous folder</div>
+            </div>
+          </button>
+        )}
+
+        {!searchTerm.trim() && currentLevelFolders.map(folder => (
+          <button
+            key={folder.id}
+            type="button"
+            className="product-tile pos-folder-product-tile"
+            onClick={() => openFolder(folder.id)}
+          >
+            <span className="pos-folder-icon" aria-hidden="true">📁</span>
+            <div>
+              <div className="pos-product-name">{folder.name}</div>
+              <div className="pos-product-code">{folder.productCount} product{folder.productCount === 1 ? '' : 's'}</div>
+            </div>
+          </button>
+        ))}
+
+        {!searchTerm.trim() && currentFolderId === null && uncategorizedCount > 0 && (
+          <button
+            type="button"
+            className="product-tile pos-folder-product-tile"
+            onClick={() => openFolder(UNCATEGORIZED_FOLDER_ID)}
+          >
+            <span className="pos-folder-icon" aria-hidden="true">📦</span>
+            <div>
+              <div className="pos-product-name">Uncategorized Products</div>
+              <div className="pos-product-code">{uncategorizedCount} product{uncategorizedCount === 1 ? '' : 's'}</div>
+            </div>
+          </button>
+        )}
+
+        {!searchTerm.trim() && currentFolderId === null && availableTransitGroupCount > 0 && (
+          <button
+            type="button"
+            className="product-tile pos-folder-product-tile transit-folder"
+            onClick={() => openFolder(TRANSIT_GROUPS_FOLDER_ID)}
+          >
+            <span className="pos-folder-icon" aria-hidden="true">🚚</span>
+            <div>
+              <div className="pos-product-name">Unconfirmed Transit Groups</div>
+              <div className="pos-product-code">{availableTransitGroupCount} group{availableTransitGroupCount === 1 ? '' : 's'}</div>
+            </div>
+          </button>
+        )}
+
         {visibleIncomingGroups.map(group => (
           <div key={group.id} className="product-tile in-transit-tile" onClick={() => onAddToCart(group, 1, false)}>
             <div>
@@ -271,13 +294,16 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           const hasAvailable = (stock.qty_available || 0) > 0;
           const incomingAvailable = Math.max(0, (Number(stock.qty_in_transit) || 0) - (Number(stock.qty_in_transit_reserved) || 0));
           const hasTransit = incomingAvailable > 0;
+          const canAdd = stockView === 'incoming' ? hasTransit : hasAvailable;
           const catPath = getCategoryPath ? getCategoryPath(p.category_id) : '';
 
           return (
             <div
               key={p.id}
-              className={`product-tile ${!hasAvailable ? (hasTransit ? 'in-transit-tile' : 'out-of-stock') : ''}`}
-              onClick={() => onAddToCart(stockView === 'incoming' ? { ...p, pos_transit_only: true } : p, 1, false)}
+              className={`product-tile ${canAdd ? (stockView === 'incoming' ? 'in-transit-tile' : '') : 'out-of-stock'}`}
+              onClick={() => canAdd && onAddToCart(stockView === 'incoming' ? { ...p, pos_transit_only: true } : p, 1, false)}
+              aria-disabled={!canAdd}
+              title={!canAdd ? 'Out of stock' : undefined}
             >
               <div>
                 <div className="pos-product-name" title={p.name}>
@@ -313,6 +339,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); onAddToCart(stockView === 'incoming' ? { ...p, pos_transit_only: true } : p, 1, false); }}
+                      disabled={!canAdd}
                       className="secondary-button small-button"
                       style={{ padding: '2px 6px', fontSize: 11, fontWeight: 700 }}
                       title="Add to Bill"
@@ -322,6 +349,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
                     {stockView === 'on_hand' && <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); onAddToCart(p, 1, true); }}
+                      disabled={!canAdd}
                       className="secondary-button small-button"
                       style={{ padding: '2px 6px', fontSize: 10, color: '#52e37e', borderColor: 'rgba(82, 227, 126, 0.4)' }}
                       title="Add as 0-Price Warranty Replacement"
@@ -335,7 +363,8 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           );
         })}
 
-        {visibleProducts.length === 0 && visibleIncomingGroups.length === 0 && (
+        {visibleProducts.length === 0 && visibleIncomingGroups.length === 0 &&
+          (searchTerm.trim() || (currentFolderId !== null && currentLevelFolders.length === 0)) && (
           <div style={{
             gridColumn: '1 / -1',
             textAlign: 'center',
@@ -348,9 +377,7 @@ export default function ProductSearchGrid({ onAddToCart, customer }) {
           }}>
             {searchTerm
               ? `No products found matching "${searchTerm}"`
-              : (currentCategory
-                ? `No ${stockView === 'incoming' ? 'in-transit' : 'in-stock'} products inside "${currentCategory.name}" folder.`
-                : `No ${stockView === 'incoming' ? 'unreserved in-transit' : 'available in-stock'} products found.`)}
+              : `No ${stockView === 'incoming' ? 'unreserved in-transit' : ''} products inside "${breadcrumbs.at(-1)?.name || currentCategory?.name || 'this'}" folder.`}
           </div>
         )}
       </div>

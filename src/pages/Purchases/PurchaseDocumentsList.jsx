@@ -1196,9 +1196,9 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
 
       {/* Selected Purchase Document Details Drawer */}
       {selectedDoc && (
-        <div className="panel-card" style={{ marginTop: 20, borderTop: '3px solid #52e37e' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div>
+        <div className="panel-card purchase-details-card" style={{ marginTop: 20, borderTop: '3px solid #52e37e' }}>
+          <div className="purchase-details-header">
+            <div className="purchase-details-heading">
               <h3 style={{ margin: 0 }}>
                 Purchase Document: <span className="mono" style={{ color: '#52e37e' }}>{selectedDoc.doc_no || selectedDoc.grn_no}</span>
               </h3>
@@ -1206,7 +1206,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
                 Supplier: <strong>{selectedDoc.supplier_name}</strong> &bull; Received Date: {formatDate(selectedDoc.receipt_date)} {selectedDoc.shipment_no && `• Transit Ref: ${selectedDoc.shipment_no}`}
               </small>
             </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div className="purchase-details-actions">
               <button
                 type="button"
                 onClick={() => generatePurchaseInvoicePDF(selectedDoc, companySettings, products)}
@@ -1235,6 +1235,8 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
             </div>
           </div>
 
+          <div className="purchase-details-scroll-hint">Swipe sideways to view all item details</div>
+          <div className="purchase-details-table">
           <table>
             <thead>
               <tr>
@@ -1276,6 +1278,7 @@ export default function PurchaseDocumentsList({ onNavigateTab }) {
               </tr>
             </tfoot>
           </table>
+          </div>
         </div>
       )}
     </div>
