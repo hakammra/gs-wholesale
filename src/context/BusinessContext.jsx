@@ -3713,6 +3713,7 @@ export function BusinessProvider({ children }) {
 
     try {
       if (supabase) {
+        await supabase.rpc('admin_reset_retail_bridge', { p_remove_configuration: true });
         await supabase.from('sales_document_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('sales_documents').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('transit_shipment_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
@@ -3770,6 +3771,7 @@ export function BusinessProvider({ children }) {
 
     try {
       if (supabase) {
+        await supabase.rpc('admin_reset_retail_bridge', { p_remove_configuration: false });
         await supabase.from('sales_document_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('sales_documents').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         await supabase.from('purchase_receipt_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
