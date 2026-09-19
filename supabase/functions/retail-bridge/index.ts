@@ -15,6 +15,27 @@ function authorized(request: Request) {
   return expected.length >= 32 && supplied.length === expected.length && supplied === expected;
 }
 
+function messageOf(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error && typeof error === 'object') {
+    const detail = error as Record<string, unknown>;
+    for (const candidate of [detail.message, detail.error_description, detail.error, detail.details, detail.hint]) {
+      if (candidate && candidate !== error) {
+        const message = messageOf(candidate);
+        if (message !== 'Retail bridge request failed.') return message;
+      }
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== '{}') return serialized;
+    } catch {
+      // Use the stable fallback below.
+    }
+  }
+  return 'Retail bridge request failed.';
+}
+
 Deno.serve(async (request) => {
   if (!authorized(request)) {
     return response({ success: false, error: 'Unauthorized retail bridge request.' }, 401);
@@ -42,6 +63,19 @@ Deno.serve(async (request) => {
     }
 
     const payload = await request.json();
+    if (payload?.action === 'cancel_sale') {
+      if (!payload.idempotency_key || !payload.retail_sale_reference || !payload.wholesale_document_id) {
+        return response({ success: false, error: 'Cancellation requires the idempotency key, Retail sale reference and Wholesale document ID.' }, 400);
+      }
+      const { data, error } = await admin.rpc('retail_bridge_cancel_sale', {
+        p_idempotency_key: String(payload.idempotency_key),
+        p_retail_sale_reference: String(payload.retail_sale_reference),
+        p_wholesale_document_id: String(payload.wholesale_document_id)
+      });
+      if (error) throw error;
+      return response(data);
+    }
+
     if (payload?.action !== 'post_sale') {
       return response({ success: false, error: 'Unsupported bridge action.' }, 400);
     }
@@ -66,7 +100,7 @@ Deno.serve(async (request) => {
     if (error) throw error;
     return response(data);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Retail bridge request failed.';
+    const message = messageOf(error);
     return response({ success: false, error: message }, 400);
   }
 });
