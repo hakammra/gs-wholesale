@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useBusiness } from '../../context/BusinessContext';
 import { formatCurrency } from '../../lib/formatters';
 
@@ -11,15 +11,105 @@ export default function CustomerHeader({
 }) {
   const { customers = [] } = useBusiness();
 
-  const handleCustomerChange = (e) => {
-    const custId = e.target.value;
-    const cust = customers.find(c => String(c.id) === String(custId)) || null;
-    onSelectCustomer(cust);
-  };
-
   const liveCustomer = selectedCustomer
     ? (customers.find(c => String(c.id) === String(selectedCustomer.id)) || selectedCustomer)
     : null;
+
+  const customerLabel = (customer) => customer
+    ? `${customer.customer_code ? `${customer.customer_code} - ` : ''}${customer.business_name || customer.contact_person || 'Customer'}`
+    : '';
+
+  const [customerQuery, setCustomerQuery] = useState(() => customerLabel(liveCustomer));
+  const [isCustomerListOpen, setIsCustomerListOpen] = useState(false);
+  const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(0);
+  const customerPickerRef = useRef(null);
+  const customerResultsRef = useRef(null);
+  const isTypingCustomerRef = useRef(false);
+  const syncedCustomerIdRef = useRef(liveCustomer?.id || null);
+
+  useEffect(() => {
+    const nextCustomerId = liveCustomer?.id || null;
+    if (nextCustomerId === syncedCustomerIdRef.current) return;
+    syncedCustomerIdRef.current = nextCustomerId;
+    if (nextCustomerId) {
+      setCustomerQuery(customerLabel(liveCustomer));
+      isTypingCustomerRef.current = false;
+    } else if (!isTypingCustomerRef.current) {
+      setCustomerQuery('');
+    }
+  }, [liveCustomer?.id]);
+
+  useEffect(() => {
+    const closeOnOutsideClick = (event) => {
+      if (!customerPickerRef.current?.contains(event.target)) setIsCustomerListOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
+  }, []);
+
+  const filteredCustomers = useMemo(() => {
+    const search = customerQuery.trim().toLowerCase();
+    return customers
+      .filter(customer => customer.is_active !== false)
+      .filter(customer => {
+        if (!search) return true;
+        return [
+          customerLabel(customer),
+          customer.business_name,
+          customer.customer_code,
+          customer.contact_person,
+          customer.phone,
+          customer.whatsapp,
+          customer.email
+        ].filter(Boolean).join(' ').toLowerCase().includes(search);
+      })
+      .sort((a, b) => String(a.business_name || '').localeCompare(String(b.business_name || '')))
+      .slice(0, 30);
+  }, [customers, customerQuery]);
+
+  useEffect(() => {
+    setHighlightedCustomerIndex(0);
+  }, [customerQuery]);
+
+  useEffect(() => {
+    if (!isCustomerListOpen) return;
+    customerResultsRef.current
+      ?.querySelector(`[data-customer-index="${highlightedCustomerIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [highlightedCustomerIndex, isCustomerListOpen]);
+
+  const selectCustomer = (customer) => {
+    isTypingCustomerRef.current = false;
+    syncedCustomerIdRef.current = customer?.id || null;
+    setCustomerQuery(customerLabel(customer));
+    setIsCustomerListOpen(false);
+    onSelectCustomer(customer || null);
+  };
+
+  const handleCustomerSearch = (event) => {
+    isTypingCustomerRef.current = true;
+    setCustomerQuery(event.target.value);
+    setIsCustomerListOpen(true);
+    if (liveCustomer) onSelectCustomer(null);
+  };
+
+  const handleCustomerKeyDown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setIsCustomerListOpen(true);
+      setHighlightedCustomerIndex(index => Math.min(index + 1, Math.max(filteredCustomers.length - 1, 0)));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setHighlightedCustomerIndex(index => Math.max(index - 1, 0));
+    } else if (event.key === 'Enter' && isCustomerListOpen && filteredCustomers.length) {
+      event.preventDefault();
+      selectCustomer(filteredCustomers[highlightedCustomerIndex] || filteredCustomers[0]);
+    } else if (event.key === 'Escape') {
+      setIsCustomerListOpen(false);
+      isTypingCustomerRef.current = false;
+      setCustomerQuery(customerLabel(liveCustomer));
+    }
+  };
 
   const isCreditRestricted = liveCustomer && !liveCustomer.credit_allowed;
   const isOverLimit = liveCustomer && (Number(liveCustomer.current_receivable || 0) > Number(liveCustomer.credit_limit || 0));
@@ -46,20 +136,79 @@ export default function CustomerHeader({
           <label style={{ fontSize: 11, color: liveCustomer ? 'var(--muted)' : '#ffca58', display: 'block', marginBottom: 2 }}>
             WHOLESALE CUSTOMER {!liveCustomer && '• REQUIRED'}
           </label>
-          <select
-            value={liveCustomer?.id || ''}
-            onChange={handleCustomerChange}
-            required
-            aria-required="true"
-            style={{ fontWeight: 600 }}
-          >
-            <option value="">Select wholesale customer…</option>
-            {customers.map(c => (
-              <option key={c.id} value={c.id}>
-                {c.customer_code} - {c.business_name} ({c.price_tier || 'Standard'})
-              </option>
-            ))}
-          </select>
+          <div className="pos-customer-combobox" ref={customerPickerRef}>
+            <div className="pos-customer-search-wrap">
+              <input
+                type="search"
+                value={customerQuery}
+                onChange={handleCustomerSearch}
+                onFocus={(event) => {
+                  setIsCustomerListOpen(true);
+                  event.currentTarget.select();
+                }}
+                onKeyDown={handleCustomerKeyDown}
+                placeholder="Search name, code, phone or contact…"
+                autoComplete="off"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={isCustomerListOpen}
+                aria-controls="pos-customer-results"
+                aria-activedescendant={isCustomerListOpen && filteredCustomers[highlightedCustomerIndex]
+                  ? `pos-customer-option-${filteredCustomers[highlightedCustomerIndex].id}`
+                  : undefined}
+                aria-required="true"
+                className={liveCustomer ? 'has-selection' : ''}
+              />
+              {(customerQuery || liveCustomer) && (
+                <button
+                  type="button"
+                  className="pos-customer-clear"
+                  onClick={() => {
+                    isTypingCustomerRef.current = false;
+                    selectCustomer(null);
+                    setIsCustomerListOpen(true);
+                  }}
+                  aria-label="Clear selected customer"
+                  title="Clear customer"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            {isCustomerListOpen && (
+              <div id="pos-customer-results" className="pos-customer-results" role="listbox" ref={customerResultsRef}>
+                {filteredCustomers.map((customer, index) => (
+                  <button
+                    key={customer.id}
+                    type="button"
+                    role="option"
+                    id={`pos-customer-option-${customer.id}`}
+                    data-customer-index={index}
+                    aria-selected={String(customer.id) === String(liveCustomer?.id)}
+                    className={`${index === highlightedCustomerIndex ? 'highlighted' : ''} ${String(customer.id) === String(liveCustomer?.id) ? 'selected' : ''}`}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                    onClick={() => selectCustomer(customer)}
+                  >
+                    <span>
+                      <strong>{customer.business_name}</strong>
+                      <small>{customer.customer_code || 'No code'}{customer.contact_person ? ` • ${customer.contact_person}` : ''}</small>
+                    </span>
+                    <span className="pos-customer-result-meta">
+                      <small>{customer.phone || customer.whatsapp || 'No phone'}</small>
+                      <b>{customer.price_tier || 'Standard'}</b>
+                    </span>
+                  </button>
+                ))}
+                {!filteredCustomers.length && (
+                  <div className="pos-customer-empty">
+                    No customers match “{customerQuery.trim()}”.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {liveCustomer && (

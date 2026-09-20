@@ -631,6 +631,8 @@ label input, label select, label textarea { margin-top: 6px; }
 .product-price { text-align: right; white-space: nowrap; }
 
 .pos-customer-banner {
+  position: relative;
+  z-index: 20;
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 12px;
@@ -2681,9 +2683,111 @@ tr:hover td { background: #303030; }
 }
 
 /* Folder-first wholesale catalog and required customer state */
-.pos-customer-select-field.customer-required select {
+.pos-customer-select-field.customer-required select,
+.pos-customer-select-field.customer-required .pos-customer-search-wrap input {
   border-color: rgba(255, 202, 88, .7);
   box-shadow: 0 0 0 1px rgba(255, 202, 88, .12);
+}
+
+.pos-customer-combobox { position: relative; width: 100%; }
+.pos-customer-search-wrap { position: relative; width: 100%; }
+.pos-customer-search-wrap input {
+  width: 100%;
+  min-width: 0;
+  padding-right: 36px;
+  font-weight: 600;
+}
+.pos-customer-search-wrap input.has-selection {
+  border-color: rgba(82, 227, 126, .62);
+  box-shadow: inset 3px 0 rgba(82, 227, 126, .75);
+}
+.pos-customer-search-wrap input::-webkit-search-cancel-button { display: none; }
+.pos-customer-clear {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 27px;
+  height: 27px;
+  min-width: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  background: transparent;
+  font-size: 19px;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+.pos-customer-clear:hover { color: #fff; background: rgba(255,255,255,.08); }
+.pos-customer-results {
+  position: absolute;
+  z-index: 250;
+  top: calc(100% + 5px);
+  left: 0;
+  width: min(470px, calc(100vw - 32px));
+  max-height: min(360px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid #485866;
+  border-radius: 8px;
+  background: #171c21;
+  box-shadow: 0 18px 45px rgba(0,0,0,.52);
+}
+.pos-customer-results > button {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.pos-customer-results > button:hover,
+.pos-customer-results > button.highlighted {
+  border-color: rgba(34, 168, 232, .45);
+  background: rgba(34, 168, 232, .13);
+}
+.pos-customer-results > button.selected {
+  border-color: rgba(82, 227, 126, .48);
+  background: rgba(82, 227, 126, .1);
+}
+.pos-customer-results > button > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.pos-customer-results strong {
+  overflow: hidden;
+  color: #fff;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pos-customer-results small { color: var(--muted); font-size: 10.5px; }
+.pos-customer-result-meta {
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+.pos-customer-result-meta b {
+  color: var(--primary);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.pos-customer-empty {
+  padding: 18px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 .pos-product-tiles .pos-folder-product-tile {
