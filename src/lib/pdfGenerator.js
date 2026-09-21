@@ -100,27 +100,19 @@ export function generateInvoicePDF(doc, companySettings = {}, customer = null, p
     }
   }
 
-  // 3. Bill To & Document Metadata Row
+  // 3. Customer & Document Metadata Row
   const metaY = Math.max(curY + 8, 54);
 
-  // Left: Bill To
+  // Left: Customer name only
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(9.5);
   pdf.setTextColor(20, 20, 20);
-  pdf.text(isReservation ? 'Reserved for' : 'Bill to', margin, metaY);
+  pdf.text('Customer', margin, metaY);
 
   pdf.setFont('helvetica', 'normal');
   pdf.setFontSize(9.5);
-  const custName = customer?.business_name || doc.customer?.business_name || doc.customer_name || 'Cash / Counter Customer';
+  const custName = customer?.business_name || doc.customer?.business_name || doc.customer_name || 'Customer';
   pdf.text(custName, margin, metaY + 5.5);
-
-  let custSubY = metaY + 10;
-  const custAddr = customer?.billing_address || doc.customer?.billing_address;
-  if (custAddr) {
-    pdf.setFontSize(8.5);
-    pdf.setTextColor(80, 80, 80);
-    pdf.text(custAddr, margin, custSubY);
-  }
 
   // Right: Metadata table
   const metaColLabelX = pageWidth - margin - 75;
@@ -413,18 +405,18 @@ export function buildPurchasePDF(purchaseDoc, companySettings = {}, products = [
     }
   }
 
-  // 3. Vendor / Supplier Details & Document Metadata
+  // 3. Supplier Details & Document Metadata
   const metaY = Math.max(curY + 8, 54);
 
   // Left: Supplier
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(9.5);
   pdf.setTextColor(20, 20, 20);
-  pdf.text('Supplier / Vendor', margin, metaY);
+  pdf.text('Supplier', margin, metaY);
 
   pdf.setFont('helvetica', 'normal');
   pdf.setFontSize(9.5);
-  const suppName = purchaseDoc.supplier_name || purchaseDoc.supplier?.name || 'Local / Overseas Supplier';
+  const suppName = purchaseDoc.supplier_name || purchaseDoc.supplier?.name || 'Supplier';
   pdf.text(suppName, margin, metaY + 5.5);
 
   let suppTerms = purchaseDoc.payment_type ? `Terms: ${String(purchaseDoc.payment_type).toUpperCase()}` : '';
@@ -611,9 +603,7 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
   const footerText = companySettings.footer_text || 'Created with Gatronix POS - www.gatronix.com';
   const logoData = companySettings.logo_url || getDefaultLogoDataUrl();
 
-  const custName = customer?.business_name || doc.customer?.business_name || doc.customer_name || 'Cash / Counter Customer';
-  const custAddr = customer?.billing_address || doc.customer?.billing_address || '';
-  const custPhone = customer?.phone || doc.customer?.phone || doc.customer_phone || '';
+  const custName = customer?.business_name || doc.customer?.business_name || doc.customer_name || 'Customer';
 
   const grandTotal = Number(doc.grand_total || 0);
   const paidAmount = Number(doc.paid_amount || 0);
@@ -728,10 +718,8 @@ export function printInvoiceDocument(doc, companySettings = {}, customer = null,
 
         <div class="meta-grid">
           <div class="meta-block">
-            <div class="meta-label">${isReservation ? 'Reserved For' : 'Bill To'}</div>
+            <div class="meta-label">Customer</div>
             <div class="meta-val">${custName}</div>
-            ${custAddr ? `<div class="meta-sub">${custAddr}</div>` : ''}
-            ${custPhone ? `<div class="meta-sub">Tel: ${custPhone}</div>` : ''}
           </div>
           <div class="meta-block" style="text-align: right;">
             <div class="meta-label">${isReservation ? 'Reservation Details' : 'Invoice Details'}</div>
@@ -815,7 +803,7 @@ export function printPurchaseDocument(purchaseDoc, companySettings = {}, product
   const footerText = companySettings.footer_text || 'Created with Gatronix POS - www.gatronix.com';
   const logoData = companySettings.logo_url || getDefaultLogoDataUrl();
 
-  const suppName = purchaseDoc.supplier_name || purchaseDoc.supplier?.name || 'Local / Overseas Supplier';
+  const suppName = purchaseDoc.supplier_name || purchaseDoc.supplier?.name || 'Supplier';
   const totalAmount = Number(purchaseDoc.total_amount_lkr || purchaseDoc.total_landed_lkr || 0);
 
   const itemsRows = (purchaseDoc.items || []).map((it, idx) => {
@@ -886,7 +874,7 @@ export function printPurchaseDocument(purchaseDoc, companySettings = {}, product
 
         <div class="meta-grid">
           <div class="meta-block">
-            <div class="meta-label">Supplier / Vendor</div>
+            <div class="meta-label">Supplier</div>
             <div class="meta-val">${suppName}</div>
             ${purchaseDoc.payment_type ? `<div class="meta-sub">Terms: ${String(purchaseDoc.payment_type).toUpperCase()}</div>` : ''}
           </div>
