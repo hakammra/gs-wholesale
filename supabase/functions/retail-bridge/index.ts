@@ -63,6 +63,17 @@ Deno.serve(async (request) => {
     }
 
     const payload = await request.json();
+    if (payload?.action === 'cancel_pending') {
+      if (!payload.idempotency_key || !payload.retail_sale_reference) {
+        return response({ success: false, error: 'Cancellation requires the idempotency key and Retail sale reference.' }, 400);
+      }
+      const { data, error } = await admin.rpc('retail_bridge_cancel_pending_sale', {
+        p_idempotency_key: String(payload.idempotency_key),
+        p_retail_sale_reference: String(payload.retail_sale_reference)
+      });
+      if (error) throw error;
+      return response(data);
+    }
     if (payload?.action === 'cancel_sale') {
       if (!payload.idempotency_key || !payload.retail_sale_reference || !payload.wholesale_document_id) {
         return response({ success: false, error: 'Cancellation requires the idempotency key, Retail sale reference and Wholesale document ID.' }, 400);
