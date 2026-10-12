@@ -122,7 +122,8 @@ export default function TransitShipmentList({ onNavigateTab }) {
   const getShipmentCosts = (shipment) => {
     const goods = Number(shipment?.goods_amount_paid_lkr) || ((Number(shipment?.foreign_items_subtotal) || 0) * (Number(shipment?.exchange_rate_snapshot) || 1));
     const estimate = Math.max(0, Number(shipment?.estimated_landed_expenses_lkr) || ((Number(shipment?.total_estimated_cost_lkr) || 0) - goods));
-    const actual = Math.max(0, Number(shipment?.total_landed_expenses_lkr) || 0);
+    const actual = Math.max(0, Number(shipment?.total_landed_expenses_lkr) ||
+      (shipment?.landed_expenses || []).reduce((sum, expense) => sum + (Number(expense.lkr_amount ?? expense.amount_lkr) || 0), 0));
     return { goods, estimate, actual, final: goods + actual, basis: goods + (actual > 0 ? actual : estimate) };
   };
 
@@ -670,6 +671,11 @@ export default function TransitShipmentList({ onNavigateTab }) {
     }
     if (arrivalCostDifference < -0.01) {
       notifyWarning(`Final classified value is ${formatCurrency(Math.abs(arrivalCostDifference))} below the goods amount already paid. Increase the landed costs or correct the goods payment before completing arrival.`);
+      return;
+    }
+
+    if (arrivalShippingAlreadyRecorded && Math.abs(arrivalShippingTotal - getShipmentCosts(shipmentToReceive).actual) > 0.01) {
+      notifyWarning(`Shipping of ${formatCurrency(getShipmentCosts(shipmentToReceive).actual)} is already recorded. The final item value must total ${formatCurrency(arrivalGoodsPaid + getShipmentCosts(shipmentToReceive).actual)}. Enter the landed unit costs including that shipping.`);
       return;
     }
 
@@ -1838,7 +1844,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                                 />
                               </td>
                               <td style={{ textAlign: 'right' }}>
-                                <input type="number" min="0" step="0.01" className="mono table-number-input" value={item.final_landed_unit_cost_lkr} onChange={(event) => updateArrivalRow(item.row_id, { final_landed_unit_cost_lkr: Number(event.target.value) || 0 })} style={{ width: 130, textAlign: 'right' }} disabled={arrivalShippingAlreadyRecorded} />
+                                <input type="number" min="0" step="0.01" className="mono table-number-input" value={item.final_landed_unit_cost_lkr} onChange={(event) => updateArrivalRow(item.row_id, { final_landed_unit_cost_lkr: event.target.value })} style={{ width: 130, textAlign: 'right' }} />
                               </td>
                               <td className="mono font-semibold" style={{ textAlign: 'right', color: '#52e37e' }}>
                                 {formatCurrency(((Number(item.received_sellable_qty) || 0) + (Number(item.damaged_qty) || 0)) * (Number(item.final_landed_unit_cost_lkr) || 0))}
@@ -1863,7 +1869,7 @@ export default function TransitShipmentList({ onNavigateTab }) {
                   <div style={{ marginTop: 12, padding: 12, background: 'rgba(82, 227, 126, 0.08)', border: '1px solid rgba(82, 227, 126, 0.45)', borderRadius: 6 }}>
                     <strong>Shipping payment already recorded</strong>
                     <div style={{ marginTop: 4, color: 'var(--muted)', fontSize: 12 }}>
-                      This older shipment already has landed-cost cash flow, so arrival will update stock and WAC without creating a duplicate payment.
+                      Enter the actual products and landed costs including the shipping already paid. The final total must match goods plus recorded shipping; arrival will update stock and WAC without another shipping payment.
                     </div>
                   </div>
                 )}

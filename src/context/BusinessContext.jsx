@@ -3163,13 +3163,25 @@ export function BusinessProvider({ children }) {
     const pur = purchases.find(p => p.id === purchaseId);
     if (!pur) return;
 
+    const sourceTransit = transitShipments.find(shipment => shipment.id === pur.transit_shipment_id);
+    const restoreToTransit = !!sourceTransit && !String(sourceTransit.shipment_no || '').startsWith('DIR-TRN-');
+    const restoredTransitQty = (item) => {
+      if (!restoreToTransit) return 0;
+      const sourceLine = (sourceTransit.items || []).find(line => line.id === item.transit_shipment_item_id);
+      if (item.source_line_type === 'group' || sourceLine?.line_type === 'group' || sourceLine?.transit_group_id) return 0;
+      return Number(sourceLine?.shipped_qty ?? sourceLine?.qty ?? item.shipped_qty ?? item.qty) || 0;
+    };
+
     const deletionCostUpdates = pur.status === 'draft' ? [] : (pur.items || []).map(item => {
       const product = products.find(entry => entry.id === item.product_id);
       if (!product || !isValidUUID(product.id)) return null;
-      const purchaseQty = Number(item.received_sellable_qty || item.shipped_qty || item.qty) || 0;
+      const purchaseQty = Number(item.received_sellable_qty ?? item.shipped_qty ?? item.qty) || 0;
       const currentQty = Number(stockBalances[product.id]?.qty_on_hand) || 0;
       if (currentQty < purchaseQty) {
         throw new Error(`Cannot delete ${pur.doc_no}: ${product.name} has already been sold. Edit the document instead.`);
+      }
+      if (currentQty - purchaseQty < (Number(stockBalances[product.id]?.qty_reserved) || 0)) {
+        throw new Error(`Cannot delete ${pur.doc_no}: ${product.name} is reserved. Release the affected reservations first.`);
       }
       const purchaseCost = Number(item.final_landed_unit_cost_lkr || item.unit_cost_lkr || item.unit_cost) || 0;
       const currentWac = Number(product.weighted_cost_lkr || product.cost_price || product.cost) || 0;
@@ -3183,9 +3195,6 @@ export function BusinessProvider({ children }) {
     const linkedPayments = payments.filter(payment => payment.purchase_id === purchaseId || payment.reference === pur.doc_no || payment.reference === pur.grn_no);
     for (const payment of linkedPayments) await reversePaymentBalance(payment, 'Reversing purchase payment');
 
-    const sourceTransit = transitShipments.find(shipment => shipment.id === pur.transit_shipment_id);
-    const restoreToTransit = !!sourceTransit && !String(sourceTransit.shipment_no || '').startsWith('DIR-TRN-');
-
     // Transit purchases already carry the supplier payable on the shipment.
     // Direct credit purchases own their payable and must reverse it on deletion.
     if (pur.status !== 'draft' && !restoreToTransit && pur.payment_type === 'credit' && pur.supplier_id) {
@@ -3197,14 +3206,14 @@ export function BusinessProvider({ children }) {
       const stockReversals = (pur.items || [])
         .filter(item => isValidUUID(item.product_id))
         .map(item => {
-          const sellable = Number(item.received_sellable_qty || item.shipped_qty || item.qty) || 0;
-          const shipped = Number(item.shipped_qty || item.received_sellable_qty || item.qty) || 0;
+          const sellable = Number(item.received_sellable_qty ?? item.shipped_qty ?? item.qty) || 0;
+          const shipped = restoredTransitQty(item);
           const damaged = Math.min(Number(stockBalances[item.product_id]?.qty_damaged) || 0, Number(item.damaged_qty) || 0);
           return supabase.rpc('rpc_adjust_stock_balance', {
             p_product_id: item.product_id,
             p_qty_on_hand_delta: -sellable,
             p_qty_reserved_delta: 0,
-            p_qty_in_transit_delta: restoreToTransit ? shipped : 0,
+            p_qty_in_transit_delta: shipped,
             p_qty_damaged_delta: -damaged
           });
         });
@@ -3236,12 +3245,14 @@ export function BusinessProvider({ children }) {
         const updated = { ...prev };
         (pur.items || []).forEach(it => {
           const pId = it.product_id;
-          const sellable = Number(it.received_sellable_qty || it.shipped_qty || it.qty) || 0;
+          const sellable = Number(it.received_sellable_qty ?? it.shipped_qty ?? it.qty) || 0;
           const cur = updated[pId] || { qty_on_hand: 0, qty_reserved: 0, qty_available: 0, qty_in_transit: 0, qty_damaged: 0 };
           updated[pId] = {
             ...cur,
             qty_on_hand: Math.max(0, (cur.qty_on_hand || 0) - sellable),
-            qty_available: Math.max(0, (cur.qty_available || 0) - sellable)
+            qty_available: Math.max(0, (cur.qty_on_hand || 0) - sellable - (cur.qty_reserved || 0)),
+            qty_in_transit: (Number(cur.qty_in_transit) || 0) + restoredTransitQty(it),
+            qty_damaged: Math.max(0, (Number(cur.qty_damaged) || 0) - (Number(it.damaged_qty) || 0))
           };
         });
         return updated;
@@ -3256,6 +3267,17 @@ export function BusinessProvider({ children }) {
           cost: update.weightedCost
         } : product;
       }));
+
+      if (restoreToTransit) {
+        setTransitShipments(prev => prev.map(shipment => shipment.id === sourceTransit.id ? {
+          ...shipment,
+          status: 'in_transit',
+          actual_arrival_date: null,
+          arrived_at: null,
+          purchase_doc_id: null,
+          purchase_doc_no: null
+        } : shipment));
+      }
 
     }
 
@@ -3810,6 +3832,15 @@ export function BusinessProvider({ children }) {
     if (!isValidUUID(docData.customer_id)) {
       throw new Error('Select a wholesale customer before saving this document.');
     }
+    if (docData.doc_type === 'sales_invoice') {
+      docData = { ...docData, items: (docData.items || []).map(item => {
+        const product = products.find(entry => entry.id === (item.product_id || item.product?.id));
+        return {
+          ...item,
+          unit_cost_snapshot: Number(product?.weighted_cost_lkr ?? product?.cost_price ?? item.unit_cost_snapshot) || 0
+        };
+      }) };
+    }
     const prefix = isQuotation ? 'QT' : isReservation ? 'RES' : 'INV';
     const docNo = `${prefix}-${new Date().toISOString().slice(0,7).replace('-','')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -3867,7 +3898,7 @@ export function BusinessProvider({ children }) {
     const grandTotal = Math.max(0, itemsSubtotal - (Number(docData.discount_amount) || 0));
     const totalCostSnapshot = (docData.items || []).reduce((sum, item) => {
       const qty = Number(item.qty) || 1;
-      const unitCost = Number(item.unit_cost_snapshot || item.product?.weighted_cost_lkr || item.product?.cost_price) || 0;
+      const unitCost = Number(item.unit_cost_snapshot ?? item.product?.weighted_cost_lkr ?? item.product?.cost_price) || 0;
       return sum + (qty * unitCost);
     }, 0);
     const grossProfit = grandTotal - totalCostSnapshot;
@@ -4106,7 +4137,7 @@ export function BusinessProvider({ children }) {
       const unitPrice = item.is_warranty_replacement ? 0 : (Number(item.unit_price) || 0);
       const qty = Number(item.qty) || 1;
       const lineDiscount = item.is_warranty_replacement ? 0 : (Number(item.discount_amount) || 0);
-      const unitCost = Number(item.unit_cost_snapshot || item.product?.weighted_cost_lkr || item.product?.cost_price) || 0;
+      const unitCost = Number(item.unit_cost_snapshot ?? item.product?.weighted_cost_lkr ?? item.product?.cost_price) || 0;
       const lineTotal = Math.max(0, qty * unitPrice - lineDiscount);
       const lineProfit = lineTotal - (qty * unitCost);
       return {
@@ -4287,7 +4318,10 @@ export function BusinessProvider({ children }) {
       const unitPrice = isWarranty ? 0 : Math.max(0, Number(item.unit_price) || 0);
       const discountAmount = isWarranty ? 0 : Math.max(0, Number(item.discount_amount ?? item.line_discount) || 0);
       const lineTotal = Math.max(0, (qty * unitPrice) - discountAmount);
-      const unitCost = Number(item.unit_cost_snapshot || product?.weighted_cost_lkr || product?.cost_price) || 0;
+      const originalItem = (existingDoc.items || []).find(original =>
+        (item.id && original.id === item.id && (original.product_id || original.product?.id) === productId)
+      );
+      const unitCost = Number(originalItem?.unit_cost_snapshot ?? item.unit_cost_snapshot ?? product?.weighted_cost_lkr ?? product?.cost_price) || 0;
       if (!isValidUUID(productId)) throw new Error(`Select a valid product for ${product?.name || item.product_name || 'each line'}.`);
       if (qty <= 0) throw new Error(`Quantity must be greater than zero for ${product?.name || item.product_name || 'each line'}.`);
       return {
